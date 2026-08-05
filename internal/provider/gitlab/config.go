@@ -217,7 +217,9 @@ func decodeImage(n yaml.Node) (string, error) {
 }
 
 // decodeScriptList принимает before_script/script строкой (оборачивается в
-// срез из одного элемента) или списком строк.
+// срез из одного элемента) или списком строк. GitLab also allows nested
+// arrays inside the list (script: [[a, b], c]) and flattens them one
+// level — mirror that instead of failing on valid syntax (WR-03).
 func decodeScriptList(n yaml.Node) ([]string, error) {
 	switch n.Kind {
 	case 0: // ключ отсутствует
@@ -230,8 +232,21 @@ func decodeScriptList(n yaml.Node) ([]string, error) {
 		return []string{s}, nil
 	case yaml.SequenceNode:
 		var list []string
-		if err := n.Decode(&list); err != nil {
-			return nil, err
+		for _, item := range n.Content {
+			switch item.Kind {
+			case yaml.SequenceNode:
+				var nested []string
+				if err := item.Decode(&nested); err != nil {
+					return nil, err
+				}
+				list = append(list, nested...)
+			default:
+				var s string
+				if err := item.Decode(&s); err != nil {
+					return nil, err
+				}
+				list = append(list, s)
+			}
 		}
 		return list, nil
 	default:
@@ -240,14 +255,34 @@ func decodeScriptList(n yaml.Node) ([]string, error) {
 }
 
 // decodeVariables декодирует блок variables. Отсутствующий ключ — это nil,
-// а не ошибка.
+// а не ошибка. Values are decoded leniently: a plain scalar is taken as
+// is, and GitLab's expanded form (a mapping with value/description/...)
+// contributes its "value" key — both are valid GitLab syntax (WR-03).
 func decodeVariables(n yaml.Node) (map[string]string, error) {
 	if n.Kind == 0 {
 		return nil, nil
 	}
-	var vars map[string]string
-	if err := n.Decode(&vars); err != nil {
+	var raw map[string]yaml.Node
+	if err := n.Decode(&raw); err != nil {
 		return nil, err
+	}
+	vars := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if v.Kind == yaml.MappingNode {
+			var m struct {
+				Value string `yaml:"value"`
+			}
+			if err := v.Decode(&m); err != nil {
+				return nil, err
+			}
+			vars[k] = m.Value
+			continue
+		}
+		var s string
+		if err := v.Decode(&s); err != nil {
+			return nil, err
+		}
+		vars[k] = s
 	}
 	return vars, nil
 }
