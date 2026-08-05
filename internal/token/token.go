@@ -40,6 +40,7 @@ var ErrInsecurePermissions = errors.New("права конфиг-файла то
 func Resolve(host string) (Token, error) {
 	for _, name := range envVars {
 		if v := os.Getenv(name); v != "" {
+			warnEnvTokenHostMismatch(name, host)
 			return Token{
 				Secret: v,
 				Source: "переменная окружения " + name,
@@ -47,6 +48,34 @@ func Resolve(host string) (Token, error) {
 		}
 	}
 
+	return fromFileWrapped(host)
+}
+
+// warnEnvTokenHostMismatch warns on stderr when an environment token is
+// about to be sent to a host it is not scoped to. An env token is
+// host-agnostic while the host comes straight from the pasted URL, so a
+// look-alike host would silently receive a live credential (WR-02).
+// The expected host is GITLAB_HOST when set (glab semantics), otherwise
+// gitlab.com. This deliberately warns instead of failing: self-hosted
+// users with only an env token exported must keep working.
+func warnEnvTokenHostMismatch(name, host string) {
+	expected := normalizeHost(os.Getenv("GITLAB_HOST"))
+	if expected == "" {
+		expected = "gitlab.com"
+	}
+	if host == expected {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"предупреждение: токен из переменной окружения %s будет отправлен на хост %s из ссылки (ожидался %s); "+
+			"чтобы привязать токен к хосту, задайте GITLAB_HOST или перенесите токен в конфиг-файл\n",
+		name, host, expected,
+	)
+}
+
+// fromFileWrapped достаёт токен из конфиг-файла и оборачивает ошибки для
+// пользователя.
+func fromFileWrapped(host string) (Token, error) {
 	tok, err := fromFile(host)
 	if err != nil {
 		// ErrInsecurePermissions означает «файл есть, но читать его
