@@ -119,9 +119,11 @@ func runShell(args []string) {
 		fmt.Fprintf(os.Stderr, "предупреждение: джоба в статусе %s, а восстанавливать окружение имеет смысл для упавших\n", job.Status)
 	}
 
-	// Конфиг пайплайна не критичен для метаданных джобы: если его нет или он
-	// использует include/extends/!reference, печатаем то, что уже есть, и
-	// предупреждаем в stderr, а не прерываем работу.
+	// Конфиг пайплайна не критичен для метаданных джобы: если его нет, он
+	// использует include/extends/!reference или просто не разобрался,
+	// печатаем то, что уже есть, и предупреждаем в stderr, а не прерываем
+	// работу. Job metadata is already fetched at this point, so no
+	// config-side error justifies exit 1 (WR-04).
 	jobCfg := provider.JobConfig{}
 	cfg, err := p.MergedConfig(ctx, ref.ProjectPath, job.CommitSHA)
 	switch {
@@ -134,7 +136,7 @@ func runShell(args []string) {
 	case errors.Is(err, provider.ErrConfigNotFound), errors.Is(err, provider.ErrUnresolvedRefs):
 		fmt.Fprintf(os.Stderr, "предупреждение: %s\n", explain(err))
 	default:
-		fail(err)
+		fmt.Fprintf(os.Stderr, "предупреждение: конфиг пайплайна не разобран: %s\n", explain(err))
 	}
 
 	if err := render.Job(os.Stdout, job, jobCfg); err != nil {
