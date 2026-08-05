@@ -125,18 +125,24 @@ func runShell(args []string) {
 	// работу. Job metadata is already fetched at this point, so no
 	// config-side error justifies exit 1 (WR-04).
 	jobCfg := provider.JobConfig{}
-	cfg, err := p.MergedConfig(ctx, ref.ProjectPath, job.CommitSHA)
-	switch {
-	case err == nil:
-		if jc, ok := cfg.JobByName(job.Name); ok {
-			jobCfg = jc
-		} else {
-			fmt.Fprintf(os.Stderr, "предупреждение: джоба %q не найдена в конфиге пайплайна\n", job.Name)
+	if job.CommitSHA == "" {
+		// The API can omit the commit (trigger/bridge scenarios); requesting
+		// the config with ref="" would only produce an opaque 400 (WR-05).
+		fmt.Fprintln(os.Stderr, "предупреждение: у джобы нет коммита — конфиг пайплайна не запрашивается")
+	} else {
+		cfg, err := p.MergedConfig(ctx, ref.ProjectPath, job.CommitSHA)
+		switch {
+		case err == nil:
+			if jc, ok := cfg.JobByName(job.Name); ok {
+				jobCfg = jc
+			} else {
+				fmt.Fprintf(os.Stderr, "предупреждение: джоба %q не найдена в конфиге пайплайна\n", job.Name)
+			}
+		case errors.Is(err, provider.ErrConfigNotFound), errors.Is(err, provider.ErrUnresolvedRefs):
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", explain(err))
+		default:
+			fmt.Fprintf(os.Stderr, "предупреждение: конфиг пайплайна не разобран: %s\n", explain(err))
 		}
-	case errors.Is(err, provider.ErrConfigNotFound), errors.Is(err, provider.ErrUnresolvedRefs):
-		fmt.Fprintf(os.Stderr, "предупреждение: %s\n", explain(err))
-	default:
-		fmt.Fprintf(os.Stderr, "предупреждение: конфиг пайплайна не разобран: %s\n", explain(err))
 	}
 
 	if err := render.Job(os.Stdout, job, jobCfg); err != nil {
