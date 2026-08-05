@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -53,6 +54,17 @@ func New(host string, tok token.Token) *Client {
 
 var _ provider.Provider = (*Client)(nil)
 
+// redact заменяет все вхождения значения токена в s на плейсхолдер.
+// GitLab и промежуточные прокси иногда отражают заголовки запроса в теле
+// ответа не-2xx — без этого фильтра токен уехал бы в терминал пользователя
+// и в его баг-репорт (T-01-09).
+func (c *Client) redact(s string) string {
+	if c.token.Secret == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.token.Secret, "<токен скрыт>")
+}
+
 // do выполняет запрос к GitLab API с заголовком PRIVATE-TOKEN и лимитом на
 // чтение тела ответа. Токен передаётся только заголовком — никогда в пути
 // или строке запроса (T-01-01). Общая для всех методов клиента логика:
@@ -68,20 +80,20 @@ func (c *Client) do(ctx context.Context, method, path string) ([]byte, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("gitlab: запрос %s: %w", path, err)
+		return nil, fmt.Errorf("gitlab: запрос %s: %s", path, c.redact(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("gitlab: чтение ответа %s: %w", path, err)
+		return nil, fmt.Errorf("gitlab: чтение ответа %s: %s", path, c.redact(err.Error()))
 	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return body, nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return nil, fmt.Errorf("gitlab: %s: %w", path, provider.ErrUnauthorized)
+		return nil, fmt.Errorf("gitlab: %s: токен (%s) отклонён: %w", path, c.token.String(), provider.ErrUnauthorized)
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("gitlab: %s: %w", path, errStatusNotFound)
 	default:
@@ -89,7 +101,7 @@ func (c *Client) do(ctx context.Context, method, path string) ([]byte, error) {
 		if len(snippet) > errorBodyLimit {
 			snippet = snippet[:errorBodyLimit]
 		}
-		return nil, fmt.Errorf("gitlab: %s: неожиданный статус %d: %s", path, resp.StatusCode, snippet)
+		return nil, fmt.Errorf("gitlab: %s: неожиданный статус %d: %s", path, resp.StatusCode, c.redact(string(snippet)))
 	}
 }
 
@@ -123,7 +135,7 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 	body, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
 		if errors.Is(err, errStatusNotFound) {
-			return provider.Job{}, fmt.Errorf("gitlab: джоба %s #%d не найдена: %w", projectPath, jobID, provider.ErrJobNotFound)
+			return provider.Job{}, fmt.Errorf("gitlab: джоба %s#%d на хосте %s не найдена: %w", projectPath, jobID, c.host, provider.ErrJobNotFound)
 		}
 		return provider.Job{}, err
 	}
