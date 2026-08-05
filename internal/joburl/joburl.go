@@ -30,9 +30,12 @@ var (
 // Parse разбирает произвольную строку со ссылкой на джобу GitLab.
 func Parse(raw string) (Ref, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" {
+	if err != nil || u.Scheme == "" || (u.Host == "" && u.Scheme != "https") {
 		// Пользователь мог вставить ссылку без схемы (скопировал из адресной
 		// строки без "https://"). Подставляем схему и разбираем заново.
+		// A scheme-less URL with a port ("host.com:8443/...") parses with
+		// the host mistaken for the scheme and an empty Host — treat
+		// "scheme but no host" as the scheme-less case too (WR-06).
 		u, err = url.Parse("https://" + raw)
 		if err != nil {
 			return Ref{}, ErrNotAJobURL
