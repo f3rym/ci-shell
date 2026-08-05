@@ -156,12 +156,6 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 	return job, nil
 }
 
-// MergedConfig — временная заглушка задачи 1. Реальная реализация появляется
-// в задаче 2 (internal/provider/gitlab/config.go) и заменяет этот метод.
-func (c *Client) MergedConfig(ctx context.Context, projectPath, sha string) (provider.Config, error) {
-	return provider.Config{}, fmt.Errorf("gitlab: MergedConfig ещё не реализован: %w", provider.ErrNotSupported)
-}
-
 // FindFailedJob — автоопределение упавшей джобы без ссылки. Это требование
 // NEXT-01 (этап 1 из idea, v2), в Фазе 1 не реализовано.
 func (c *Client) FindFailedJob(ctx context.Context, repo, ref string) (provider.Job, error) {

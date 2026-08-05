@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
+	"github.com/f3rym/ci-shell/internal/render"
 	"github.com/f3rym/ci-shell/internal/token"
 )
 
@@ -68,32 +70,28 @@ func runShell(args []string) {
 
 	fmt.Printf("распознано: хост %s, проект %s, job id %d\n", ref.Host, ref.ProjectPath, ref.JobID)
 	fmt.Printf("токен: %s\n", tok.String())
-	printJob(job)
-}
 
-func printJob(job provider.Job) {
-	fmt.Printf("джоба %s #%d\n", job.Name, job.ID)
-	fmt.Printf("  статус:  %s\n", job.Status)
-	fmt.Printf("  причина: %s\n", orDash(job.FailureReason))
-	fmt.Printf("  стадия:  %s\n", job.Stage)
-	fmt.Printf("  ref:     %s\n", job.Ref)
-	fmt.Printf("  коммит:  %s (%s)\n", shortSHA(job.CommitSHA), job.CommitTitle)
-	fmt.Printf("  ранер:   %s\n", orDash(job.RunnerDesc))
-	fmt.Printf("  ссылка:  %s\n", job.WebURL)
-}
-
-func shortSHA(sha string) string {
-	if len(sha) > 8 {
-		return sha[:8]
+	// Конфиг пайплайна не критичен для метаданных джобы: если его нет или он
+	// использует include/extends/!reference, печатаем то, что уже есть, и
+	// предупреждаем в stderr, а не прерываем работу.
+	jobCfg := provider.JobConfig{}
+	cfg, err := p.MergedConfig(ctx, ref.ProjectPath, job.CommitSHA)
+	switch {
+	case err == nil:
+		if jc, ok := cfg.JobByName(job.Name); ok {
+			jobCfg = jc
+		} else {
+			fmt.Fprintf(os.Stderr, "предупреждение: джоба %q не найдена в конфиге пайплайна\n", job.Name)
+		}
+	case errors.Is(err, provider.ErrConfigNotFound), errors.Is(err, provider.ErrUnresolvedRefs):
+		fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
+	default:
+		fail(err)
 	}
-	return sha
-}
 
-func orDash(s string) string {
-	if s == "" {
-		return "—"
+	if err := render.Job(os.Stdout, job, jobCfg); err != nil {
+		fail(err)
 	}
-	return s
 }
 
 func fail(err error) {
