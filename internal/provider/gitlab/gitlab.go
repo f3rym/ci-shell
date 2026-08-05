@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/token"
@@ -97,11 +98,21 @@ func (c *Client) do(ctx context.Context, method, path string) ([]byte, error) {
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("gitlab: %s: %w", path, errStatusNotFound)
 	default:
-		snippet := body
-		if len(snippet) > errorBodyLimit {
-			snippet = snippet[:errorBodyLimit]
+		// Redact the FULL body before truncating: truncating first can cut a
+		// reflected token at the snippet boundary, and the partial token then
+		// escapes strings.ReplaceAll and leaks into terminal output (CR-01,
+		// T-01-09).
+		redacted := c.redact(string(body))
+		if len(redacted) > errorBodyLimit {
+			cut := errorBodyLimit
+			// Back off to a rune boundary so the snippet does not end in a
+			// broken multi-byte sequence.
+			for cut > 0 && !utf8.RuneStart(redacted[cut]) {
+				cut--
+			}
+			redacted = redacted[:cut]
 		}
-		return nil, fmt.Errorf("gitlab: %s: неожиданный статус %d: %s", path, resp.StatusCode, c.redact(string(snippet)))
+		return nil, fmt.Errorf("gitlab: %s: неожиданный статус %d: %s", path, resp.StatusCode, redacted)
 	}
 }
 
