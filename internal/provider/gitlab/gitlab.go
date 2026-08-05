@@ -48,6 +48,14 @@ func New(host string, tok token.Token) *Client {
 		token: tok,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			// PRIVATE-TOKEN is a custom header: unlike Authorization, Go's
+			// http.Client forwards it verbatim on cross-host redirects. Any
+			// redirect on /api/v4 is abnormal, so do not follow redirects at
+			// all — the 3xx response surfaces as an ordinary non-2xx error
+			// (WR-01, T-01-01).
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		baseURL: "https://" + host + "/api/v4",
 	}
