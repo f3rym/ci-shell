@@ -172,9 +172,10 @@ func Assemble(in Input) Environment {
 // помечая их source и Origin (путь группы или проекта). Переменная
 // с EnvironmentScope, отличным от "*" или пустого, не подставляется — в
 // notices уходит строка с её ключом и областью (idea §1: утилита не должна
-// подставлять окружение, не соответствующее упавшему прогону). Маскированные
-// переменные попадают в vars с пустым Value и Secret: true — как
-// существующие, но без значения.
+// подставлять окружение, не соответствующее упавшему прогону). Защищённая
+// (Protected) переменная подставляется, но с оговоркой в notices — API не
+// говорит, был ли ref прогона защищённым. Маскированные переменные попадают
+// в vars с пустым Value и Secret: true — как существующие, но без значения.
 func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope provider.VariableScope, source Source, notices *[]string) {
 	for _, v := range apiVars {
 		if v.Scope != scope {
@@ -183,6 +184,13 @@ func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope 
 		if v.EnvironmentScope != "" && v.EnvironmentScope != "*" {
 			*notices = append(*notices, fmt.Sprintf("%s (%s %s): область окружения %q — переменная не подставлена", v.Key, scope, v.Owner, v.EnvironmentScope))
 			continue
+		}
+		// Jobs API в v0.1.0 не сообщает, защищён ли ref упавшего прогона,
+		// поэтому protected-переменная подставляется, но с честной оговоркой:
+		// если джоба шла по незащищённой ветке, в реальном прогоне этой
+		// переменной не было (WR-04, idea §1).
+		if v.Protected {
+			*notices = append(*notices, fmt.Sprintf("%s (%s %s): переменная защищённая (protected) — подставлена, хотя упавший прогон мог идти по незащищённой ветке", v.Key, scope, v.Owner))
 		}
 		vars[v.Key] = Variable{
 			Key:    v.Key,
