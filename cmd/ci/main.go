@@ -309,6 +309,8 @@ func runShell(args []string) {
 		case err == nil:
 			if jc, ok := cfg.JobByName(job.Name); ok {
 				jobCfg = jc
+			} else if jerr := cfg.JobError(job.Name); jerr != nil {
+				fmt.Fprintf(os.Stderr, "предупреждение: %s\n", explain(jerr))
 			} else {
 				fmt.Fprintf(os.Stderr, "предупреждение: джоба %q не найдена в конфиге пайплайна\n", job.Name)
 			}

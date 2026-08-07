@@ -66,7 +66,11 @@ type Job struct {
 // Форма для потребителей одна и та же.
 type Config struct {
 	Jobs map[string]JobConfig
-	Raw  []byte
+	// Unresolved — джобы, которые без смёрженного конфига не разобрать
+	// (extends и подобное): имя → причина. Отказ точечный: соседняя джоба с
+	// extends не должна лишать образа и шагов ту, которую запросили.
+	Unresolved map[string]error
+	Raw        []byte
 }
 
 // JobConfig — конфигурация одной джобы: образ, шаги, переменные.
@@ -126,6 +130,12 @@ type VariableSet struct {
 func (c Config) JobByName(name string) (JobConfig, bool) {
 	jc, ok := c.Jobs[name]
 	return jc, ok
+}
+
+// JobError возвращает причину, по которой джоба не была разобрана
+// (например, использует extends), либо nil, если такой записи нет.
+func (c Config) JobError(name string) error {
+	return c.Unresolved[name]
 }
 
 // Sentinel-ошибки провайдеров. Конкретные реализации оборачивают их через

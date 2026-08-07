@@ -95,6 +95,7 @@ func parseConfig(data []byte) (provider.Config, error) {
 	}
 
 	jobs := make(map[string]provider.JobConfig)
+	unresolved := make(map[string]error)
 	for name, node := range root {
 		if reservedRootKeys[name] || strings.HasPrefix(name, ".") {
 			continue
@@ -107,10 +108,13 @@ func parseConfig(data []byte) (provider.Config, error) {
 			continue
 		}
 		if _, hasExtends := jobBlock["extends"]; hasExtends {
-			return provider.Config{}, fmt.Errorf(
+			// Отказ точечный: без смёрженного конфига не разобрать только
+			// эту джобу — остальные джобы файла разбираются дальше.
+			unresolved[name] = fmt.Errorf(
 				"gitlab: джоба %q использует extends — нужен смёрженный конфиг через CI Lint (NEXT-02, см. REQUIREMENTS.md): %w",
 				name, provider.ErrUnresolvedRefs,
 			)
+			continue
 		}
 
 		jc, err := buildJobConfig(name, jobBlock, defaultBlock, root, rootVariables)
@@ -120,7 +124,7 @@ func parseConfig(data []byte) (provider.Config, error) {
 		jobs[name] = jc
 	}
 
-	return provider.Config{Jobs: jobs, Raw: data}, nil
+	return provider.Config{Jobs: jobs, Unresolved: unresolved, Raw: data}, nil
 }
 
 // buildJobConfig собирает JobConfig для одной джобы, наследуя image,
