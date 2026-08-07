@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -109,10 +111,37 @@ func LoadSecrets(host, projectPath string) (Secrets, error) {
 
 	var f secretsFile
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return Secrets{Path: path}, fmt.Errorf("env: разбор файла секретов %s: %w", path, err)
+		// Текст ошибки yaml.v3 не пробрасывается: ошибки типов встраивают в
+		// сообщение значение узла (например, `cannot unmarshal !!int `1234``),
+		// а значения в этом файле — секреты. Наружу уходят только имя файла
+		// и номера строк (WR-02).
+		return Secrets{Path: path}, fmt.Errorf(
+			"env: файл секретов %s не разобран как YAML%s; текст ошибки скрыт — он может содержать значения секретов; проверьте синтаксис и кавычки вокруг значений",
+			path, yamlErrorLines(err),
+		)
 	}
 
 	values := f.Projects[host+"/"+projectPath]
 
 	return Secrets{Path: path, Values: values, Found: true}, nil
+}
+
+// yamlLineRe находит в тексте ошибки yaml.v3 упоминания «line N» — из всей
+// ошибки пользователю можно показывать только номера строк: остальной текст
+// может содержать значения узлов.
+var yamlLineRe = regexp.MustCompile(`line (\d+)`)
+
+// yamlErrorLines извлекает из ошибки yaml.v3 номера строк и форматирует их
+// суффиксом вида " (строки: 3, 7)". Пустая строка, если номеров в ошибке
+// нет. Сам текст ошибки никогда не возвращается (WR-02).
+func yamlErrorLines(err error) string {
+	matches := yamlLineRe.FindAllStringSubmatch(err.Error(), -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(matches))
+	for _, m := range matches {
+		lines = append(lines, m[1])
+	}
+	return " (строки: " + strings.Join(lines, ", ") + ")"
 }
