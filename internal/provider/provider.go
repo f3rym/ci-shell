@@ -101,6 +101,10 @@ type Variable struct {
 	Value     string
 	Masked    bool
 	Protected bool
+	// IsFile — переменная файлового типа (variable_type: "file"): Value —
+	// это содержимое файла, а в реальной джобе переменная окружения несёт
+	// путь к временному файлу с этим содержимым.
+	IsFile bool
 	// EnvironmentScope — область окружения, которой ограничена переменная
 	// ("*" означает «без ограничений»).
 	EnvironmentScope string

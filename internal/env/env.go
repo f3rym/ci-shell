@@ -25,6 +25,22 @@ const (
 	SourceLocal Source = "локальный файл"
 )
 
+// Kind — тип переменной GitLab (variable_type). Пустое значение
+// равнозначно KindEnv: обычная переменная окружения.
+type Kind string
+
+const (
+	// KindEnv — обычная переменная окружения (variable_type: env_var).
+	KindEnv Kind = "env_var"
+	// KindFile — файловая переменная (variable_type: file): Value — это
+	// содержимое файла, а в реальной джобе переменная несёт путь к
+	// временному файлу с этим содержимым. В v0.1.0 содержимое не
+	// печатается инлайн (render показывает <file variable>);
+	// материализация во временный файл перед docker run — задача Фазы 3
+	// (WR-05).
+	KindFile Kind = "file"
+)
+
 // Variable — одна переменная собранного окружения.
 type Variable struct {
 	Key    string
@@ -36,6 +52,9 @@ type Variable struct {
 	// Secret — признак «значение нельзя печатать». Заводится сразу: на нём
 	// держится вся политика вывода Фазы 2 (render.displayValue).
 	Secret bool
+	// Kind — тип переменной (env_var или file). Пусто для предопределённых
+	// переменных и переменных конфига пайплайна — они всегда обычные.
+	Kind Kind
 }
 
 // Environment — собранное окружение упавшей джобы.
@@ -135,9 +154,11 @@ func Assemble(in Input) Environment {
 	// которую API не показал вовсе), всё равно попадает в окружение.
 	// Переменная, помеченная Masked провайдером, не перестаёт быть
 	// секретом оттого, что её значение стало известно — здесь она
-	// перезаписывается целиком новой Variable с Secret: true.
+	// перезаписывается новой Variable с Secret: true. Kind сохраняется:
+	// файловая переменная остаётся файловой, даже когда её значение
+	// пришло из локального файла (WR-05, материализация — Фаза 3).
 	for k, v := range in.Secrets {
-		vars[k] = Variable{Key: k, Value: v, Source: SourceLocal, Secret: true}
+		vars[k] = Variable{Key: k, Value: v, Source: SourceLocal, Secret: true, Kind: vars[k].Kind}
 	}
 
 	out := make([]Variable, 0, len(vars))
@@ -192,12 +213,17 @@ func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope 
 		if v.Protected {
 			*notices = append(*notices, fmt.Sprintf("%s (%s %s): переменная защищённая (protected) — подставлена, хотя упавший прогон мог идти по незащищённой ветке", v.Key, scope, v.Owner))
 		}
+		kind := KindEnv
+		if v.IsFile {
+			kind = KindFile
+		}
 		vars[v.Key] = Variable{
 			Key:    v.Key,
 			Value:  v.Value,
 			Source: source,
 			Origin: v.Owner,
 			Secret: v.Masked,
+			Kind:   kind,
 		}
 	}
 }

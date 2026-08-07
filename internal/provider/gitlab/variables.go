@@ -19,6 +19,7 @@ type variableResponse struct {
 	Value            string `json:"value"`
 	Masked           bool   `json:"masked"`
 	Protected        bool   `json:"protected"`
+	VariableType     string `json:"variable_type"`
 	EnvironmentScope string `json:"environment_scope"`
 }
 
@@ -89,6 +90,7 @@ func (c *Client) fetchVariables(ctx context.Context, path string, scope provider
 			Key:               r.Key,
 			Masked:            r.Masked,
 			Protected:         r.Protected,
+			IsFile:            r.VariableType == "file",
 			EnvironmentScope:  r.EnvironmentScope,
 			Scope:             scope,
 			Owner:             owner,

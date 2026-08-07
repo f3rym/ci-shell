@@ -95,10 +95,18 @@ func projectKey(e env.Environment) string {
 
 // displayValue — единственная точка, где решается, показывать значение
 // переменной пользователю или нет: для Variable.Secret возвращает
-// плейсхолдер вместо значения (T-02-01).
+// плейсхолдер вместо значения (T-02-01); для файловых переменных
+// (env.KindFile) — маркер вместо инлайна содержимого (WR-05).
 func displayValue(v env.Variable) string {
 	if v.Secret {
 		return "<скрыто>"
+	}
+	if v.Kind == env.KindFile {
+		// Значение файловой переменной — целое содержимое файла
+		// (kubeconfig, CA bundle, .npmrc): инлайн в списке окружения оно
+		// не печатается. Материализация во временный файл перед docker run
+		// — задача Фазы 3.
+		return "<file variable>"
 	}
 	return v.Value
 }
