@@ -108,6 +108,7 @@ type Container struct {
 
 	d       *Docker
 	workDir string
+	shell   string
 }
 
 // holdCommand удерживает контейнер запущенным, пока пользователь работает
@@ -175,12 +176,40 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	return &Container{ID: id, d: d, workDir: spec.WorkDir}, skipped, nil
 }
 
-// Exec запускает command внутри контейнера через docker exec, направляя
-// потоки команды в out и errOut. Возвращает код выхода команды. Ошибка
-// возвращается только на сбой самого docker: ненулевой код шага — это не
-// поломка утилиты, а ровно тот результат, ради которого её запустили.
+// DetectShell выбирает оболочку контейнера пробой: bash предпочтителен —
+// docker-executor GitLab исполняет скрипт джобы bash-ем, когда тот есть в
+// образе, — sh остаётся фолбэком. Найденная оболочка запоминается в
+// контейнере и используется и для шагов (Exec), и для интерактива (Shell):
+// шаги с башизмами ([[ ]], массивы, set -o pipefail, source) не должны
+// падать там, где CI их исполнял без ошибок. Вызывается до прогона шагов.
+func (c *Container) DetectShell(ctx context.Context) error {
+	for _, candidate := range []string{"bash", "sh"} {
+		probe := exec.CommandContext(ctx, c.d.bin, "exec", c.ID, "sh", "-c", "command -v "+candidate)
+		if _, err := runCaptured(probe); err == nil {
+			c.shell = candidate
+			return nil
+		}
+		// Проба, убитая отменой контекста, не означает отсутствие оболочки
+		// в образе — иначе Ctrl-C давал бы ложный вердикт ErrNoShell «джоба
+		// не воспроизводится этой утилитой».
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("runner: в образе нет ни bash, ни sh: %w", ErrNoShell)
+}
+
+// Exec запускает command внутри контейнера через docker exec оболочкой,
+// выбранной DetectShell (до пробы — sh), направляя потоки команды в out и
+// errOut. Возвращает код выхода команды. Ошибка возвращается только на
+// сбой самого docker: ненулевой код шага — это не поломка утилиты, а ровно
+// тот результат, ради которого её запустили.
 func (c *Container) Exec(ctx context.Context, command string, out, errOut io.Writer) (int, error) {
-	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-w", c.workDir, c.ID, "sh", "-c", command)
+	shell := c.shell
+	if shell == "" {
+		shell = "sh"
+	}
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-w", c.workDir, c.ID, shell, "-c", command)
 	cmd.Stdout = out
 	cmd.Stderr = errOut
 	err := cmd.Run()
@@ -201,30 +230,18 @@ func (c *Container) Exec(ctx context.Context, command string, out, errOut io.Wri
 	return -1, fmt.Errorf("runner: docker exec отказал: %w", err)
 }
 
-// Shell выбирает интерактивную оболочку пробой (bash предпочтителен, sh —
-// фолбэк) и запускает её интерактивно, подключая терминал пользователя
-// напрямую к docker exec -it. Ненулевой код выхода оболочки не считается
-// ошибкой — пользователь вышел как счёл нужным.
+// Shell запускает оболочку, выбранную DetectShell, интерактивно, подключая
+// терминал пользователя напрямую к docker exec -it. Если проба ещё не
+// выполнялась — выполняет её сам. Ненулевой код выхода оболочки не
+// считается ошибкой — пользователь вышел как счёл нужным.
 func (c *Container) Shell(ctx context.Context) error {
-	shell := ""
-	for _, candidate := range []string{"bash", "sh"} {
-		probe := exec.CommandContext(ctx, c.d.bin, "exec", c.ID, "sh", "-c", "command -v "+candidate)
-		if _, err := runCaptured(probe); err == nil {
-			shell = candidate
-			break
+	if c.shell == "" {
+		if err := c.DetectShell(ctx); err != nil {
+			return err
 		}
-		// Проба, убитая отменой контекста, не означает отсутствие оболочки
-		// в образе — иначе Ctrl-C давал бы ложный вердикт ErrNoShell «джоба
-		// не воспроизводится этой утилитой».
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-	}
-	if shell == "" {
-		return fmt.Errorf("runner: в образе нет ни bash, ни sh: %w", ErrNoShell)
 	}
 
-	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-it", "-w", c.workDir, c.ID, shell)
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-it", "-w", c.workDir, c.ID, c.shell)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

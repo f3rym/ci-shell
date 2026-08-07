@@ -215,6 +215,15 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
 	}
 
+	// Проба оболочки идёт до прогона шагов: найденная оболочка (bash
+	// предпочтительно, как в docker-executor GitLab) используется и для
+	// шагов, и для интерактивного шелла — башизмы в шагах не падают там,
+	// где CI их исполнял. Образ без оболочки отсеивается до исполнения
+	// чего-либо внутри контейнера.
+	if err := c.DetectShell(ctx); err != nil {
+		return err
+	}
+
 	steps := runner.Steps(jobCfg)
 	if len(steps) == 0 {
 		fmt.Fprintln(os.Stderr, "предупреждение: в конфиге джобы нет шагов — возможно, всё делает entrypoint образа")
