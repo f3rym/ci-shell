@@ -48,6 +48,20 @@ type Environment struct {
 	// SecretsPath — фактический путь к файлу секретов (из Secrets.Path),
 	// скопированный как есть для отчёта о недостающих переменных.
 	SecretsPath string
+	// Missing — маскированные переменные, чьё значение не покрыто ни одним
+	// слоем: GitLab сообщил об их существовании, а локальный файл секретов
+	// их не заполнил. Отсортирован по Key.
+	Missing []Missing
+}
+
+// Missing — одна недостающая маскированная переменная. Умышленно не имеет
+// поля под значение: тип, в котором значению негде поместиться, не может
+// его случайно вынести наружу.
+type Missing struct {
+	Key string
+	// Origin описывает, откуда известно о существовании переменной — путь
+	// проекта или группы, приславшей её как маскированную.
+	Origin string
 }
 
 // Map отдаёт плоскую карту ключ→значение для Фазы 3 (docker run).
@@ -125,7 +139,19 @@ func Assemble(in Input) Environment {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 
-	return Environment{Vars: out, Notices: notices, SecretsPath: in.SecretsPath}
+	// Недостающие переменные: Secret == true и Value == "" означает, что
+	// провайдер сообщил о переменной как маскированной, а ни один слой
+	// (включая секреты) её не заполнил. out уже отсортирован по Key,
+	// поэтому missing строится в том же порядке без дополнительной
+	// сортировки.
+	var missing []Missing
+	for _, v := range out {
+		if v.Secret && v.Value == "" {
+			missing = append(missing, Missing{Key: v.Key, Origin: v.Origin})
+		}
+	}
+
+	return Environment{Vars: out, Notices: notices, SecretsPath: in.SecretsPath, Missing: missing}
 }
 
 // applyAPILayer накладывает на vars переменные apiVars с областью scope,

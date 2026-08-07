@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/f3rym/ci-shell/internal/env"
 )
@@ -13,7 +14,8 @@ import (
 // образцу orDash в internal/render/job.go. Если в e есть оговорки
 // (недоступные источники, переменные с чужой областью окружения), они
 // печатаются отдельным блоком после списка переменных — по строке на
-// оговорку.
+// оговорку. После оговорок печатается отчёт о недостающих маскированных
+// переменных (missingReport), если такие есть.
 func Env(w io.Writer, e env.Environment) error {
 	if len(e.Vars) == 0 {
 		if _, err := fmt.Fprintln(w, "окружение: —"); err != nil {
@@ -30,18 +32,75 @@ func Env(w io.Writer, e env.Environment) error {
 		}
 	}
 
-	if len(e.Notices) == 0 {
+	if len(e.Notices) > 0 {
+		if _, err := fmt.Fprintln(w, "оговорки:"); err != nil {
+			return err
+		}
+		for _, n := range e.Notices {
+			if _, err := fmt.Fprintf(w, "  - %s\n", n); err != nil {
+				return err
+			}
+		}
+	}
+
+	return missingReport(w, e)
+}
+
+// missingReport печатает отчёт о маскированных переменных, значение
+// которых не покрыто ни одним слоем (e.Missing): сколько их и какие,
+// фактический путь к файлу секретов (e.SecretsPath), готовый к вставке
+// фрагмент YAML и команду ограничения прав. Пустой e.Missing — отчёт не
+// печатается вовсе. В отчёте печатаются только ключи и заглушки — ни
+// Variable.Value, ни e.Map() в этот блок не попадают (T-02-10).
+func missingReport(w io.Writer, e env.Environment) error {
+	if len(e.Missing) == 0 {
 		return nil
 	}
-	if _, err := fmt.Fprintln(w, "оговорки:"); err != nil {
+
+	keys := make([]string, 0, len(e.Missing))
+	for _, m := range e.Missing {
+		keys = append(keys, m.Key)
+	}
+
+	if _, err := fmt.Fprintf(w, "\nGitLab не отдаёт значения %d маскированных переменных: %s\n", len(e.Missing), strings.Join(keys, ", ")); err != nil {
 		return err
 	}
-	for _, n := range e.Notices {
-		if _, err := fmt.Fprintf(w, "  - %s\n", n); err != nil {
+	if _, err := fmt.Fprintf(w, "заполните их один раз в файле %s:\n\n", e.SecretsPath); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "projects:\n  %s:\n", projectKey(e)); err != nil {
+		return err
+	}
+	for _, m := range e.Missing {
+		if _, err := fmt.Fprintf(w, "    %s: \"<значение>\"\n", m.Key); err != nil {
 			return err
 		}
 	}
+	if _, err := fmt.Fprintf(w, "\nи ограничьте права файла: chmod 600 %s\n", e.SecretsPath); err != nil {
+		return err
+	}
 	return nil
+}
+
+// projectKey собирает ключ проекта для фрагмента YAML из уже подставленных
+// в e переменных CI_SERVER_HOST и CI_PROJECT_PATH — тот же ключ, по
+// которому LoadSecrets ищет запись в файле секретов, чтобы фрагмент можно
+// было скопировать без правок.
+func projectKey(e env.Environment) string {
+	return varValue(e, "CI_SERVER_HOST") + "/" + varValue(e, "CI_PROJECT_PATH")
+}
+
+// varValue ищет значение переменной по ключу в уже собранном списке e.Vars
+// без обращения к e.Map(): единственный путь к значению переменной должен
+// оставаться под контролем displayValue там, где значение может быть
+// секретом. CI_SERVER_HOST и CI_PROJECT_PATH секретами не бывают.
+func varValue(e env.Environment, key string) string {
+	for _, v := range e.Vars {
+		if v.Key == key {
+			return v.Value
+		}
+	}
+	return ""
 }
 
 // displayValue — единственная точка, где решается, показывать значение
