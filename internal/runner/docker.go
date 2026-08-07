@@ -83,6 +83,11 @@ func (d *Docker) EnsureImage(ctx context.Context, image string) error {
 	pullCmd.Stdout = d.progress.W
 	pullCmd.Stderr = d.progress.W
 	if err := pullCmd.Run(); err != nil {
+		// Прерванная Ctrl-C тяга — не «образ недоступен» с советом про
+		// docker login, а отмена: возвращаем её раньше доменной ошибки.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("runner: не удалось стянуть образ %s: %w", image, ErrImageUnavailable)
 	}
 	return nil
@@ -182,6 +187,13 @@ func (c *Container) Exec(ctx context.Context, command string, out, errOut io.Wri
 	if err == nil {
 		return 0, nil
 	}
+	// Отмена контекста (Ctrl-C) убивает docker exec сигналом, и ExitCode()
+	// вернул бы -1 — «шаг упал с кодом -1» вместо честного прерывания.
+	// Отмена проверяется раньше разбора кода выхода и уходит наверх ошибкой:
+	// прогон шагов останавливается, очистка отрабатывает.
+	if ctx.Err() != nil {
+		return -1, ctx.Err()
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode(), nil
@@ -200,6 +212,12 @@ func (c *Container) Shell(ctx context.Context) error {
 		if _, err := runCaptured(probe); err == nil {
 			shell = candidate
 			break
+		}
+		// Проба, убитая отменой контекста, не означает отсутствие оболочки
+		// в образе — иначе Ctrl-C давал бы ложный вердикт ErrNoShell «джоба
+		// не воспроизводится этой утилитой».
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 	if shell == "" {

@@ -53,6 +53,10 @@ const defaultConfigPath = "${XDG_CONFIG_HOME:-~/.config}/ci-shell/config.yml"
 // поломку (idea §7).
 func explain(err error) string {
 	switch {
+	// Отмена контекста — это Ctrl-C/SIGTERM от самого пользователя:
+	// честное «прервано», без доменной ошибки и без советов.
+	case errors.Is(err, context.Canceled):
+		return "прервано пользователем"
 	case errors.Is(err, token.ErrNoToken):
 		return fmt.Sprintf(
 			"%s\nзадайте токен переменной CI_SHELL_TOKEN или GITLAB_TOKEN, либо положите его в конфиг-файл %s:\n"+
