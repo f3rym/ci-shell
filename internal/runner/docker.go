@@ -128,8 +128,15 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	mount := spec.SourceDir + ":" + spec.WorkDir
 	label := fmt.Sprintf("ci-shell.job=%d", spec.JobID)
 
-	runCmd := exec.CommandContext(ctx, d.bin,
-		"run", "-d",
+	// Создание и старт разнесены намеренно: docker create надёжно печатает
+	// id ещё до попытки старта, поэтому контейнер, не сумевший стартовать
+	// (типовой случай — в образе нет sh для переопределённого entrypoint),
+	// не остаётся на машине в состоянии Created — обе ветки отказа ниже
+	// добивают его по захваченному id. Одиночный docker run -d id при
+	// отказе старта не гарантирует, и контейнер утекал бы навсегда:
+	// defer c.Remove регистрируется вызывающим только после успеха Start.
+	createCmd := exec.CommandContext(ctx, d.bin,
+		"create",
 		"--env-file", envPath,
 		"-v", mount,
 		"-w", spec.WorkDir,
@@ -138,13 +145,26 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 		spec.Image,
 		"-c", holdCommand,
 	)
-	out, err := runCaptured(runCmd)
+	out, err := runCaptured(createCmd)
 	id := strings.TrimSpace(out)
 	if err != nil || id == "" {
-		return nil, nil, fmt.Errorf("runner: docker run отказал: %s: %w", err, ErrContainerFailed)
+		if id != "" {
+			// Демон мог создать контейнер и при ненулевом коде выхода.
+			rm := exec.CommandContext(context.Background(), d.bin, "rm", "-f", id)
+			_, _ = runCaptured(rm)
+		}
+		return nil, nil, fmt.Errorf("runner: docker create отказал: %s: %w", err, ErrContainerFailed)
 	}
 
 	d.progress.Stage("поднимаю контейнер из образа %s…", spec.Image)
+	startCmd := exec.CommandContext(ctx, d.bin, "start", id)
+	if _, err := runCaptured(startCmd); err != nil {
+		// Фоновый контекст: созданный контейнер убирается и тогда, когда
+		// старт сорвала отмена основного контекста.
+		rm := exec.CommandContext(context.Background(), d.bin, "rm", "-f", id)
+		_, _ = runCaptured(rm)
+		return nil, nil, fmt.Errorf("runner: контейнер %s не стартовал: %s: %w", shortID(id), err, ErrContainerFailed)
+	}
 	d.progress.Stage("контейнер %s готов, рабочий каталог %s", shortID(id), spec.WorkDir)
 
 	return &Container{ID: id, d: d, workDir: spec.WorkDir}, skipped, nil
