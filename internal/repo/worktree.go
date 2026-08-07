@@ -110,15 +110,32 @@ func Prepare(ctx context.Context, root, sha string, p render.Progress) (*Worktre
 
 // Remove снимает worktree и безусловно удаляет временный каталог — даже
 // если git отказал, утилита не оставляет следов на машине пользователя.
-// Возвращается первая возникшая ошибка.
+// Ошибка os.RemoveAll не глотается наравне с ошибкой git: шаги джобы
+// работают в контейнере под root и могут оставить в примонтированном
+// каталоге файлы, которые непривилегированному пользователю не удалить
+// (EACCES на Linux). Текст ошибки содержит фактический путь и команду
+// добивки: git worktree prune снял бы только метаданные git, сами файлы
+// им не удалить.
 func (w *Worktree) Remove(ctx context.Context) error {
 	removeCmd := exec.CommandContext(ctx, "git", "-C", w.root, "worktree", "remove", "--force", w.Dir)
-	_, err := runCmd(removeCmd)
-	os.RemoveAll(w.parent)
-	if err != nil {
-		return fmt.Errorf("repo: не удалось снять worktree %s: %w", w.Dir, err)
+	_, gitErr := runCmd(removeCmd)
+	rmErr := os.RemoveAll(w.parent)
+	if gitErr == nil && rmErr == nil {
+		return nil
 	}
-	return nil
+
+	var cause string
+	switch {
+	case gitErr != nil && rmErr != nil:
+		cause = fmt.Sprintf("git worktree remove: %s; удаление каталога: %s", gitErr, rmErr)
+	case gitErr != nil:
+		cause = fmt.Sprintf("git worktree remove: %s", gitErr)
+	default:
+		cause = fmt.Sprintf("удаление каталога: %s", rmErr)
+	}
+	return fmt.Errorf("repo: не удалось убрать временный worktree %s: %s\n"+
+		"добейте вручную: sudo rm -rf %s && git worktree prune — файлы, записанные контейнером под root, обычному пользователю не удалить",
+		w.Dir, cause, w.parent)
 }
 
 // runCmd запускает уже собранную команду cmd (аргументы — срезом, без

@@ -156,11 +156,12 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 	// Фоновый контекст: отмена основного контекста не должна помешать
 	// уборке временного worktree. Неудача снятия печатается предупреждением
-	// с готовой командой добивки — пользователь не должен обнаруживать
-	// остаток через неделю.
+	// — путь остатка и готовая команда добивки входят в текст самой ошибки
+	// (см. Worktree.Remove) — пользователь не должен обнаруживать остаток
+	// через неделю.
 	defer func() {
 		if err := wt.Remove(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "предупреждение: %s\nдобейте вручную: git worktree prune\n", err)
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
 		}
 	}()
 
