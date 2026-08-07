@@ -1,11 +1,15 @@
-# Штатное место файла секретов — вне репозитория:
-# ${XDG_CONFIG_HOME:-~/.config}/ci-shell/secrets.yml
-# Эти записи закрывают случайный случай, когда файл секретов по привычке
-# кладут рядом с кодом: такая ошибка не должна попасть в git (ENV-02).
+# Служебное — не для образа
+.planning/
+.claude/
+.git/
+.gitignore
+idea
+
+# Артефакты сборки
+dist/
+ci
+
+# Секреты — никогда
 secrets.yml
 secrets.yaml
 .ci-shell-secrets.yml
-
-# Артефакты сборки (make build / make all)
-/ci
-/dist/
