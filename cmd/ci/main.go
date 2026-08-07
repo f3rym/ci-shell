@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
@@ -14,6 +15,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
 	"github.com/f3rym/ci-shell/internal/render"
 	"github.com/f3rym/ci-shell/internal/repo"
+	"github.com/f3rym/ci-shell/internal/runner"
 	"github.com/f3rym/ci-shell/internal/token"
 )
 
@@ -82,6 +84,18 @@ func explain(err error) string {
 		return fmt.Sprintf("%s\nподтяните коммит: git fetch origin <sha> — иначе воспроизводить нечего", err)
 	case errors.Is(err, repo.ErrWorktreeFailed):
 		return fmt.Sprintf("%s\nснимите зависший worktree: git worktree prune", err)
+	case errors.Is(err, runner.ErrDockerUnavailable):
+		return fmt.Sprintf("%s\nпоставьте Docker — это единственная внешняя зависимость утилиты", err)
+	case errors.Is(err, runner.ErrDaemonUnavailable):
+		return fmt.Sprintf("%s\nзапустите Docker и повторите", err)
+	case errors.Is(err, runner.ErrNoImage):
+		return fmt.Sprintf("%s\nпохоже на shell-executor или образ по умолчанию в конфиге ранера — такая джоба не воспроизводится в принципе; если выше было предупреждение о неразобранном конфиге пайплайна, дело в нём", err)
+	case errors.Is(err, runner.ErrImageUnavailable):
+		return fmt.Sprintf("%s\nпроверьте docker login для приватного реестра и доступность самого реестра", err)
+	case errors.Is(err, runner.ErrNoShell):
+		return fmt.Sprintf("%s\nв образе нет ни bash, ни sh — интерактивно воспроизвести нельзя", err)
+	case errors.Is(err, runner.ErrContainerFailed):
+		return fmt.Sprintf("%s\nконтейнер не поднялся, подробности см. выше", err)
 	default:
 		return err.Error()
 	}
@@ -110,6 +124,58 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// Фоновый контекст: отмена основного контекста не должна помешать
 	// уборке временного worktree.
 	defer wt.Remove(context.Background())
+
+	d, err := runner.New(pr)
+	if err != nil {
+		return err
+	}
+	if err := d.Ping(ctx); err != nil {
+		return err
+	}
+	if err := d.EnsureImage(ctx, jobCfg.Image); err != nil {
+		return err
+	}
+
+	envMap := e.Map()
+	workDir := envMap["CI_PROJECT_DIR"]
+	if workDir == "" {
+		// Правило GitLab по умолчанию: /builds/<путь проекта> — шелл всё
+		// равно открывается там, где работала джоба.
+		workDir = "/builds/" + job.ProjectPath
+	}
+
+	if len(e.Missing) > 0 {
+		keys := make([]string, 0, len(e.Missing))
+		for _, m := range e.Missing {
+			keys = append(keys, m.Key)
+		}
+		fmt.Fprintf(os.Stderr, "предупреждение: без значений маскированных переменных (%s, файл %s) может воспроизвестись не тот сбой\n", strings.Join(keys, ", "), e.SecretsPath)
+	}
+
+	c, skipped, err := d.Start(ctx, runner.Spec{
+		Image:     jobCfg.Image,
+		SourceDir: wt.Dir,
+		WorkDir:   workDir,
+		Env:       envMap,
+		JobID:     job.ID,
+	})
+	if err != nil {
+		return err
+	}
+	// Регистрируется после defer снятия worktree, чтобы порядок
+	// разворачивания снял сначала контейнер, а потом каталог, который в
+	// него примонтирован.
+	defer c.Remove(context.Background())
+
+	if len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
+	}
+
+	pr.Stage("вы внутри контейнера, рабочий каталог %s; для выхода — exit или Ctrl-D", workDir)
+	if err := c.Shell(ctx); err != nil {
+		return err
+	}
+	pr.Stage("убираю контейнер и временный worktree…")
 
 	return nil
 }
