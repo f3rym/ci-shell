@@ -57,6 +57,8 @@ func explain(err error) string {
 		)
 	case errors.Is(err, token.ErrInsecurePermissions):
 		return fmt.Sprintf("%s\nпочините правами доступа: chmod 600 <путь к файлу выше>", err)
+	case errors.Is(err, env.ErrInsecureSecrets):
+		return fmt.Sprintf("%s\nпочините правами доступа: chmod 600 <путь к файлу выше>", err)
 	case errors.Is(err, joburl.ErrNotAJobURL):
 		return fmt.Sprintf("%s\nожидается ссылка на джобу вида https://gitlab.com/<группа>/<проект>/-/jobs/<id>", err)
 	case errors.Is(err, joburl.ErrInsecureScheme):
@@ -161,12 +163,25 @@ func runShell(args []string) {
 		varSet = vs
 	}
 
+	// Файл секретов пользователя закрывает маскированные переменные,
+	// которые GitLab не отдаёт по API никогда (ENV-02). Ошибка чтения не
+	// фатальна: небезопасные права (env.ErrInsecureSecrets) означают, что
+	// содержимое вообще не было прочитано, поэтому риск закрыт — печатаем
+	// предупреждение с командой chmod и продолжаем с пустым набором
+	// секретов, чтобы окружение всё равно собралось.
+	secrets, err := env.LoadSecrets(ref.Host, ref.ProjectPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: файл секретов не прочитан: %s\n", explain(err))
+	}
+
 	e := env.Assemble(env.Input{
-		Job:       job,
-		Host:      ref.Host,
-		JobConfig: jobCfg,
-		APIVars:   varSet.Variables,
-		Notices:   varSet.Notes,
+		Job:         job,
+		Host:        ref.Host,
+		JobConfig:   jobCfg,
+		APIVars:     varSet.Variables,
+		Notices:     varSet.Notes,
+		Secrets:     secrets.Values,
+		SecretsPath: secrets.Path,
 	})
 	if err := render.Env(os.Stdout, e); err != nil {
 		fail(err)

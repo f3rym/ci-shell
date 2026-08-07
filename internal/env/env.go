@@ -19,6 +19,10 @@ const (
 	SourceConfig     Source = "конфиг пайплайна"
 	SourceGroup      Source = "группа"
 	SourceProject    Source = "проект"
+	// SourceLocal — значение из локального файла секретов пользователя
+	// (internal/env/secrets.go). Верхний слой приоритета в Assemble: файл
+	// существует именно потому, что API значение не отдал.
+	SourceLocal Source = "локальный файл"
 )
 
 // Variable — одна переменная собранного окружения.
@@ -41,6 +45,9 @@ type Environment struct {
 	// (из provider.VariableSet.Notes) и переменные, пропущенные из-за
 	// EnvironmentScope, отличного от "*".
 	Notices []string
+	// SecretsPath — фактический путь к файлу секретов (из Secrets.Path),
+	// скопированный как есть для отчёта о недостающих переменных.
+	SecretsPath string
 }
 
 // Map отдаёт плоскую карту ключ→значение для Фазы 3 (docker run).
@@ -63,16 +70,27 @@ type Input struct {
 	// Notices — оговорки, собранные при опросе API (недоступные или не
 	// найденные источники), скопированные как есть в Environment.Notices.
 	Notices []string
+	// Secrets — значения маскированных переменных из локального файла
+	// секретов пользователя (Secrets.Values из internal/env/secrets.go).
+	// Верхний слой приоритета в Assemble.
+	Secrets map[string]string
+	// SecretsPath — фактический путь к файлу секретов (Secrets.Path),
+	// скопированный в Environment.SecretsPath для отчёта о недостающих
+	// переменных.
+	SecretsPath string
 }
 
 // Assemble собирает окружение джобы, накладывая слои в порядке возрастания
 // приоритета — более поздний слой перезаписывает значение и источник
 // одноимённой переменной: Predefined(in.Job, in.Host) → in.JobConfig.Variables
 // (SourceConfig) → in.APIVars со Scope == ScopeGroup (SourceGroup) →
-// in.APIVars со Scope == ScopeProject (SourceProject). Порядок повторяет
-// приоритет переменных в самом GitLab, где предопределённые — самый нижний
-// слой, а переменные проекта перекрывают переменные групп. Итоговый список
-// отсортирован по Key, чтобы вывод был стабильным между запусками.
+// in.APIVars со Scope == ScopeProject (SourceProject) → in.Secrets
+// (SourceLocal). Порядок повторяет приоритет переменных в самом GitLab, где
+// предопределённые — самый нижний слой, а переменные проекта перекрывают
+// переменные групп; локальный файл секретов — верхний слой, потому что он
+// существует именно для значений, которые API не отдал, и пользователь
+// ввёл их осознанно вручную (T-02-13). Итоговый список отсортирован по Key,
+// чтобы вывод был стабильным между запусками.
 func Assemble(in Input) Environment {
 	vars := make(map[string]Variable)
 
@@ -91,13 +109,23 @@ func Assemble(in Input) Environment {
 	applyAPILayer(vars, in.APIVars, provider.ScopeGroup, SourceGroup, &notices)
 	applyAPILayer(vars, in.APIVars, provider.ScopeProject, SourceProject, &notices)
 
+	// Секреты — верхний слой приоритета. Ключ из файла секретов, которого
+	// нет ни в одном другом слое (пользователь мог добавить переменную,
+	// которую API не показал вовсе), всё равно попадает в окружение.
+	// Переменная, помеченная Masked провайдером, не перестаёт быть
+	// секретом оттого, что её значение стало известно — здесь она
+	// перезаписывается целиком новой Variable с Secret: true.
+	for k, v := range in.Secrets {
+		vars[k] = Variable{Key: k, Value: v, Source: SourceLocal, Secret: true}
+	}
+
 	out := make([]Variable, 0, len(vars))
 	for _, v := range vars {
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 
-	return Environment{Vars: out, Notices: notices}
+	return Environment{Vars: out, Notices: notices, SecretsPath: in.SecretsPath}
 }
 
 // applyAPILayer накладывает на vars переменные apiVars с областью scope,
