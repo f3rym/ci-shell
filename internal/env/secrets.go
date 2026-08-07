@@ -3,6 +3,7 @@ package env
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -89,9 +90,17 @@ func LoadSecrets(host, projectPath string) (Secrets, error) {
 		return Secrets{}, err
 	}
 
+	// «Файла нет» — только fs.ErrNotExist. Любая другая ошибка stat
+	// (EACCES, I/O, повисший automount) — это существующий, но недоступный
+	// файл: молча счесть его отсутствующим значило бы предложить
+	// пользователю создать файл, который уже есть (WR-03). *PathError
+	// содержит только путь, не содержимое — оборачивать безопасно.
 	info, err := os.Stat(path)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return Secrets{Path: path, Found: false}, nil
+	}
+	if err != nil {
+		return Secrets{Path: path}, fmt.Errorf("env: файл секретов %s недоступен: %w", path, err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		// Path заполнен даже в ошибке: содержимое не прочитано (риск
