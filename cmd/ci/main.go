@@ -13,6 +13,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
 	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/repo"
 	"github.com/f3rym/ci-shell/internal/token"
 )
 
@@ -73,9 +74,44 @@ func explain(err error) string {
 		return fmt.Sprintf("%s\nраскрытие include/extends/!reference — требование NEXT-02, вне v0.1.0; метаданные джобы напечатаны без образа и шагов", err)
 	case errors.Is(err, provider.ErrNotSupported):
 		return err.Error()
+	case errors.Is(err, repo.ErrGitUnavailable):
+		return fmt.Sprintf("%s\nпоставьте git — утилита ходит в него за кодом коммита джобы", err)
+	case errors.Is(err, repo.ErrNotAGitRepo):
+		return fmt.Sprintf("%s\nзапустите ci shell из рабочей копии того же проекта, что и упавшая джоба", err)
+	case errors.Is(err, repo.ErrCommitNotFound):
+		return fmt.Sprintf("%s\nподтяните коммит: git fetch origin <sha> — иначе воспроизводить нечего", err)
+	case errors.Is(err, repo.ErrWorktreeFailed):
+		return fmt.Sprintf("%s\nснимите зависший worktree: git worktree prune", err)
 	default:
 		return err.Error()
 	}
+}
+
+// reproduce приводит рабочую копию к коммиту упавшей джобы во временном
+// worktree. Функция владеет очисткой через defer и никогда не завершает
+// процесс — ни через fail, ни прямым выходом: иначе отложенная очистка не
+// выполнится, и на машине останутся worktree и (в следующей задаче)
+// контейнер. Любая поломка возвращается наружу как ошибка; печать и
+// завершение делает runShell уже после возврата из reproduce.
+func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, e env.Environment, pr render.Progress) error {
+	root, err := repo.Root(ctx)
+	if err != nil {
+		return err
+	}
+
+	if remote, ok := repo.RemoteMatches(ctx, root, ref.ProjectPath); !ok {
+		fmt.Fprintf(os.Stderr, "предупреждение: remote origin (%s) не похож на проект джобы (%s) — рабочая копия может быть не той\n", remote, ref.ProjectPath)
+	}
+
+	wt, err := repo.Prepare(ctx, root, job.CommitSHA, pr)
+	if err != nil {
+		return err
+	}
+	// Фоновый контекст: отмена основного контекста не должна помешать
+	// уборке временного worktree.
+	defer wt.Remove(context.Background())
+
+	return nil
 }
 
 // runShell реализует единственную подкоманду: разбор ссылки → резолв
@@ -184,6 +220,13 @@ func runShell(args []string) {
 		SecretsPath: secrets.Path,
 	})
 	if err := render.Env(os.Stdout, e); err != nil {
+		fail(err)
+	}
+
+	// Прогресс дальнейших этапов воспроизведения идёт в stderr, чтобы
+	// stdout оставался чистым выводом метаданных и окружения.
+	pr := render.Progress{W: os.Stderr}
+	if err := reproduce(ctx, ref, job, jobCfg, e, pr); err != nil {
 		fail(err)
 	}
 }
