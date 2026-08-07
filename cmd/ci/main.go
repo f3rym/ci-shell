@@ -171,6 +171,22 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
 	}
 
+	steps := runner.Steps(jobCfg)
+	if len(steps) == 0 {
+		fmt.Fprintln(os.Stderr, "предупреждение: в конфиге джобы нет шагов — возможно, всё делает entrypoint образа")
+	} else {
+		outcome, err := runner.RunSteps(ctx, c, steps, os.Stdout, os.Stderr, pr)
+		if err != nil {
+			return err
+		}
+		if outcome.Failed != nil {
+			fmt.Fprintf(os.Stderr, "шаг %d/%d (%s) упал с кодом %d: %s\nшелл открывается сразу после последнего успешного шага\n",
+				outcome.FailedIndex, outcome.Total, outcome.Failed.Section, outcome.ExitCode, outcome.Failed.Command)
+		} else {
+			fmt.Fprintf(os.Stderr, "все %d шагов прошли — сбой не воспроизвёлся. Вероятные причины: недостающие маскированные значения (см. предупреждение выше), артефакты предыдущих стадий и кэш ранера, которые v0.1.0 не восстанавливает\n", outcome.Total)
+		}
+	}
+
 	pr.Stage("вы внутри контейнера, рабочий каталог %s; для выхода — exit или Ctrl-D", workDir)
 	if err := c.Shell(ctx); err != nil {
 		return err

@@ -39,3 +39,29 @@ func truncate(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
+
+// Step печатает строку прогресса одного шага джобы: номер шага, всего
+// шагов, секцию (before_script/script) и команду, обрезанную truncate до
+// разумной длины — длинная однострочная команда не должна разъезжаться по
+// экрану и прятать номер шага. Как и Stage, безопасен при нулевом Progress
+// и принимает только строки и числа.
+func (p Progress) Step(index, total int, section, command string) {
+	if p.W == nil {
+		return
+	}
+	fmt.Fprintf(p.W, "  [%d/%d] %s: %s\n", index, total, section, truncate(command, 60))
+}
+
+// Summary печатает итоговую строку прогона шагов джобы. При stopped печатает
+// формулировку из idea — сколько шагов выполнено из скольких, и что обход
+// остановился перед упавшим; иначе — что ни один шаг не упал.
+func (p Progress) Summary(executed, total int, stopped bool) {
+	if p.W == nil {
+		return
+	}
+	if stopped {
+		fmt.Fprintf(p.W, "  выполнено %d из %d шагов, стою перед упавшим\n", executed, total)
+		return
+	}
+	fmt.Fprintf(p.W, "  выполнено %d из %d шагов, ни один шаг не упал\n", executed, total)
+}
