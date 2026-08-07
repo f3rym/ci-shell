@@ -1,0 +1,15 @@
+# Служебное — не для образа
+.planning/
+.claude/
+.git/
+.gitignore
+idea
+
+# Артефакты сборки
+dist/
+ci
+
+# Секреты — никогда
+secrets.yml
+secrets.yaml
+.ci-shell-secrets.yml
