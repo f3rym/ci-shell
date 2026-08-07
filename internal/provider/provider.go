@@ -36,11 +36,16 @@ type Job struct {
 	Status        string
 	FailureReason string
 	Ref           string
+	// Tag — true, если пайплайн запущен по тегу, а не по ветке. От этого
+	// зависит, восстанавливать ли CI_COMMIT_TAG или CI_COMMIT_BRANCH.
+	Tag           bool
 	CommitSHA     string
 	CommitTitle   string
 	WebURL        string
 	ProjectPath   string
 	ProjectID     int64
+	PipelineID    int64
+	PipelineIID   int64
 	RunnerDesc    string
 	StartedAt     time.Time
 	FinishedAt    time.Time

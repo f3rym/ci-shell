@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
@@ -146,6 +147,11 @@ func runShell(args []string) {
 	}
 
 	if err := render.Job(os.Stdout, job, jobCfg); err != nil {
+		fail(err)
+	}
+
+	e := env.Assemble(env.Input{Job: job, Host: ref.Host, JobConfig: jobCfg})
+	if err := render.Env(os.Stdout, e); err != nil {
 		fail(err)
 	}
 }

@@ -133,6 +133,7 @@ type jobResponse struct {
 	Status        string `json:"status"`
 	FailureReason string `json:"failure_reason"`
 	Ref           string `json:"ref"`
+	Tag           bool   `json:"tag"`
 	WebURL        string `json:"web_url"`
 	Commit        struct {
 		ID    string `json:"id"`
@@ -141,6 +142,10 @@ type jobResponse struct {
 	Project struct {
 		ID int64 `json:"id"`
 	} `json:"project"`
+	Pipeline struct {
+		ID  int64 `json:"id"`
+		IID int64 `json:"iid"`
+	} `json:"pipeline"`
 	Runner struct {
 		Description string `json:"description"`
 	} `json:"runner"`
@@ -171,11 +176,14 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 		Status:        resp.Status,
 		FailureReason: resp.FailureReason,
 		Ref:           resp.Ref,
+		Tag:           resp.Tag,
 		CommitSHA:     resp.Commit.ID,
 		CommitTitle:   resp.Commit.Title,
 		WebURL:        resp.WebURL,
 		ProjectPath:   projectPath,
 		ProjectID:     resp.Project.ID,
+		PipelineID:    resp.Pipeline.ID,
+		PipelineIID:   resp.Pipeline.IID,
 		RunnerDesc:    resp.Runner.Description,
 	}
 	if resp.StartedAt != nil {
