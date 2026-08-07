@@ -41,6 +41,13 @@ type Variable struct {
 // Environment — собранное окружение упавшей джобы.
 type Environment struct {
 	Vars []Variable
+	// Host и ProjectPath скопированы из Input как есть — для ключа проекта
+	// в отчёте о недостающих переменных. Ключ нельзя выводить из собранных
+	// переменных (CI_SERVER_HOST/CI_PROJECT_PATH): их может перекрыть
+	// секрет из локального файла или маскированная переменная API — тогда
+	// в отчёт утёк бы секрет или пустая строка (WR-01).
+	Host        string
+	ProjectPath string
 	// Notices — честные оговорки: недоступные источники переменных
 	// (из provider.VariableSet.Notes) и переменные, пропущенные из-за
 	// EnvironmentScope, отличного от "*".
@@ -151,7 +158,14 @@ func Assemble(in Input) Environment {
 		}
 	}
 
-	return Environment{Vars: out, Notices: notices, SecretsPath: in.SecretsPath, Missing: missing}
+	return Environment{
+		Vars:        out,
+		Host:        in.Host,
+		ProjectPath: in.Job.ProjectPath,
+		Notices:     notices,
+		SecretsPath: in.SecretsPath,
+		Missing:     missing,
+	}
 }
 
 // applyAPILayer накладывает на vars переменные apiVars с областью scope,

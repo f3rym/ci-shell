@@ -82,25 +82,15 @@ func missingReport(w io.Writer, e env.Environment) error {
 	return nil
 }
 
-// projectKey собирает ключ проекта для фрагмента YAML из уже подставленных
-// в e переменных CI_SERVER_HOST и CI_PROJECT_PATH — тот же ключ, по
-// которому LoadSecrets ищет запись в файле секретов, чтобы фрагмент можно
-// было скопировать без правок.
+// projectKey собирает ключ проекта для фрагмента YAML из e.Host и
+// e.ProjectPath — тот же ключ, по которому LoadSecrets ищет запись в файле
+// секретов, чтобы фрагмент можно было скопировать без правок. Умышленно не
+// читает собранные переменные (CI_SERVER_HOST/CI_PROJECT_PATH): их может
+// перекрыть верхний слой — секрет из локального файла попал бы в отчёт
+// в обход displayValue, а маскированная переменная API испортила бы ключ
+// пустым значением (WR-01).
 func projectKey(e env.Environment) string {
-	return varValue(e, "CI_SERVER_HOST") + "/" + varValue(e, "CI_PROJECT_PATH")
-}
-
-// varValue ищет значение переменной по ключу в уже собранном списке e.Vars
-// без обращения к e.Map(): единственный путь к значению переменной должен
-// оставаться под контролем displayValue там, где значение может быть
-// секретом. CI_SERVER_HOST и CI_PROJECT_PATH секретами не бывают.
-func varValue(e env.Environment, key string) string {
-	for _, v := range e.Vars {
-		if v.Key == key {
-			return v.Value
-		}
-	}
-	return ""
+	return e.Host + "/" + e.ProjectPath
 }
 
 // displayValue — единственная точка, где решается, показывать значение
