@@ -24,8 +24,18 @@ type Provider interface {
 	MergedConfig(ctx context.Context, projectPath, sha string) (Config, error)
 	// Artifacts возвращает артефакты предыдущих стадий для джобы.
 	Artifacts(ctx context.Context, job Job) ([]Artifact, error)
-	// Variables возвращает переменные проекта и группы, видимые джобе.
-	Variables(ctx context.Context, job Job) (map[string]string, error)
+	// Variables возвращает переменные проекта и всех родительских групп,
+	// видимые джобе job.
+	//
+	// Отклонение от буквальной сигнатуры idea §6 (map[string]string):
+	// плоская карта не различает переменную, у которой значение есть, и
+	// маскированную, у которой значения не будет никогда — а на этом
+	// различии стоит весь ENV-02. VariableSet.Notes несёт честные оговорки
+	// о недоступных источниках, которые нельзя вернуть через error, потому
+	// что обход остальных источников продолжается. Отклонение безопасно:
+	// метод сегодня нигде не вызывается кроме cmd/ci, прежняя заглушка —
+	// единственная реализация.
+	Variables(ctx context.Context, job Job) (VariableSet, error)
 }
 
 // Job — метаданные джобы CI, полученные через API провайдера.
@@ -74,6 +84,38 @@ type Artifact struct {
 	Filename string
 	Size     int64
 	FileType string
+}
+
+// VariableScope — принадлежность переменной: проекту или одной из
+// родительских групп.
+type VariableScope string
+
+const (
+	ScopeProject VariableScope = "проект"
+	ScopeGroup   VariableScope = "группа"
+)
+
+// Variable — переменная проекта или группы, видимая джобе.
+type Variable struct {
+	Key       string
+	Value     string
+	Masked    bool
+	Protected bool
+	// EnvironmentScope — область окружения, которой ограничена переменная
+	// ("*" означает «без ограничений»).
+	EnvironmentScope string
+	Scope            VariableScope
+	// Owner — путь проекта или группы, которой принадлежит переменная.
+	Owner string
+}
+
+// VariableSet — переменные, собранные Provider.Variables.
+type VariableSet struct {
+	Variables []Variable
+	// Notes несёт честные оговорки о недоступных источниках («к
+	// переменным группы X нет доступа»), которые нельзя вернуть через
+	// error, потому что сбор остальных источников продолжается.
+	Notes []string
 }
 
 // JobByName ищет джобу в конфиге по имени.

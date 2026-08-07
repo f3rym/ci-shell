@@ -206,9 +206,3 @@ func (c *Client) FindFailedJob(ctx context.Context, repo, ref string) (provider.
 func (c *Client) Artifacts(ctx context.Context, job provider.Job) ([]provider.Artifact, error) {
 	return nil, fmt.Errorf("gitlab: скачивание артефактов — см. NEXT-03: %w", provider.ErrNotSupported)
 }
-
-// Variables — переменные проекта и группы через API. Это требование
-// GLAB-02 (Фаза 2), в Фазе 1 не реализовано.
-func (c *Client) Variables(ctx context.Context, job provider.Job) (map[string]string, error) {
-	return nil, fmt.Errorf("gitlab: переменные проекта и группы — см. GLAB-02, Фаза 2: %w", provider.ErrNotSupported)
-}

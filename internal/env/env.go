@@ -4,6 +4,7 @@
 package env
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -36,6 +37,10 @@ type Variable struct {
 // Environment — собранное окружение упавшей джобы.
 type Environment struct {
 	Vars []Variable
+	// Notices — честные оговорки: недоступные источники переменных
+	// (из provider.VariableSet.Notes) и переменные, пропущенные из-за
+	// EnvironmentScope, отличного от "*".
+	Notices []string
 }
 
 // Map отдаёт плоскую карту ключ→значение для Фазы 3 (docker run).
@@ -52,15 +57,22 @@ type Input struct {
 	Job       provider.Job
 	Host      string
 	JobConfig provider.JobConfig
+	// APIVars — переменные проекта и групп, полученные через
+	// Provider.Variables (GLAB-02).
+	APIVars []provider.Variable
+	// Notices — оговорки, собранные при опросе API (недоступные или не
+	// найденные источники), скопированные как есть в Environment.Notices.
+	Notices []string
 }
 
 // Assemble собирает окружение джобы, накладывая слои в порядке возрастания
 // приоритета — более поздний слой перезаписывает значение и источник
-// одноимённой переменной: сначала Predefined(in.Job, in.Host), затем
-// in.JobConfig.Variables с источником SourceConfig. Порядок повторяет
+// одноимённой переменной: Predefined(in.Job, in.Host) → in.JobConfig.Variables
+// (SourceConfig) → in.APIVars со Scope == ScopeGroup (SourceGroup) →
+// in.APIVars со Scope == ScopeProject (SourceProject). Порядок повторяет
 // приоритет переменных в самом GitLab, где предопределённые — самый нижний
-// слой. Итоговый список отсортирован по Key, чтобы вывод был стабильным
-// между запусками.
+// слой, а переменные проекта перекрывают переменные групп. Итоговый список
+// отсортирован по Key, чтобы вывод был стабильным между запусками.
 func Assemble(in Input) Environment {
 	vars := make(map[string]Variable)
 
@@ -71,11 +83,45 @@ func Assemble(in Input) Environment {
 		vars[k] = Variable{Key: k, Value: v, Source: SourceConfig}
 	}
 
+	notices := append([]string{}, in.Notices...)
+
+	// Слой групп, затем слой проекта — оба прохода устойчивы, поэтому
+	// внутри каждой группы сохраняется порядок, в котором её вернул
+	// провайдер (внешние раньше внутренних).
+	applyAPILayer(vars, in.APIVars, provider.ScopeGroup, SourceGroup, &notices)
+	applyAPILayer(vars, in.APIVars, provider.ScopeProject, SourceProject, &notices)
+
 	out := make([]Variable, 0, len(vars))
 	for _, v := range vars {
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 
-	return Environment{Vars: out}
+	return Environment{Vars: out, Notices: notices}
+}
+
+// applyAPILayer накладывает на vars переменные apiVars с областью scope,
+// помечая их source и Origin (путь группы или проекта). Переменная
+// с EnvironmentScope, отличным от "*" или пустого, не подставляется — в
+// notices уходит строка с её ключом и областью (idea §1: утилита не должна
+// подставлять окружение, не соответствующее упавшему прогону). Маскированные
+// переменные попадают в vars с пустым Value и Secret: true — как
+// существующие, но без значения.
+func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope provider.VariableScope, source Source, notices *[]string) {
+	for _, v := range apiVars {
+		if v.Scope != scope {
+			continue
+		}
+		if v.EnvironmentScope != "" && v.EnvironmentScope != "*" {
+			*notices = append(*notices, fmt.Sprintf("%s (%s %s): область окружения %q — переменная не подставлена", v.Key, scope, v.Owner, v.EnvironmentScope))
+			continue
+		}
+		vars[v.Key] = Variable{
+			Key:    v.Key,
+			Value:  v.Value,
+			Source: source,
+			Origin: v.Owner,
+			Secret: v.Masked,
+		}
+	}
 }

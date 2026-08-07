@@ -150,7 +150,24 @@ func runShell(args []string) {
 		fail(err)
 	}
 
-	e := env.Assemble(env.Input{Job: job, Host: ref.Host, JobConfig: jobCfg})
+	// Переменные проекта и групп не критичны: предопределённые CI_*
+	// полезны и без них. Отказ (нет доступа, устаревший токен) печатается
+	// предупреждением в stderr, и сборка окружения продолжается с пустым
+	// набором API-переменных (GLAB-02).
+	var varSet provider.VariableSet
+	if vs, err := p.Variables(ctx, job); err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: переменные проекта и групп не получены: %s\n", explain(err))
+	} else {
+		varSet = vs
+	}
+
+	e := env.Assemble(env.Input{
+		Job:       job,
+		Host:      ref.Host,
+		JobConfig: jobCfg,
+		APIVars:   varSet.Variables,
+		Notices:   varSet.Notes,
+	})
 	if err := render.Env(os.Stdout, e); err != nil {
 		fail(err)
 	}
