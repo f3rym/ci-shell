@@ -5,3 +5,7 @@
 secrets.yml
 secrets.yaml
 .ci-shell-secrets.yml
+
+# Артефакты сборки (make build / make all)
+/ci
+/dist/

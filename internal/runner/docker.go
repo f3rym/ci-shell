@@ -37,19 +37,28 @@ var (
 	ErrContainerFailed = errors.New("контейнер не поднялся")
 )
 
-// Docker — точка доступа к локальному демону через docker CLI.
+// containerCLI — имя бинаря контейнерного рантайма. По умолчанию docker;
+// подменяется на этапе сборки (например, на Apple `container` для macOS):
+//
+//	go build -ldflags "-X github.com/f3rym/ci-shell/internal/runner.containerCLI=container"
+//
+// CLI обязан быть docker-совместимым по используемым подкомандам:
+// version/image inspect/pull/create/start/exec/rm.
+var containerCLI = "docker"
+
+// Docker — точка доступа к локальному демону через docker-совместимый CLI.
 type Docker struct {
 	bin      string
 	progress render.Progress
 }
 
-// New ищет docker в PATH. Демон при этом не дёргается: проверка PATH
-// мгновенная, а «docker установлен» и «демон отвечает» — разные поломки с
+// New ищет контейнерный CLI в PATH. Демон при этом не дёргается: проверка
+// PATH мгновенная, а «CLI установлен» и «демон отвечает» — разные поломки с
 // разными подсказками (см. Ping).
 func New(p render.Progress) (*Docker, error) {
-	bin, err := exec.LookPath("docker")
+	bin, err := exec.LookPath(containerCLI)
 	if err != nil {
-		return nil, fmt.Errorf("runner: docker не найден в PATH: %w", ErrDockerUnavailable)
+		return nil, fmt.Errorf("runner: %s не найден в PATH: %w", containerCLI, ErrDockerUnavailable)
 	}
 	return &Docker{bin: bin, progress: p}, nil
 }
