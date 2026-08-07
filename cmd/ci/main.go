@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
@@ -89,16 +91,27 @@ func explain(err error) string {
 	case errors.Is(err, runner.ErrDaemonUnavailable):
 		return fmt.Sprintf("%s\nзапустите Docker и повторите", err)
 	case errors.Is(err, runner.ErrNoImage):
-		return fmt.Sprintf("%s\nпохоже на shell-executor или образ по умолчанию в конфиге ранера — такая джоба не воспроизводится в принципе; если выше было предупреждение о неразобранном конфиге пайплайна, дело в нём", err)
+		return fmt.Sprintf("%s\n%s: похоже на shell-executor или образ по умолчанию в конфиге ранера; если выше было предупреждение о неразобранном конфиге пайплайна, дело в нём", err, unreproducibleNote(err))
 	case errors.Is(err, runner.ErrImageUnavailable):
 		return fmt.Sprintf("%s\nпроверьте docker login для приватного реестра и доступность самого реестра", err)
 	case errors.Is(err, runner.ErrNoShell):
-		return fmt.Sprintf("%s\nв образе нет ни bash, ни sh — интерактивно воспроизвести нельзя", err)
+		return fmt.Sprintf("%s\n%s: в образе нет ни bash, ни sh", err, unreproducibleNote(err))
 	case errors.Is(err, runner.ErrContainerFailed):
 		return fmt.Sprintf("%s\nконтейнер не поднялся, подробности см. выше", err)
 	default:
 		return err.Error()
 	}
+}
+
+// unreproducibleNote отличает джобу, которая не воспроизводится этой
+// утилитой в принципе (runner.Unreproducible), от временно неготовой машины
+// пользователя: в первом случае не советуем повторить попытку, а честно
+// говорим, что дело не в машине пользователя (idea §7).
+func unreproducibleNote(err error) string {
+	if runner.Unreproducible(err) {
+		return "джоба не воспроизводится этой утилитой, повторная попытка не поможет"
+	}
+	return "проверьте состояние машины и повторите"
 }
 
 // reproduce приводит рабочую копию к коммиту упавшей джобы во временном
@@ -108,6 +121,26 @@ func explain(err error) string {
 // контейнер. Любая поломка возвращается наружу как ошибка; печать и
 // завершение делает runShell уже после возврата из reproduce.
 func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, e env.Environment, pr render.Progress) error {
+	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
+	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
+	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
+	// снимает контейнер, а затем worktree.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Создание клиента docker и дешёвая проверка воспроизводимости идут в
+	// самом начале — до подготовки кода и до тяги образа: пользователь с
+	// невоспроизводимой джобой или без запущенного Docker получает ответ за
+	// секунду и без единого артефакта на диске (idea §7).
+	d, err := runner.New(pr)
+	if err != nil {
+		return err
+	}
+	pr.Stage("проверяю Docker и воспроизводимость джобы…")
+	if err := runner.Preflight(ctx, d, jobCfg.Image); err != nil {
+		return err
+	}
+
 	root, err := repo.Root(ctx)
 	if err != nil {
 		return err
@@ -122,16 +155,17 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 	// Фоновый контекст: отмена основного контекста не должна помешать
-	// уборке временного worktree.
-	defer wt.Remove(context.Background())
+	// уборке временного worktree. Неудача снятия печатается предупреждением
+	// с готовой командой добивки — пользователь не должен обнаруживать
+	// остаток через неделю.
+	defer func() {
+		if err := wt.Remove(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\nдобейте вручную: git worktree prune\n", err)
+		}
+	}()
 
-	d, err := runner.New(pr)
-	if err != nil {
-		return err
-	}
-	if err := d.Ping(ctx); err != nil {
-		return err
-	}
+	// d.EnsureImage остаётся здесь, после подготовки кода: это уже дорогая
+	// операция с собственным прогрессом, а не дешёвая проверка Preflight.
 	if err := d.EnsureImage(ctx, jobCfg.Image); err != nil {
 		return err
 	}
@@ -164,8 +198,13 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 	// Регистрируется после defer снятия worktree, чтобы порядок
 	// разворачивания снял сначала контейнер, а потом каталог, который в
-	// него примонтирован.
-	defer c.Remove(context.Background())
+	// него примонтирован. Неудача снятия печатается предупреждением с
+	// готовой командой добивки.
+	defer func() {
+		if err := c.Remove(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\nдобейте вручную: docker rm -f %s\n", err, c.ID)
+		}
+	}()
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
