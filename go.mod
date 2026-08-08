@@ -9,4 +9,14 @@ module github.com/f3rym/ci-shell
 // конкретному выпуску.
 go 1.25
 
-require gopkg.in/yaml.v3 v3.0.1
+// Косвенные зависимости и go.sum в этом релизе не восстанавливаются: проект
+// верифицируется чтением исходников без сети (PROJECT.md), поэтому
+// `go mod tidy`/`go mod download` здесь не запускались. Первая настоящая
+// сборка потребует одного вызова `go mod tidy` — это ожидаемое следствие
+// ограничения проекта, а не поломка зависимостей или их подмена.
+require (
+	gopkg.in/yaml.v3 v3.0.1
+	charm.land/bubbletea/v2 v2.0.8
+	charm.land/lipgloss/v2 v2.0.5
+	charm.land/bubbles/v2 v2.1.1
+)
