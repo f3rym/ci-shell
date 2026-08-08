@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -375,16 +374,23 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// где выполнить (idea-0.2.0 §8). Контейнер работает под root, каталог
 	// смонтирован из постоянного кэша — без возврата владельца файлы root
 	// накапливались бы в кэше пользователя навсегда.
+	//
+	// Возврат владельца идёт через Container.Chown, а не через оболочку
+	// внутри контейнера: workDir — это значение CI_PROJECT_DIR, пришедшее из
+	// переменных проекта/группы по API либо из файла секретов, и подстановка
+	// его в строку для sh -c дала бы исполнение произвольной команды под root
+	// в каталоге, смонтированном с хоста. Путь уходит отдельным элементом
+	// argv, как в MkdirAll и Chmod.
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid >= 0 && gid >= 0 {
 		defer func() {
-			chownCtx := context.Background()
-			chownCmd := fmt.Sprintf("chown -R %d:%d %s", uid, gid, workDir)
-			// Ошибка и ненулевой код не фатальны и не печатаются как ошибка
-			// — в образе может не быть chown; на этот случай в
-			// Checkout.Remove уже есть готовая команда добивки. Вывод
-			// chown пользователю не нужен.
-			_, _ = c.Exec(chownCtx, chownCmd, io.Discard, io.Discard)
+			// Ошибка не фатальна — в образе может не быть chown, и на этот
+			// случай в Checkout.Remove уже есть готовая команда добивки. Но и
+			// не молча: иначе пользователь узнаёт о root-файлах в своём кэше
+			// только когда об них спотыкается уборка.
+			if err := c.Chown(context.Background(), fmt.Sprintf("%d:%d", uid, gid), workDir); err != nil {
+				fmt.Fprintf(os.Stderr, "предупреждение: %s\nфайлы в каталоге кода могли остаться под root\n", err)
+			}
 		}()
 	}
 

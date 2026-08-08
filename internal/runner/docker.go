@@ -333,6 +333,22 @@ func (c *Container) Chmod(ctx context.Context, mode, path string) error {
 	return nil
 }
 
+// Chown рекурсивно возвращает владельца owner (в форме "<uid>:<gid>")
+// каталогу path внутри контейнера. Владелец и путь — отдельные элементы
+// среза аргументов exec, ровно как в MkdirAll и Chmod: оболочка внутри
+// контейнера не задействована вовсе. Это не стилистика, а граница доверия —
+// path приходит из CI_PROJECT_DIR, то есть из переменной проекта, группы
+// или файла секретов, и склейка его в строку для sh -c означала бы
+// исполнение произвольной команды под root в каталоге, смонтированном с
+// хоста (при --here — прямо в рабочей копии пользователя).
+func (c *Container) Chown(ctx context.Context, owner, path string) error {
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", c.ID, "chown", "-R", owner, path)
+	if _, err := runCaptured(cmd); err != nil {
+		return fmt.Errorf("runner: не удалось вернуть владельца %s каталогу %s в контейнере: %s", owner, path, err)
+	}
+	return nil
+}
+
 // Remove удаляет контейнер (docker rm -f), заглушая вывод. Вызывается из
 // defer при разворачивании. Идемпотентен: повторный вызов после успешного
 // снятия ничего не делает и не возвращает ошибку — с Фазы 7 контейнер
