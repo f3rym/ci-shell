@@ -129,6 +129,13 @@ type Container struct {
 	d       *Docker
 	workDir string
 	shell   string
+	// removed отражает, что контейнер уже снят: Remove идемпотентен,
+	// потому что с Фазы 7 контейнер снимается явным вызовом до старта
+	// чистого прогона, а отложенный вызов у исходного вызывающего остаётся
+	// на месте — без идемпотентности второй вызов печатал бы пользователю
+	// предупреждение о невозможности снять уже снятый контейнер и советовал
+	// бы добить его руками, хотя добивать уже нечего.
+	removed bool
 }
 
 // holdCommand удерживает контейнер запущенным, пока пользователь работает
@@ -280,14 +287,67 @@ func (c *Container) Shell(ctx context.Context) error {
 	return nil
 }
 
+// MkdirAll создаёt каталог dir внутри контейнера рекурсивно (docker exec с
+// mkdir -p). Путь идёт отдельным элементом среза аргументов — оболочка
+// внутри контейнера здесь не задействована вовсе.
+func (c *Container) MkdirAll(ctx context.Context, dir string) error {
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", c.ID, "mkdir", "-p", dir)
+	if _, err := runCaptured(cmd); err != nil {
+		return fmt.Errorf("runner: не удалось создать каталог %s в контейнере: %s", dir, err)
+	}
+	return nil
+}
+
+// WriteFile пишет content в файл path внутри контейнера через tee: путь
+// идёт отдельным элементом среза аргументов exec, а содержимое —
+// стандартным вводом дочернего процесса (cmd.Stdin), а не аргументом.
+// Причина: аргументы дочерних процессов контейнерного CLI видны в таблице
+// процессов машины любому её пользователю, а оболочка с перенаправлением
+// (sh -c "cat > path") потребовала бы склейки content в строку команды и
+// вернула бы ровно ту же утечку. Стандартный вывод tee отправляется в
+// io.Discard — иначе tee продублировал бы записанное содержимое в
+// терминал пользователя.
+func (c *Container) WriteFile(ctx context.Context, path, content string) error {
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-i", c.ID, "tee", path)
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := firstLine(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("runner: не удалось записать файл %s в контейнере: %s", path, msg)
+	}
+	return nil
+}
+
+// Chmod меняет права файла path внутри контейнера. Режим и путь — отдельные
+// элементы среза аргументов exec.
+func (c *Container) Chmod(ctx context.Context, mode, path string) error {
+	cmd := exec.CommandContext(ctx, c.d.bin, "exec", c.ID, "chmod", mode, path)
+	if _, err := runCaptured(cmd); err != nil {
+		return fmt.Errorf("runner: не удалось сменить права %s файлу %s в контейнере: %s", mode, path, err)
+	}
+	return nil
+}
+
 // Remove удаляет контейнер (docker rm -f), заглушая вывод. Вызывается из
-// defer при разворачивании.
+// defer при разворачивании. Идемпотентен: повторный вызов после успешного
+// снятия ничего не делает и не возвращает ошибку — с Фазы 7 контейнер
+// снимается явным вызовом до старта чистого прогона, а отложенное снятие
+// у исходного вызывающего остаётся зарегистрированным и срабатывает позже.
 func (c *Container) Remove(ctx context.Context) error {
+	if c.removed {
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, c.d.bin, "rm", "-f", c.ID)
 	_, err := runCaptured(cmd)
 	if err != nil {
 		return fmt.Errorf("runner: не удалось удалить контейнер %s: %w", shortID(c.ID), err)
 	}
+	c.removed = true
 	return nil
 }
 
