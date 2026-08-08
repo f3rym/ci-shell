@@ -19,6 +19,10 @@ const (
 	SourceConfig     Source = "конфиг пайплайна"
 	SourceGroup      Source = "группа"
 	SourceProject    Source = "проект"
+	// SourcePipeline — переменная, переданная при запуске пайплайна: то,
+	// что человек ввёл в форме ручного запуска (when: manual) или передал
+	// trigger-токеном.
+	SourcePipeline Source = "запуск пайплайна"
 	// SourceLocal — значение из локального файла секретов пользователя
 	// (internal/env/secrets.go). Верхний слой приоритета в Assemble: файл
 	// существует именно потому, что API значение не отдал.
@@ -124,13 +128,16 @@ type Input struct {
 // приоритета — более поздний слой перезаписывает значение и источник
 // одноимённой переменной: Predefined(in.Job, in.Host) → in.JobConfig.Variables
 // (SourceConfig) → in.APIVars со Scope == ScopeGroup (SourceGroup) →
-// in.APIVars со Scope == ScopeProject (SourceProject) → in.Secrets
-// (SourceLocal). Порядок повторяет приоритет переменных в самом GitLab, где
-// предопределённые — самый нижний слой, а переменные проекта перекрывают
-// переменные групп; локальный файл секретов — верхний слой, потому что он
-// существует именно для значений, которые API не отдал, и пользователь
-// ввёл их осознанно вручную (T-02-13). Итоговый список отсортирован по Key,
-// чтобы вывод был стабильным между запусками.
+// in.APIVars со Scope == ScopeProject (SourceProject) → in.APIVars со
+// Scope == ScopePipeline (SourcePipeline) → in.Secrets (SourceLocal).
+// Порядок повторяет приоритет переменных в самом GitLab, где
+// предопределённые — самый нижний слой, переменные проекта перекрывают
+// переменные групп, а переменные, переданные при запуске пайплайна
+// (ручной запуск, trigger-токен), перекрывают их все; локальный файл
+// секретов — верхний слой, потому что он существует именно для значений,
+// которые API не отдал, и пользователь ввёл их осознанно вручную (T-02-13).
+// Итоговый список отсортирован по Key, чтобы вывод был стабильным между
+// запусками.
 func Assemble(in Input) Environment {
 	vars := make(map[string]Variable)
 
@@ -148,6 +155,11 @@ func Assemble(in Input) Environment {
 	// провайдер (внешние раньше внутренних).
 	applyAPILayer(vars, in.APIVars, provider.ScopeGroup, SourceGroup, &notices)
 	applyAPILayer(vars, in.APIVars, provider.ScopeProject, SourceProject, &notices)
+
+	// Слой пайплайна — выше проекта и групп: в самом GitLab переменные,
+	// переданные при запуске пайплайна, перекрывают переменные проекта и
+	// групп, но остаются ниже локального файла секретов.
+	applyAPILayer(vars, in.APIVars, provider.ScopePipeline, SourcePipeline, &notices)
 
 	// Секреты — верхний слой приоритета. Ключ из файла секретов, которого
 	// нет ни в одном другом слое (пользователь мог добавить переменную,

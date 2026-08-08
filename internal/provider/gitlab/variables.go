@@ -12,8 +12,13 @@ import (
 	"github.com/f3rym/ci-shell/internal/provider"
 )
 
-// variableResponse — элемент ответа GET /groups/:id/variables и
-// GET /projects/:id/variables.
+// variableResponse — элемент ответа GET /groups/:id/variables,
+// GET /projects/:id/variables и GET /projects/:id/pipelines/:id/variables.
+// Ответ эндпоинта переменных пайплайна беднее — в нём есть только key,
+// value и variable_type, а полей masked, protected и environment_scope
+// нет вовсе; нулевые значения этих полей при разборе означают ровно то,
+// что нужно: переменная не маскирована и ничем не ограничена. Ровно
+// поэтому отдельная структура ответа под пайплайн не заводится.
 type variableResponse struct {
 	Key              string `json:"key"`
 	Value            string `json:"value"`
@@ -29,15 +34,20 @@ type variableResponse struct {
 }
 
 // Variables возвращает переменные проекта и всех родительских групп,
-// видимые джобе job. Реализует provider.Provider.Variables (GLAB-02).
+// видимые джобе job, а также переменные, переданные при запуске пайплайна
+// job.PipelineID (ручной запуск, trigger-токен). Реализует
+// provider.Provider.Variables (GLAB-02).
 //
 // Опрос идёт от внешнего к внутреннему — сначала группы-предки в порядке от
-// самой внешней к самой внутренней, затем сам проект — чтобы при слиянии в
-// internal/env более близкий источник перекрывал дальний. Отказ одного
-// источника (нет доступа, источник не найден) не прерывает обход остальных:
-// токен часто имеет область read_api или роль ниже Maintainer, при которой
-// настройки переменных закрыты — это нормальная ситуация, а не повод
-// обрывать восстановление окружения (idea §3.4).
+// самой внешней к самой внутренней, затем сам проект, затем пайплайн —
+// чтобы при слиянии в internal/env более близкий источник перекрывал
+// дальний. Порядок обхода здесь не приоритет (приоритет задаёт
+// env.Assemble), но он держит источники в том же порядке, в каком они
+// накладываются. Отказ одного источника (нет доступа, источник не найден)
+// не прерывает обход остальных: токен часто имеет область read_api или
+// роль ниже Maintainer, при которой настройки переменных закрыты — это
+// нормальная ситуация, а не повод обрывать восстановление окружения
+// (idea §3.4).
 func (c *Client) Variables(ctx context.Context, job provider.Job) (provider.VariableSet, error) {
 	var set provider.VariableSet
 
@@ -59,7 +69,30 @@ func (c *Client) Variables(ctx context.Context, job provider.Job) (provider.Vari
 	set.Variables = append(set.Variables, vars...)
 	set.Notes = append(set.Notes, notes...)
 
+	pipelineVars, pipelineNotes, err := c.pipelineVariables(ctx, job)
+	if err != nil {
+		return provider.VariableSet{}, err
+	}
+	set.Variables = append(set.Variables, pipelineVars...)
+	set.Notes = append(set.Notes, pipelineNotes...)
+
 	return set, nil
+}
+
+// pipelineVariables запрашивает переменные, переданные при запуске
+// пайплайна job.PipelineID: то, что человек ввёл в форме ручного запуска
+// (when: manual) или передал trigger-токеном. Источника может не быть —
+// job.PipelineID == 0 означает, что у джобы не известен пайплайн, и вместо
+// запроса с нулевым идентификатором (который дал бы невнятный отказ
+// сервера) возвращается честная оговорка.
+func (c *Client) pipelineVariables(ctx context.Context, job provider.Job) ([]provider.Variable, []string, error) {
+	if job.PipelineID == 0 {
+		return nil, []string{"пайплайн: у джобы не известен идентификатор пайплайна — переменные пайплайна не запрашивались"}, nil
+	}
+
+	path := fmt.Sprintf("/projects/%s/pipelines/%d/variables?per_page=100", url.PathEscape(job.ProjectPath), job.PipelineID)
+	owner := fmt.Sprintf("#%d", job.PipelineID)
+	return c.fetchVariables(ctx, path, provider.ScopePipeline, owner)
 }
 
 // fetchVariables запрашивает переменные одного источника (owner — путь

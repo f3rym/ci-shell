@@ -25,7 +25,9 @@ type Provider interface {
 	// Artifacts возвращает артефакты предыдущих стадий для джобы.
 	Artifacts(ctx context.Context, job Job) ([]Artifact, error)
 	// Variables возвращает переменные проекта и всех родительских групп,
-	// видимые джобе job.
+	// видимые джобе job, а также переменные, переданные при запуске
+	// пайплайна (ручной запуск, trigger-токен) — четвёртый источник
+	// возвращается тем же набором, отличаясь только Scope.
 	//
 	// Отклонение от буквальной сигнатуры idea §6 (map[string]string):
 	// плоская карта не различает переменную, у которой значение есть, и
@@ -95,8 +97,12 @@ type Artifact struct {
 type VariableScope string
 
 const (
-	ScopeProject VariableScope = "проект"
-	ScopeGroup   VariableScope = "группа"
+	ScopeProject  VariableScope = "проект"
+	ScopeGroup    VariableScope = "группа"
+	// ScopePipeline — переменные, переданные при запуске пайплайна: то, что
+	// человек ввёл в форме ручного запуска (when: manual) или передал
+	// trigger-токеном.
+	ScopePipeline VariableScope = "пайплайн"
 )
 
 // Variable — переменная проекта или группы, видимая джобе.
@@ -110,7 +116,10 @@ type Variable struct {
 	// путь к временному файлу с этим содержимым.
 	IsFile bool
 	// EnvironmentScope — область окружения, которой ограничена переменная
-	// ("*" означает «без ограничений»).
+	// ("*" означает «без ограничений»). У переменных пайплайна
+	// (ScopePipeline) этого поля в ответе API нет вовсе — пустое значение
+	// здесь равнозначно отсутствию ограничения, как и для остальных
+	// источников.
 	EnvironmentScope string
 	Scope            VariableScope
 	// Owner — путь проекта или группы, которой принадлежит переменная.
