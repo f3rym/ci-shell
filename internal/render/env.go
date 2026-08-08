@@ -62,7 +62,7 @@ func missingReport(w io.Writer, e env.Environment) error {
 		keys = append(keys, m.Key)
 	}
 
-	if _, err := fmt.Fprintf(w, "\nGitLab не отдаёт значения %d маскированных переменных: %s\n", len(e.Missing), strings.Join(keys, ", ")); err != nil {
+	if _, err := fmt.Fprintf(w, "\nGitLab не отдаёт значения %d переменных (тип masked and hidden — пишутся один раз и через API не читаются): %s\n", len(e.Missing), strings.Join(keys, ", ")); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "заполните их один раз в файле %s:\n\n", e.SecretsPath); err != nil {
