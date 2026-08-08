@@ -7,12 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
-	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/render"
 )
 
@@ -23,7 +20,10 @@ var (
 	ErrGitUnavailable = errors.New("git не найден в PATH")
 	// ErrNotAGitRepo — команда запущена не из рабочей копии git.
 	ErrNotAGitRepo = errors.New("текущий каталог не является рабочей копией git")
-	// ErrCommitNotFound — коммита джобы нет локально.
+	// ErrCommitNotFound — у джобы нет коммита, воспроизводить нечего: либо
+	// sha в метаданных пуст, либо коммит не нашёлся ни локально, ни в
+	// зеркале. С Фазы 5 это штатная ветка Materialize, а не отказ
+	// пользователю с советом сходить в git руками.
 	ErrCommitNotFound = errors.New("коммит джобы не найден локально")
 	// ErrWorktreeFailed — сам git worktree add отказал.
 	ErrWorktreeFailed = errors.New("не удалось создать worktree")
@@ -69,83 +69,48 @@ type Worktree struct {
 	Dir string
 	SHA string
 
-	root   string
-	parent string
+	root string
 }
 
-// Prepare приводит рабочую копию root к коммиту sha в отдельном временном
-// worktree и печатает этап через p. Ни на одной ветке неудачи временный
-// каталог не остаётся на диске.
-func Prepare(ctx context.Context, root, sha string, p render.Progress) (*Worktree, error) {
+// Prepare приводит рабочую копию root к коммиту sha в уже вычисленный путь
+// dir и печатает этап через p. С Фазы 5 каталог чекаута выбирает не этот
+// пакет — путь приходит извне (см. repo.Checkout), а в плане 05-02 он
+// станет настраиваемым пользователем; git worktree add отказывается писать
+// в существующий каталог, поэтому dir на входе не должен существовать.
+func Prepare(ctx context.Context, root, sha, dir string, p render.Progress) (*Worktree, error) {
 	if sha == "" {
 		return nil, fmt.Errorf("repo: у джобы нет коммита: %w", ErrCommitNotFound)
 	}
 
-	// Проверка наличия коммита идёт до создания каталогов: пользователь
-	// должен узнать о нехватке коммита сразу, а не после мусора на диске.
-	catFileCmd := exec.CommandContext(ctx, "git", "-C", root, "cat-file", "-e", sha+"^{commit}")
-	if _, err := runCmd(catFileCmd); err != nil {
+	// Проверка наличия коммита остаётся защитой инварианта: путь
+	// пользователя до неё больше не доходит напрямую — ветку между
+	// локальным worktree и сетевым зеркалом выбирает Materialize.
+	if !hasCommit(ctx, root, sha) {
 		return nil, fmt.Errorf("repo: коммит %s не найден локально: %w", sha, ErrCommitNotFound)
 	}
 
 	p.Stage("готовлю код на коммите %s…", shortSHA(sha))
 
-	// Постоянный кэш пользователя вместо системного временного каталога:
-	// snap-сборка Docker его не видит, и монтирование каталога с таким
-	// путём в контейнер отказывает (idea-0.2.0 §3). Случайное имя внутри
-	// сохраняется — каталог общий между запусками, и два одновременных
-	// ci shell не должны драться за один путь.
-	cacheDir, err := cache.Dir("worktrees")
-	if err != nil {
-		return nil, err
-	}
-	parent, err := os.MkdirTemp(cacheDir, "job-*")
-	if err != nil {
-		return nil, fmt.Errorf("repo: не удалось создать временный каталог: %w", err)
-	}
-	// git worktree add отказывается писать в существующий каталог — сам
-	// каталог src заранее не создаётся, только его приватный родитель.
-	dir := filepath.Join(parent, "src")
-
 	addCmd := exec.CommandContext(ctx, "git", "-C", root, "worktree", "add", "--detach", dir, sha)
 	if _, err := runCmd(addCmd); err != nil {
-		os.RemoveAll(parent)
 		return nil, fmt.Errorf("repo: git worktree add отказал: %s: %w", firstLine(err.Error()), ErrWorktreeFailed)
 	}
 
 	p.Stage("код на коммите %s: %s", shortSHA(sha), dir)
 
-	return &Worktree{Dir: dir, SHA: sha, root: root, parent: parent}, nil
+	return &Worktree{Dir: dir, SHA: sha, root: root}, nil
 }
 
-// Remove снимает worktree и безусловно удаляет временный каталог — даже
-// если git отказал, утилита не оставляет следов на машине пользователя.
-// Ошибка os.RemoveAll не глотается наравне с ошибкой git: шаги джобы
-// работают в контейнере под root и могут оставить в примонтированном
-// каталоге файлы, которые непривилегированному пользователю не удалить
-// (EACCES на Linux). Текст ошибки содержит фактический путь и команду
-// добивки: git worktree prune снял бы только метаданные git, сами файлы
-// им не удалить.
+// Remove снимает worktree средствами git. Удаление файлов с диска — забота
+// Checkout.Remove: при флаге --here (план 05-02) каталог удалять нельзя
+// вовсе, и решение об этом принимает владелец чекаута, а не worktree.
 func (w *Worktree) Remove(ctx context.Context) error {
 	removeCmd := exec.CommandContext(ctx, "git", "-C", w.root, "worktree", "remove", "--force", w.Dir)
-	_, gitErr := runCmd(removeCmd)
-	rmErr := os.RemoveAll(w.parent)
-	if gitErr == nil && rmErr == nil {
-		return nil
+	if _, err := runCmd(removeCmd); err != nil {
+		return fmt.Errorf("repo: не удалось снять worktree %s: %s (добейте вручную: git worktree prune): %w",
+			w.Dir, firstLine(err.Error()), ErrWorktreeFailed)
 	}
-
-	var cause string
-	switch {
-	case gitErr != nil && rmErr != nil:
-		cause = fmt.Sprintf("git worktree remove: %s; удаление каталога: %s", gitErr, rmErr)
-	case gitErr != nil:
-		cause = fmt.Sprintf("git worktree remove: %s", gitErr)
-	default:
-		cause = fmt.Sprintf("удаление каталога: %s", rmErr)
-	}
-	return fmt.Errorf("repo: не удалось убрать временный worktree %s: %s\n"+
-		"добейте вручную: sudo rm -rf %s && git worktree prune — файлы, записанные контейнером под root, обычному пользователю не удалить",
-		w.Dir, cause, w.parent)
+	return nil
 }
 
 // runCmd запускает уже собранную команду cmd (аргументы — срезом, без
