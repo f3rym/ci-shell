@@ -24,13 +24,14 @@ import (
 	"github.com/f3rym/ci-shell/internal/render"
 	"github.com/f3rym/ci-shell/internal/repo"
 	"github.com/f3rym/ci-shell/internal/runner"
+	"github.com/f3rym/ci-shell/internal/term"
 	"github.com/f3rym/ci-shell/internal/token"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(2)
+		runDefault()
+		return
 	}
 
 	switch os.Args[1] {
@@ -44,6 +45,27 @@ func main() {
 		printUsage()
 		os.Exit(2)
 	}
+}
+
+// runDefault реализует запуск ci без подкоманды. Решение о запуске
+// интерфейса принимается ровно одной функцией, ниже, и здесь не
+// переспрашивается.
+//
+// При ложном решении — поведение ровно как раньше: подсказка по
+// использованию в поток ошибок и код возврата 2. Ни одной новой строки:
+// пайп, CI и ssh без -t не должны заметить, что в утилите появился
+// интерфейс (EVT-03).
+//
+// При истинном — сюда Фаза 9 ставит запуск интерфейса, заменяя тело этой
+// ветки и не заводя второго условия. Пока интерфейс не собран, печатается
+// одна честная строка об этом, а дальше та же подсказка и тот же код
+// возврата.
+func runDefault() {
+	if term.UIEnabled() {
+		fmt.Fprintln(os.Stderr, "консольный интерфейс ещё не собран — запустите ci shell со ссылкой на упавшую джобу")
+	}
+	printUsage()
+	os.Exit(2)
 }
 
 func printUsage() {
