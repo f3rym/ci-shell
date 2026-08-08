@@ -50,36 +50,46 @@ func sanitizeSegment(s string) (string, error) {
 	return b.String(), nil
 }
 
-// mirrorDir возвращает путь зеркала: cache.Dir("repos", <безопасный хост>,
-// <безопасные сегменты пути проекта>) с суффиксом ".git" у последнего
-// сегмента. Форма фиксирована требованием REPO-01 и idea-0.2.0 §4. Пустой
-// хост или пустой путь проекта — ErrUnsafeProject.
-func mirrorDir(host, projectPath string) (string, error) {
+// safeCachePath приводит хост и путь проекта к безопасным сегментам каталога
+// кэша: единственная формула «проект → место в кэше», общая для зеркала
+// репозитория и для каталога сохранённых патчей (internal/repo/patch.go).
+// Пустой хост или пустой путь проекта — ErrUnsafeProject.
+func safeCachePath(host, projectPath string) (safeHost, safeProject string, err error) {
 	if host == "" || projectPath == "" {
-		return "", fmt.Errorf("repo: пустой хост или путь проекта: %w", ErrUnsafeProject)
+		return "", "", fmt.Errorf("repo: пустой хост или путь проекта: %w", ErrUnsafeProject)
 	}
 
-	safeHost, err := sanitizeSegment(host)
+	safeHost, err = sanitizeSegment(host)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	segments := strings.Split(projectPath, "/")
 	safeSegments := make([]string, 0, len(segments))
 	for _, seg := range segments {
-		safeSeg, err := sanitizeSegment(seg)
-		if err != nil {
-			return "", err
+		safeSeg, segErr := sanitizeSegment(seg)
+		if segErr != nil {
+			return "", "", segErr
 		}
 		safeSegments = append(safeSegments, safeSeg)
 	}
 	// Один аргумент вместо переменного числа: filepath.Join внутри cache.Dir
-	// нормализует "/" внутри сегмента точно так же, как отдельные элементы —
-	// суффикс ".git" дописывается к последнему сегменту дописыванием в конец
-	// уже собранной строки.
-	safeProjectPath := strings.Join(safeSegments, "/") + ".git"
+	// нормализует "/" внутри сегмента точно так же, как отдельные элементы.
+	return safeHost, strings.Join(safeSegments, "/"), nil
+}
 
-	return cache.Dir("repos", safeHost, safeProjectPath)
+// mirrorDir возвращает путь зеркала: cache.Dir("repos", <безопасный хост>,
+// <безопасные сегменты пути проекта>) с суффиксом ".git" у последнего
+// сегмента. Форма фиксирована требованием REPO-01 и idea-0.2.0 §4. Пустой
+// хост или пустой путь проекта — ErrUnsafeProject.
+func mirrorDir(host, projectPath string) (string, error) {
+	safeHost, safeProject, err := safeCachePath(host, projectPath)
+	if err != nil {
+		return "", err
+	}
+	// Суффикс ".git" дописывается к последнему сегменту дописыванием в конец
+	// уже собранной строки.
+	return cache.Dir("repos", safeHost, safeProject+".git")
 }
 
 // mirrorURL возвращает адрес источника: https-схема, хост и путь проекта с

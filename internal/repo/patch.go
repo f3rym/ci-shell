@@ -52,9 +52,23 @@ type FileStat struct {
 	Deleted int
 }
 
-// patchesDir — единственная формула каталога патчей в проекте.
-func patchesDir() (string, error) {
-	return cache.Dir("patches")
+// patchesDir — единственная формула каталога патчей в проекте:
+// cache.Dir("patches", <безопасный хост>, <безопасные сегменты пути
+// проекта>), та же, что у зеркала репозитория (safeCachePath в mirror.go).
+//
+// Хост и проект входят в путь, а не только идентификатор джобы в имя файла,
+// потому что каталог патчей общий на машину: плоский каталог отдавал бы
+// «последний сохранённый патч» независимо от того, в каком репозитории стоит
+// пользователь, а идентификаторы джоб уникальны только внутри одного
+// инстанса GitLab — две джобы с одним номером на разных хостах сталкивались
+// бы в одном имени файла. Итог в обоих случаях один: трёхсторонний мердж
+// диффа чужого проекта в рабочее дерево пользователя после одного «да».
+func patchesDir(host, projectPath string) (string, error) {
+	safeHost, safeProject, err := safeCachePath(host, projectPath)
+	if err != nil {
+		return "", err
+	}
+	return cache.Dir("patches", safeHost, safeProject)
 }
 
 // patchName строит имя файла патча вида job-<id джобы>-<короткий sha>.patch.
@@ -94,10 +108,10 @@ func parsePatchName(name string) (Patch, bool) {
 }
 
 // Capture снимает правки воспроизведённого чекаута checkoutDir в файл в
-// каталоге патчей и возвращает найденный патч и список изменённых путей —
-// вызывающему они нужны, чтобы сразу назвать пользователю, что именно
-// сохранено.
-func Capture(ctx context.Context, checkoutDir string, jobID int64, sha string) (Patch, []string, error) {
+// каталоге патчей проекта host/projectPath и возвращает найденный патч и
+// список изменённых путей — вызывающему они нужны, чтобы сразу назвать
+// пользователю, что именно сохранено.
+func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID int64, sha string) (Patch, []string, error) {
 	// Регистрация ещё не отслеживаемых файлов намерением добавить: без неё
 	// новый файл, созданный пользователем при починке (новый тест, новый
 	// конфиг), в разницу не попал бы вовсе. Отказ этой команды не считается
@@ -141,7 +155,7 @@ func Capture(ctx context.Context, checkoutDir string, jobID int64, sha string) (
 		}
 	}
 
-	dir, err := patchesDir()
+	dir, err := patchesDir(host, projectPath)
 	if err != nil {
 		return Patch{}, nil, err
 	}
@@ -182,9 +196,10 @@ func Capture(ctx context.Context, checkoutDir string, jobID int64, sha string) (
 }
 
 // LatestPatch возвращает самый свежий по времени изменения патч в каталоге
-// патчей.
-func LatestPatch() (Patch, error) {
-	dir, err := patchesDir()
+// патчей проекта host/projectPath. Патчи других проектов и других хостов
+// лежат в других каталогах и в выборку не попадают вовсе.
+func LatestPatch(host, projectPath string) (Patch, error) {
+	dir, err := patchesDir(host, projectPath)
 	if err != nil {
 		return Patch{}, err
 	}
@@ -221,9 +236,12 @@ func LatestPatch() (Patch, error) {
 	return best, nil
 }
 
-// PatchFor возвращает патч, сохранённый для джобы jobID.
-func PatchFor(jobID int64) (Patch, error) {
-	dir, err := patchesDir()
+// PatchFor возвращает патч, сохранённый для джобы jobID проекта
+// host/projectPath. Идентификатор джобы уникален только внутри одного
+// инстанса GitLab, поэтому хост и проект — обязательная часть выборки, а не
+// уточнение.
+func PatchFor(host, projectPath string, jobID int64) (Patch, error) {
+	dir, err := patchesDir(host, projectPath)
 	if err != nil {
 		return Patch{}, err
 	}

@@ -52,7 +52,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "--here кладёт код джобы в текущий каталог и оставляет его там после выхода из шелла")
 	fmt.Fprintln(os.Stderr, "флаги ставятся до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
 	fmt.Fprintln(os.Stderr, "ci secrets — открыть файл секретов в редакторе ($VISUAL/$EDITOR, иначе vi); файл создаётся сам при первом запуске с недостающими значениями")
-	fmt.Fprintln(os.Stderr, "ci apply [--job <id>] — перенести сохранённые правки воспроизведённой джобы в текущий репозиторий трёхсторонним мерджем, не коммитя")
+	fmt.Fprintln(os.Stderr, "ci apply [--job <id>] [--force] — перенести сохранённые правки воспроизведённой джобы в текущий репозиторий трёхсторонним мерджем, не коммитя")
+	fmt.Fprintln(os.Stderr, "правки ищутся только среди патчей того проекта, чей remote origin у текущего репозитория; --force снимает требование иметь коммит джобы в этом репозитории")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -510,7 +511,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// упал бы мгновенно, патч не был бы записан — а отложенный
 	// code.Remove(context.Background()) всё равно снёс бы чекаут вместе с
 	// правками пользователя. Правки — это ровно то, ради чего он тут сидел.
-	patch, _, captureErr := repo.Capture(context.Background(), code.Dir, job.ID, job.CommitSHA)
+	patch, _, captureErr := repo.Capture(context.Background(), code.Dir, ref.Host, ref.ProjectPath, job.ID, job.CommitSHA)
 	switch {
 	case errors.Is(captureErr, repo.ErrNoChanges):
 		fmt.Fprintln(os.Stderr, "правок в чекауте нет — переносить нечего")
@@ -851,6 +852,7 @@ func runSecrets(args []string) {
 func runApply(args []string) {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	jobFlag := fs.Int64("job", 0, "идентификатор джобы, чьи правки переносить (по умолчанию — последняя сохранённая)")
+	forceFlag := fs.Bool("force", false, "накладывать, даже если коммита джобы нет в этом репозитории")
 	fs.Parse(args)
 	if fs.NArg() > 0 {
 		printUsage()
@@ -864,11 +866,22 @@ func runApply(args []string) {
 		fail(err)
 	}
 
+	// Патч выбирается только среди патчей ТОГО проекта, в репозитории
+	// которого стоит пользователь: каталог патчей общий на машину, и без
+	// хоста с проектом «последний сохранённый патч» означал бы последний
+	// сохранённый на машине вообще, а --job <id> — совпадение по номеру,
+	// уникальному только внутри одного инстанса GitLab. Ошибка разбора
+	// origin здесь фатальна намеренно: не зная проекта, выбирать не из чего.
+	host, projectPath, err := repo.OriginRef(ctx, root)
+	if err != nil {
+		fail(err)
+	}
+
 	var patch repo.Patch
 	if *jobFlag != 0 {
-		patch, err = repo.PatchFor(*jobFlag)
+		patch, err = repo.PatchFor(host, projectPath, *jobFlag)
 	} else {
-		patch, err = repo.LatestPatch()
+		patch, err = repo.LatestPatch(host, projectPath)
 	}
 	if err != nil {
 		fail(err)
@@ -907,12 +920,21 @@ func runApply(args []string) {
 	}
 	fmt.Fprintln(os.Stderr)
 
+	// Отсутствие коммита джобы в этом репозитории — отказ, а не
+	// предупреждение: базы для трёхстороннего мерджа нет, и это единственный
+	// оставшийся признак того, что патч приехал не отсюда (клон другого
+	// проекта с тем же origin, ещё не подтянутая история). Продавить решение
+	// можно флагом --force — но осознанно.
 	if ahead, ok := repo.AheadCount(ctx, root, patch.SHA); ok {
 		if ahead > 0 {
 			fmt.Fprintf(os.Stderr, "твой HEAD ушёл на %d коммитов вперёд коммита джобы — накладываю трёхсторонним мерджем\n", ahead)
 		}
+	} else if *forceFlag {
+		fmt.Fprintln(os.Stderr, "предупреждение: коммита джобы нет в этом репозитории, но задан --force — базы для мерджа может не найтись; при отказе патч останется файлом")
 	} else {
-		fmt.Fprintln(os.Stderr, "коммит джобы не найден в этом репозитории — базы для мерджа может не найтись; при отказе патч останется файлом")
+		fmt.Fprintf(os.Stderr, "коммита джобы %s нет в этом репозитории — базы для трёхстороннего мерджа нет\n"+
+			"подтяните историю (git fetch) или, если уверены, повторите с --force; патч остался файлом: %s\n", patch.SHA, patch.Path)
+		os.Exit(1)
 	}
 
 	// Тот же предохранитель от подвисшего процесса, что у вопроса о токене
