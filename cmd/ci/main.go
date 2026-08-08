@@ -39,6 +39,8 @@ func main() {
 		runShell(os.Args[2:])
 	case "secrets":
 		runSecrets(os.Args[2:])
+	case "apply":
+		runApply(os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(2)
@@ -51,6 +53,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "--here кладёт код джобы в текущий каталог и оставляет его там после выхода из шелла")
 	fmt.Fprintln(os.Stderr, "флаги ставятся до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
 	fmt.Fprintln(os.Stderr, "ci secrets — открыть файл секретов в редакторе ($VISUAL/$EDITOR, иначе vi); файл создаётся сам при первом запуске с недостающими значениями")
+	fmt.Fprintln(os.Stderr, "ci apply [--job <id>] — перенести сохранённые правки воспроизведённой джобы в текущий репозиторий трёхсторонним мерджем, не коммитя")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -119,6 +122,12 @@ func explain(err error) string {
 		return fmt.Sprintf("%s\nпроверьте область действия токена и доступность проекта — читать репозиторий тем же токеном, что и API", err)
 	case errors.Is(err, repo.ErrWorktreeFailed):
 		return fmt.Sprintf("%s\nснимите зависший worktree: git worktree prune", err)
+	case errors.Is(err, repo.ErrNoPatch):
+		return fmt.Sprintf("%s\nсначала запустите ci shell и почините шаг в контейнере", err)
+	case errors.Is(err, repo.ErrPatchUnsafe):
+		return fmt.Sprintf("%s\nпатч не применён — проверьте, тот ли это репозиторий", err)
+	case errors.Is(err, repo.ErrApplyFailed):
+		return fmt.Sprintf("%s\nразрешите конфликт и повторите", err)
 	case errors.Is(err, runner.ErrDockerUnavailable):
 		return fmt.Sprintf("%s\nпоставьте Docker — это единственная внешняя зависимость утилиты", err)
 	case errors.Is(err, runner.ErrDaemonUnavailable):
@@ -465,6 +474,27 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 
+	// Патч снимается сразу после возврата из шелла и строго до вопроса о
+	// чистом прогоне ниже: чистый прогон исполняет шаги в том же
+	// смонтированном каталоге и может насоздавать там файлов сборки — патч
+	// обязан отражать то, что чинил человек, а не то, что оставил после
+	// себя прогон. Материализованные файловые переменные в патч попасть не
+	// могут: они лежат кэшем-соседом workDir+".tmp", а не внутри code.Dir
+	// (контракт плана 06-02) — Capture строит разницу только из состояния
+	// git-чекаута.
+	patch, _, captureErr := repo.Capture(ctx, code.Dir, job.ID, job.CommitSHA)
+	switch {
+	case errors.Is(captureErr, repo.ErrNoChanges):
+		fmt.Fprintln(os.Stderr, "правок в чекауте нет — переносить нечего")
+	case captureErr != nil:
+		// Не отдать патч обиднее, чем не дойти до шелла, но обрывать на
+		// этом уже полученную ценность нельзя.
+		fmt.Fprintf(os.Stderr, "предупреждение: %s\n", explain(captureErr))
+	default:
+		fmt.Fprintf(os.Stderr, "правки сохранены (файл доступен только вам): %s\n", patch.Path)
+		fmt.Fprintf(os.Stderr, "перенести их в свой репозиторий — ci apply --job %d\n", job.ID)
+	}
+
 	// Петля фикса замыкается здесь: чинить было что, только если шаг упал.
 	// Третий, честный уровень доверия — прогон начисто в свежем
 	// контейнере — предлагается вопросом с хоста только в интерактивном
@@ -775,6 +805,99 @@ func runSecrets(args []string) {
 	} else {
 		fmt.Fprintf(os.Stderr, "права файла секретов возвращены к 0600: %s\n", path)
 	}
+}
+
+// runApply реализует подкоманду ci apply: находит сохранённые правки,
+// печатает джобу и список изменённых файлов с числом строк, спрашивает
+// ровно один раз и накладывает патч трёхсторонним мерджем в рабочее
+// дерево — ничего не коммитя. Функция владеет только чтением и одним
+// наложением, отложенной уборки у неё нет, поэтому завершать процесс ей
+// можно — в отличие от reproduce.
+func runApply(args []string) {
+	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+	jobFlag := fs.Int64("job", 0, "идентификатор джобы, чьи правки переносить (по умолчанию — последняя сохранённая)")
+	fs.Parse(args)
+	if fs.NArg() > 0 {
+		printUsage()
+		os.Exit(2)
+	}
+
+	ctx := context.Background()
+
+	root, err := repo.Root(ctx)
+	if err != nil {
+		fail(err)
+	}
+
+	var patch repo.Patch
+	if *jobFlag != 0 {
+		patch, err = repo.PatchFor(*jobFlag)
+	} else {
+		patch, err = repo.LatestPatch()
+	}
+	if err != nil {
+		fail(err)
+	}
+
+	// Отчёт снимается до любого письма и до подтверждающего вопроса:
+	// PatchStat только читает, CheckPaths должна отвергнуть опасный патч
+	// раньше, чем он дойдёт даже до предложения пользователю.
+	stats, err := repo.PatchStat(ctx, root, patch.Path)
+	if err != nil {
+		fail(err)
+	}
+	if err := repo.CheckPaths(stats); err != nil {
+		fail(err)
+	}
+
+	var added, deleted int
+	for _, s := range stats {
+		if s.Added >= 0 {
+			added += s.Added
+		}
+		if s.Deleted >= 0 {
+			deleted += s.Deleted
+		}
+	}
+	fmt.Fprintf(os.Stderr, "джоба #%d (%s): %d файлов изменено (+%d -%d)\n\n", patch.JobID, patch.SHA, len(stats), added, deleted)
+	for _, s := range stats {
+		addedStr, deletedStr := "-", "-"
+		if s.Added >= 0 {
+			addedStr = fmt.Sprintf("+%d", s.Added)
+		}
+		if s.Deleted >= 0 {
+			deletedStr = fmt.Sprintf("-%d", s.Deleted)
+		}
+		fmt.Fprintf(os.Stderr, "  %s   %s %s\n", s.Path, addedStr, deletedStr)
+	}
+	fmt.Fprintln(os.Stderr)
+
+	if ahead, ok := repo.AheadCount(ctx, root, patch.SHA); ok {
+		if ahead > 0 {
+			fmt.Fprintf(os.Stderr, "твой HEAD ушёл на %d коммитов вперёд коммита джобы — накладываю трёхсторонним мерджем\n", ahead)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "коммит джобы не найден в этом репозитории — базы для мерджа может не найтись; при отказе патч останется файлом")
+	}
+
+	// Тот же предохранитель от подвисшего процесса, что у вопроса о токене
+	// и у вопроса о чистом прогоне: в чужой код без ответа человека не
+	// пишем вовсе.
+	if !token.Interactive() {
+		fmt.Fprintf(os.Stderr, "нет терминала — наложите вручную: git -C %s apply --3way %s\n", root, patch.Path)
+		os.Exit(2)
+	}
+
+	if !confirm(fmt.Sprintf("наложить правки трёхсторонним мерджем в %s?", root)) {
+		fmt.Fprintf(os.Stderr, "не применено, патч остался файлом: %s\n", patch.Path)
+		return
+	}
+
+	if err := repo.Apply(ctx, root, patch.Path); err != nil {
+		fail(err)
+	}
+
+	fmt.Fprintln(os.Stderr, "✓ применено в рабочее дерево, не закоммичено — смотри git diff")
 }
 
 func fail(err error) {
