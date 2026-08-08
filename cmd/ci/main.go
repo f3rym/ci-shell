@@ -821,7 +821,15 @@ func runSecrets(args []string) {
 		editor = "vi"
 	}
 
+	// VISUAL или EDITOR из одних пробельных символов (легко приезжает из
+	// подключённого профиля шелла) непусты, поэтому фолбэк на vi выше их не
+	// перехватывает, а strings.Fields возвращает по ним пустой срез — без
+	// этой проверки fields[0] роняет процесс паникой с трассировкой стека
+	// вместо понятного сообщения.
 	fields := strings.Fields(editor)
+	if len(fields) == 0 {
+		fields = []string{"vi"}
+	}
 	bin, err := exec.LookPath(fields[0])
 	if err != nil {
 		fail(fmt.Errorf("редактор %q не найден в PATH: %w", fields[0], err))
