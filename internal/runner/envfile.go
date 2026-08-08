@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/f3rym/ci-shell/internal/cache"
 )
 
 // writeEnvFile пишет vars во временный файл формата --env-file (NAME=value,
@@ -24,7 +26,14 @@ import (
 // При любой ошибке файл удаляется и возвращается ошибка, чтобы недописанный
 // файл с секретами не остался на диске.
 func writeEnvFile(vars map[string]string) (path string, skipped []string, err error) {
-	f, err := os.CreateTemp("", "ci-shell-env-*")
+	// Постоянный кэш пользователя вместо системного временного каталога —
+	// та же причина, что и у repo.Prepare: snap-сборка Docker не видит
+	// хостовый /tmp, и docker create --env-file оттуда отказывает.
+	dir, err := cache.Dir("env")
+	if err != nil {
+		return "", nil, err
+	}
+	f, err := os.CreateTemp(dir, "env-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("runner: не удалось создать временный файл окружения: %w", err)
 	}

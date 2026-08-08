@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/render"
 )
 
@@ -89,7 +90,16 @@ func Prepare(ctx context.Context, root, sha string, p render.Progress) (*Worktre
 
 	p.Stage("готовлю код на коммите %s…", shortSHA(sha))
 
-	parent, err := os.MkdirTemp("", "ci-shell-*")
+	// Постоянный кэш пользователя вместо системного временного каталога:
+	// snap-сборка Docker его не видит, и монтирование каталога с таким
+	// путём в контейнер отказывает (idea-0.2.0 §3). Случайное имя внутри
+	// сохраняется — каталог общий между запусками, и два одновременных
+	// ci shell не должны драться за один путь.
+	cacheDir, err := cache.Dir("worktrees")
+	if err != nil {
+		return nil, err
+	}
+	parent, err := os.MkdirTemp(cacheDir, "job-*")
 	if err != nil {
 		return nil, fmt.Errorf("repo: не удалось создать временный каталог: %w", err)
 	}

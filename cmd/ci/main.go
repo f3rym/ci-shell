@@ -6,11 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -91,6 +93,8 @@ func explain(err error) string {
 		return fmt.Sprintf("%s\nнастройте remote origin (git remote add origin <ссылка>), либо передайте полную ссылку на джобу вместо номера", err)
 	case errors.Is(err, repo.ErrRemoteUnparsable):
 		return fmt.Sprintf("%s\nпередайте полную ссылку на джобу вместо номера — эту форму remote origin утилита не распознаёт", err)
+	case errors.Is(err, cache.ErrUnavailable):
+		return fmt.Sprintf("%s\nзадайте XDG_CACHE_HOME или HOME — утилите нужен постоянный каталог для файла окружения и worktree", err)
 	case errors.Is(err, repo.ErrCommitNotFound):
 		return fmt.Sprintf("%s\nподтяните коммит: git fetch origin <sha> — иначе воспроизводить нечего", err)
 	case errors.Is(err, repo.ErrWorktreeFailed):
@@ -215,6 +219,23 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 			fmt.Fprintf(os.Stderr, "предупреждение: %s\nдобейте вручную: docker rm -f %s\n", err, c.ID)
 		}
 	}()
+	// Регистрируется ПОСЛЕ defer снятия контейнера, поэтому по LIFO
+	// выполняется РАНЬШЕ него — пока контейнер ещё жив и команду ещё есть
+	// где выполнить (idea-0.2.0 §8). Контейнер работает под root, каталог
+	// смонтирован из постоянного кэша — без возврата владельца файлы root
+	// накапливались бы в кэше пользователя навсегда.
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid >= 0 && gid >= 0 {
+		defer func() {
+			chownCtx := context.Background()
+			chownCmd := fmt.Sprintf("chown -R %d:%d %s", uid, gid, workDir)
+			// Ошибка и ненулевой код не фатальны и не печатаются как ошибка
+			// — в образе может не быть chown; на этот случай в
+			// Worktree.Remove уже есть готовая команда добивки. Вывод
+			// chown пользователю не нужен.
+			_, _ = c.Exec(chownCtx, chownCmd, io.Discard, io.Discard)
+		}()
+	}
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
