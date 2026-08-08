@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/f3rym/ci-shell/internal/prompt"
 )
@@ -31,6 +33,15 @@ func Prompt(host string) (Token, error) {
 	fmt.Fprintf(os.Stderr, "токен GitLab для хоста %s не найден\nвведите токен (области read_api достаточно): ", host)
 
 	restoreEcho := disableEcho()
+	// Обработчик сигналов на время невидимого ввода: signal.NotifyContext
+	// утилиты ставится только внутри воспроизведения джобы, много позже
+	// этого места, поэтому Ctrl-C прямо здесь брал бы действие Go по
+	// умолчанию — немедленное завершение процесса, при котором отложенное
+	// восстановление эха уже не выполнится и терминал пользователя останется
+	// с выключенным эхом до тех пор, пока он сам не наберёт вслепую
+	// stty sane.
+	stopSignals := restoreEchoOnSignal(restoreEcho)
+	defer stopSignals()
 	defer func() {
 		restoreEcho()
 		// Перевод строки после невидимого ввода — иначе следующая строка
@@ -59,6 +70,39 @@ func Prompt(host string) (Token, error) {
 	}
 
 	return Token{Secret: secret, Source: "введён в терминале, сохранён в " + path}, nil
+}
+
+// restoreEchoOnSignal перехватывает SIGINT и SIGTERM на время невидимого
+// ввода: по сигналу восстанавливает эхо, снимает собственный обработчик и
+// шлёт тот же сигнал себе заново — прерывание остаётся прерыванием, процесс
+// завершается ровно так, как решил пользователь, но уже с исправным
+// терминалом. Возвращает функцию снятия обработчика; звать её обязательно,
+// иначе перехват переживёт сам вопрос.
+func restoreEchoOnSignal(restore func()) (stop func()) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-ch:
+			restore()
+			// Перевод строки по той же причине, что и в отложенном
+			// восстановлении: приглашение шелла не должно приклеиться к
+			// строке невидимого ввода.
+			fmt.Fprintln(os.Stderr)
+			signal.Stop(ch)
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = p.Signal(sig)
+			}
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+		signal.Stop(ch)
+	}
 }
 
 // disableEcho отключает эхо терминала на стандартном вводе шелл-аутом в
