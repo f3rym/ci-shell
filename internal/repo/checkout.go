@@ -2,13 +2,20 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/f3rym/ci-shell/internal/render"
 )
+
+// ErrCheckoutExists — при --here (Persist) путь чекаута уже существует на
+// диске. Молча писать поверх чужих файлов утилита не имеет права —
+// единственный отказ, который вводит план 05-02.
+var ErrCheckoutExists = errors.New("каталог для кода уже существует")
 
 // Source описывает, откуда взят код чекаута — печатается пользователю как
 // есть, тот же приём, что у env.Source и runner.ImageSource.
@@ -31,6 +38,11 @@ type Request struct {
 	Tag         bool
 	// Base — каталог, внутри которого создаётся чекаут.
 	Base string
+	// Persist — истинно для --here (план 05-02): чекаут остаётся на диске
+	// после Remove, путь в Base становится детерминированным вместо
+	// случайного. Политику выбора Base и значения Persist знает только
+	// cmd/ci — пакет repo получает готовое решение.
+	Persist bool
 	// Token — секрет; используется ровно в одном месте: при сборке
 	// окружения сетевого fetch.
 	Token string
@@ -46,19 +58,47 @@ type Checkout struct {
 	// каталог git это файл-указатель на репозиторий пользователя вне
 	// смонтированного каталога.
 	SelfContained bool
+	// Persist — скопировано из Request.Persist: при истинном значении
+	// Remove ничего не удаляет (--here).
+	Persist bool
 
 	wt     *Worktree
 	parent string
 }
 
 // checkoutPath — единственное место, где решается физическое расположение
-// чекаута: временный родительский каталог со случайным именем и говорящим
-// префиксом job- внутри base (два одновременных запуска не должны драться за
-// один путь), сам код кладётся в его подкаталог src. Возвращаются оба пути:
-// parent нужен уборке, dir — монтированию. В плане 05-02 именно эта функция
-// получает второе поведение под флаг --here, другие места правиться не
-// должны.
-func checkoutPath(base string) (dir, parent string, err error) {
+// чекаута.
+//
+// Без Persist — временный родительский каталог со случайным именем и
+// говорящим префиксом job- внутри base (два одновременных запуска не должны
+// драться за один путь), сам код кладётся в его подкаталог src. Возвращаются
+// оба пути: parent нужен уборке, dir — монтированию.
+//
+// С Persist путь детерминированный: подкаталог base с именем вида
+// ci-shell-<последний сегмент пути проекта>-<короткий sha>, построенным из
+// уже безопасного сегмента (тот же приём sanitizeSegment, что в mirror.go),
+// чтобы путь проекта не притащил в имя каталога ничего лишнего; родительский
+// каталог для уборки не заводится вовсе (возвращается пустым) — Remove с
+// Persist ничего не удаляет. Если такой путь уже существует, возвращается
+// ErrCheckoutExists независимо от того, пуст каталог или нет: так
+// пользователь не потеряет ни своих файлов, ни результатов предыдущего
+// запуска, а git не упрётся в непустой каталог при подготовке worktree.
+func checkoutPath(base, projectPath, sha string, persist bool) (dir, parent string, err error) {
+	if persist {
+		segments := strings.Split(projectPath, "/")
+		safeProject, err := sanitizeSegment(segments[len(segments)-1])
+		if err != nil {
+			return "", "", err
+		}
+		dir = filepath.Join(base, fmt.Sprintf("ci-shell-%s-%s", safeProject, shortSHA(sha)))
+		if _, statErr := os.Stat(dir); statErr == nil {
+			return "", "", fmt.Errorf("repo: каталог %s уже существует: %w", dir, ErrCheckoutExists)
+		} else if !os.IsNotExist(statErr) {
+			return "", "", fmt.Errorf("repo: не удалось проверить каталог %s: %w", dir, statErr)
+		}
+		return dir, "", nil
+	}
+
 	parent, err = os.MkdirTemp(base, "job-*")
 	if err != nil {
 		return "", "", fmt.Errorf("repo: не удалось создать временный каталог: %w", err)
@@ -79,7 +119,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 
 	if root, err := Root(ctx); err == nil {
 		if _, ok := RemoteMatches(ctx, root, req.ProjectPath); ok && hasCommit(ctx, root, req.SHA) {
-			dir, parent, err := checkoutPath(req.Base)
+			dir, parent, err := checkoutPath(req.Base, req.ProjectPath, req.SHA, req.Persist)
 			if err != nil {
 				return nil, err
 			}
@@ -93,6 +133,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 				SHA:           wt.SHA,
 				Source:        SourceLocal,
 				SelfContained: false,
+				Persist:       req.Persist,
 				wt:            wt,
 				parent:        parent,
 			}, nil
@@ -114,7 +155,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 		return nil, err
 	}
 
-	dir, parent, err := checkoutPath(req.Base)
+	dir, parent, err := checkoutPath(req.Base, req.ProjectPath, req.SHA, req.Persist)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +170,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 		SHA:           req.SHA,
 		Source:        SourceMirror,
 		SelfContained: true,
+		Persist:       req.Persist,
 		parent:        parent,
 	}, nil
 }
@@ -181,7 +223,18 @@ func materializeFromMirror(ctx context.Context, mirror, dir, sha, originURL stri
 // удаления не глотаются наравне: текст содержит фактический путь и готовую
 // команду добивки — файлы, записанные контейнером под root, обычному
 // пользователю не удалить.
+//
+// При Persist (--here) Remove немедленно возвращает отсутствие ошибки,
+// ничего не снимая и ничего не удаляя: пользователь просил оставить код, а
+// снятие worktree убрало бы ровно тот каталог, ради которого флаг и
+// задавался. Следствие: на локальной ветке в репозитории пользователя
+// остаётся зарегистрированный worktree — сказать об этом обязан cmd/ci
+// сразу после успешного Materialize.
 func (c *Checkout) Remove(ctx context.Context) error {
+	if c.Persist {
+		return nil
+	}
+
 	var gitErr error
 	if c.wt != nil {
 		gitErr = c.wt.Remove(ctx)

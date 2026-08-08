@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -9,10 +10,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/f3rym/ci-shell/internal/cache"
+	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -39,9 +42,10 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "использование: ci shell [--image <образ>] <ссылка на джобу GitLab | номер джобы>")
+	fmt.Fprintln(os.Stderr, "использование: ci shell [--image <образ>] [--here] <ссылка на джобу GitLab | номер джобы>")
 	fmt.Fprintln(os.Stderr, "номер джобы работает из каталога репозитория проекта — хост и проект берутся из git remote origin")
-	fmt.Fprintln(os.Stderr, "--image ставится до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
+	fmt.Fprintln(os.Stderr, "--here кладёт код джобы в текущий каталог и оставляет его там после выхода из шелла")
+	fmt.Fprintln(os.Stderr, "флаги ставятся до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -96,6 +100,10 @@ func explain(err error) string {
 		return fmt.Sprintf("%s\nпередайте полную ссылку на джобу вместо номера — эту форму remote origin утилита не распознаёт", err)
 	case errors.Is(err, cache.ErrUnavailable):
 		return fmt.Sprintf("%s\nзадайте XDG_CACHE_HOME или HOME — утилите нужен постоянный каталог для файла окружения и worktree", err)
+	case errors.Is(err, config.ErrUnavailable):
+		return fmt.Sprintf("%s\nзадайте XDG_CONFIG_HOME или HOME — утилите нужен каталог для файла настроек места чекаута", err)
+	case errors.Is(err, repo.ErrCheckoutExists):
+		return fmt.Sprintf("%s\nуберите каталог руками или запустите без флага --here", err)
 	case errors.Is(err, repo.ErrCommitNotFound):
 		return fmt.Sprintf("%s\nу джобы нет коммита — воспроизводить нечего", err)
 	case errors.Is(err, repo.ErrUnsafeProject):
@@ -134,6 +142,92 @@ func unreproducibleNote(err error) string {
 	return "проверьте состояние машины и повторите"
 }
 
+// checkoutBase — единственная точка, где решается место чекаута кода джобы
+// (REPO-04). Пакет repo получает готовый каталог и признак сохранения, а
+// саму политику выбора не знает.
+//
+// При here (--here) — текущий рабочий каталог, признак сохранения истинный,
+// файл настроек не читается и не пишется: флаг разовый по определению
+// (idea-0.2.0 §4), и сохранять его значение означало бы превратить
+// исключение в новую политику.
+//
+// Иначе читаются настройки. Непустой сохранённый каталог используется как
+// есть: ведущий "~" раскрывается через HOME, путь приводится к абсолютному,
+// каталог создаётся os.MkdirAll с правами 0o700.
+//
+// Сохранённого каталога нет и запуск интерактивный (token.Interactive()): в
+// поток ошибок печатается вопрос, называющий предлагаемый каталог по
+// умолчанию — пустой ответ его принимает, непустой задаёт свой путь. Ответ
+// сохраняется вызовом config.Save; неудача сохранения не прерывает запуск.
+//
+// Сохранённого каталога нет и запуск неинтерактивный: вопрос не задаётся —
+// берётся каталог по умолчанию, а в поток ошибок уходит одна строка,
+// называющая этот каталог и ключ checkout_dir файла настроек. Тот же
+// предохранитель от зависшего процесса, что у вопроса о токене (план
+// 04-01): в пайпе и в CI спрашивать некого.
+func checkoutBase(here bool) (base string, persist bool, err error) {
+	defaultDir, err := cache.Dir("checkouts")
+	if err != nil {
+		return "", false, err
+	}
+
+	if here {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", false, fmt.Errorf("не удалось определить текущий каталог: %w", err)
+		}
+		return wd, true, nil
+	}
+
+	settings, settingsPath, err := config.Load()
+	if err != nil {
+		return "", false, err
+	}
+	if settings.CheckoutDir != "" {
+		dir := settings.CheckoutDir
+		if home := os.Getenv("HOME"); home != "" && strings.HasPrefix(dir, "~") {
+			dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
+		}
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return "", false, fmt.Errorf("не удалось привести каталог чекаутов %s к абсолютному пути: %w", dir, err)
+		}
+		if err := os.MkdirAll(abs, 0o700); err != nil {
+			return "", false, fmt.Errorf("не удалось создать каталог чекаутов %s: %w", abs, err)
+		}
+		return abs, false, nil
+	}
+
+	if token.Interactive() {
+		fmt.Fprintf(os.Stderr, "где хранить код воспроизводимых джоб? Enter — %s: ", defaultDir)
+		line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+		answer := strings.TrimSpace(line)
+		if readErr != nil && answer == "" {
+			answer = ""
+		}
+		chosen := defaultDir
+		if answer != "" {
+			abs, absErr := filepath.Abs(answer)
+			if absErr != nil {
+				return "", false, fmt.Errorf("не удалось привести каталог %s к абсолютному пути: %w", answer, absErr)
+			}
+			chosen = abs
+		}
+		if err := os.MkdirAll(chosen, 0o700); err != nil {
+			return "", false, fmt.Errorf("не удалось создать каталог чекаутов %s: %w", chosen, err)
+		}
+		if savedPath, saveErr := config.Save(config.Settings{CheckoutDir: chosen}); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: не удалось сохранить место чекаута: %s; используется только в этом прогоне\n", saveErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "место чекаута сохранено в %s\n", savedPath)
+		}
+		return chosen, false, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "код будет чекаутиться в %s; поменять — ключ checkout_dir в %s\n", defaultDir, settingsPath)
+	return defaultDir, false, nil
+}
+
 // reproduce готовит код упавшей джобы на нужном коммите (repo.Materialize —
 // worktree рабочей копии или чекаут из зеркала в кэше) и поднимает
 // контейнер. Функция владеет очисткой через defer и никогда не завершает
@@ -141,7 +235,7 @@ func unreproducibleNote(err error) string {
 // выполнится, и на машине останутся чекаут и контейнер. Любая поломка
 // возвращается наружу как ошибка; печать и завершение делает runShell уже
 // после возврата из reproduce.
-func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, pr render.Progress) error {
+func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, base string, persist bool, pr render.Progress) error {
 	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
 	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
 	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
@@ -162,28 +256,32 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 
-	checkoutBase, err := cache.Dir("checkouts")
-	if err != nil {
-		return err
-	}
-
 	code, err := repo.Materialize(ctx, repo.Request{
 		Host:        ref.Host,
 		ProjectPath: ref.ProjectPath,
 		SHA:         job.CommitSHA,
 		Ref:         job.Ref,
 		Tag:         job.Tag,
-		Base:        checkoutBase,
+		Base:        base,
+		Persist:     persist,
 		Token:       tok.Secret,
 	}, pr)
 	if err != nil {
 		return err
 	}
+	if code.Persist {
+		msg := fmt.Sprintf("код джобы останется в %s\n", code.Dir)
+		if !code.SelfContained {
+			msg += fmt.Sprintf("на локальной ветке остаётся зарегистрированный worktree — снять: git worktree remove --force %s\n", code.Dir)
+		}
+		fmt.Fprint(os.Stderr, msg)
+	}
 	// Фоновый контекст: отмена основного контекста не должна помешать
 	// уборке временного чекаута. Неудача снятия печатается предупреждением
 	// — путь остатка и готовая команда добивки входят в текст самой ошибки
 	// (см. Checkout.Remove) — пользователь не должен обнаруживать остаток
-	// через неделю.
+	// через неделю. При Persist Checkout.Remove ничего не делает — код
+	// остаётся на диске, как и просил пользователь флагом --here.
 	defer func() {
 		if err := code.Remove(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
@@ -322,6 +420,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 func runShell(args []string) {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	imageFlag := fs.String("image", "", "образ контейнера вместо образа из конфига джобы")
+	hereFlag := fs.Bool("here", false, "положить код джобы в текущий каталог и оставить его там после выхода")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -464,10 +563,18 @@ func runShell(args []string) {
 		fail(err)
 	}
 
+	// Место чекаута решается один раз здесь, до всех дорогих операций
+	// (загрузки образа, fetch кода): неудачу выбора места пользователь
+	// должен получить до них, а не посреди прогона.
+	base, persist, err := checkoutBase(*hereFlag)
+	if err != nil {
+		fail(err)
+	}
+
 	// Прогресс дальнейших этапов воспроизведения идёт в stderr, чтобы
 	// stdout оставался чистым выводом метаданных и окружения.
 	pr := render.Progress{W: os.Stderr}
-	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, pr); err != nil {
+	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, base, persist, pr); err != nil {
 		fail(err)
 	}
 }
