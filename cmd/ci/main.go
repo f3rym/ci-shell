@@ -517,7 +517,15 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// упал бы мгновенно, патч не был бы записан — а отложенный
 	// code.Remove(context.Background()) всё равно снёс бы чекаут вместе с
 	// правками пользователя. Правки — это ровно то, ради чего он тут сидел.
-	patch, _, captureErr := repo.Capture(context.Background(), code.Dir, ref.Host, ref.ProjectPath, job.ID, job.CommitSHA)
+	patch, notes, captureErr := repo.Capture(context.Background(), code.Dir, ref.Host, ref.ProjectPath, job.ID, job.CommitSHA)
+	// Печатается до вердикта о самом патче и независимо от него: отказ
+	// регистрации новых файлов означает, что созданных пользователем файлов
+	// в патче нет — и когда патч сохранён («правки сохранены» солгало бы о
+	// полноте), и когда разницы не нашлось вовсе («правок нет» солгало бы
+	// целиком).
+	if notes.UntrackedErr != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: %s\nсозданные вами файлы (ещё не отслеживаемые git) в патч не попали\n", notes.UntrackedErr)
+	}
 	switch {
 	case errors.Is(captureErr, repo.ErrNoChanges):
 		fmt.Fprintln(os.Stderr, "правок в чекауте нет — переносить нечего")

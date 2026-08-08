@@ -110,21 +110,43 @@ func parsePatchName(name string) (Patch, bool) {
 	return Patch{JobID: id, SHA: shaPart}, true
 }
 
+// CaptureNotes — сопутствующие сведения о снятом патче: то, что вызывающий
+// обязан сказать пользователю помимо самого факта сохранения.
+type CaptureNotes struct {
+	// Paths — изменённые пути, вошедшие в патч: вызывающему они нужны, чтобы
+	// сразу назвать пользователю, что именно сохранено.
+	Paths []string
+	// UntrackedErr — отказ git add --intent-to-add. Не поломка снятия
+	// (разница по отслеживаемым файлам снимается и без него), но и не
+	// пустяк: при отказе ни один созданный пользователем файл в патч не
+	// попал, а патч всё равно сохранён и выглядит полным. Молча отдавать
+	// частичный патч за полный нельзя — вызывающий обязан предупредить.
+	UntrackedErr error
+}
+
 // Capture снимает правки воспроизведённого чекаута checkoutDir в файл в
-// каталоге патчей проекта host/projectPath и возвращает найденный патч и
-// список изменённых путей — вызывающему они нужны, чтобы сразу назвать
-// пользователю, что именно сохранено.
-func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID int64, sha string) (Patch, []string, error) {
+// каталоге патчей проекта host/projectPath и возвращает найденный патч
+// вместе с сопутствующими сведениями (см. CaptureNotes).
+func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID int64, sha string) (Patch, CaptureNotes, error) {
+	var notes CaptureNotes
+
 	// Регистрация ещё не отслеживаемых файлов намерением добавить: без неё
 	// новый файл, созданный пользователем при починке (новый тест, новый
 	// конфиг), в разницу не попал бы вовсе. Отказ этой команды не считается
-	// поломкой — разница по отслеживаемым файлам всё равно снимается ниже.
+	// поломкой — разница по отслеживаемым файлам всё равно снимается ниже, —
+	// но и не глотается: типовая причина отказа это .git чекаута, оказавшийся
+	// под root после работы контейнера, и тогда в патч не попадает ни один
+	// созданный пользователем файл, а сам патч сохраняется и выглядит полным.
+	// Отличить молчаливо частичный патч от полного пользователь не может
+	// никак, поэтому отказ уезжает наружу в CaptureNotes.
 	// Правила игнорирования репозитория соблюдаются самим git, поэтому
 	// каталоги сборки в патч не едут; индекс, в который пишет команда,
 	// принадлежит именно этому чекауту (у worktree он свой) — репозиторий
 	// пользователя не мутируется.
 	addCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "add", "--intent-to-add", ".")
-	_, _ = runCmd(addCmd)
+	if _, addErr := runCmd(addCmd); addErr != nil {
+		notes.UntrackedErr = fmt.Errorf("repo: git add --intent-to-add отказал: %s", firstLine(addErr.Error()))
+	}
 
 	// Разница снимается относительно HEAD, а не индекса: голый git diff
 	// сравнивает рабочее дерево с индексом, поэтому всё, что в этом чекауте
@@ -138,10 +160,10 @@ func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID i
 	diffCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "--binary", "HEAD")
 	diffOut, err := runCmd(diffCmd)
 	if err != nil {
-		return Patch{}, nil, fmt.Errorf("repo: не удалось снять разницу чекаута: %s: %w", firstLine(err.Error()), err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось снять разницу чекаута: %s: %w", firstLine(err.Error()), err)
 	}
 	if strings.TrimSpace(diffOut) == "" {
-		return Patch{}, nil, fmt.Errorf("repo: %w", ErrNoChanges)
+		return Patch{}, notes, fmt.Errorf("repo: %w", ErrNoChanges)
 	}
 
 	// Та же база сравнения, что у самой разницы выше: список файлов,
@@ -149,18 +171,17 @@ func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID i
 	namesCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "--name-only", "HEAD")
 	namesOut, err := runCmd(namesCmd)
 	if err != nil {
-		return Patch{}, nil, fmt.Errorf("repo: не удалось получить список изменённых файлов: %s: %w", firstLine(err.Error()), err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось получить список изменённых файлов: %s: %w", firstLine(err.Error()), err)
 	}
-	var paths []string
 	for _, line := range strings.Split(namesOut, "\n") {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			paths = append(paths, trimmed)
+			notes.Paths = append(notes.Paths, trimmed)
 		}
 	}
 
 	dir, err := patchesDir(host, projectPath)
 	if err != nil {
-		return Patch{}, nil, err
+		return Patch{}, notes, err
 	}
 	target := filepath.Join(dir, patchName(jobID, sha))
 
@@ -173,29 +194,29 @@ func Capture(ctx context.Context, checkoutDir, host, projectPath string, jobID i
 	// причина, по которой файл разницы вообще требует режима 0600.
 	tmp, err := os.CreateTemp(dir, ".patch-*.tmp")
 	if err != nil {
-		return Patch{}, nil, fmt.Errorf("repo: не удалось создать временный файл патча: %w", err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось создать временный файл патча: %w", err)
 	}
 	tmpPath := tmp.Name()
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return Patch{}, nil, fmt.Errorf("repo: не удалось выставить права 0600 на временный файл патча: %w", err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось выставить права 0600 на временный файл патча: %w", err)
 	}
 	if _, err := tmp.WriteString(diffOut); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return Patch{}, nil, fmt.Errorf("repo: не удалось записать временный файл патча: %w", err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось записать временный файл патча: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return Patch{}, nil, fmt.Errorf("repo: не удалось закрыть временный файл патча: %w", err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось закрыть временный файл патча: %w", err)
 	}
 	if err := os.Rename(tmpPath, target); err != nil {
 		os.Remove(tmpPath)
-		return Patch{}, nil, fmt.Errorf("repo: не удалось сохранить патч %s: %w", target, err)
+		return Patch{}, notes, fmt.Errorf("repo: не удалось сохранить патч %s: %w", target, err)
 	}
 
-	return Patch{Path: target, JobID: jobID, SHA: sha}, paths, nil
+	return Patch{Path: target, JobID: jobID, SHA: sha}, notes, nil
 }
 
 // LatestPatch возвращает самый свежий по времени изменения патч в каталоге
