@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/f3rym/ci-shell/internal/cache"
@@ -102,15 +103,28 @@ func hasCommit(ctx context.Context, dir, sha string) bool {
 	return err == nil
 }
 
-// ensureMirror гарантирует, что в dir есть служебный каталог git: если он
-// уже там (проверяется запросом каталога git у самого git), не делает
-// ничего; иначе создаёт bare-репозиторий. Remote в зеркале не заводится
-// вовсе — адрес источника всегда передаётся вызовом fetch явным аргументом,
-// поэтому в конфигурации зеркала нечего чистить после загрузки.
+// ensureMirror гарантирует, что зеркало живёт именно в dir: если служебный
+// каталог git — это сам dir, не делает ничего; иначе создаёт
+// bare-репозиторий. Remote в зеркале не заводится вовсе — адрес источника
+// всегда передаётся вызовом fetch явным аргументом, поэтому в конфигурации
+// зеркала нечего чистить после загрузки.
+//
+// Проверка спрашивает --absolute-git-dir и сверяет ответ с самим dir, а не
+// довольствуется успехом rev-parse: rev-parse ищет служебный каталог ВВЕРХ
+// по дереву. cache.Dir только что создал dir пустым, поэтому любой предок,
+// оказавшийся репозиторием (домашний каталог под dotfiles — типовой случай,
+// а XDG_CACHE_HOME указывает куда угодно), выдавал бы себя за готовое
+// зеркало: bare-зеркало не создавалось бы, а fetch и update-ref писали бы
+// объекты и ссылку в чужой репозиторий, который пользователь не называл, —
+// с заголовком PRIVATE-TOKEN на запросе. Несовпадение путей (например
+// из-за симлинка в пути кэша) не опасно: init --bare поверх уже готового
+// bare-зеркала ничего не портит.
 func ensureMirror(ctx context.Context, dir string) error {
-	checkCmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-dir")
-	if _, err := runCmd(checkCmd); err == nil {
-		return nil
+	checkCmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--absolute-git-dir")
+	if out, err := runCmd(checkCmd); err == nil {
+		if abs, absErr := filepath.Abs(dir); absErr == nil && filepath.Clean(strings.TrimSpace(out)) == filepath.Clean(abs) {
+			return nil
+		}
 	}
 
 	initCmd := exec.CommandContext(ctx, "git", "init", "--bare", "--quiet", dir)
