@@ -45,9 +45,12 @@ type Patch struct {
 
 // FileStat — отчёт по одному файлу разницы. Added и Deleted отрицательны
 // для двоичного файла, для которого git не считает строки — вызывающий
-// печатает прочерк вместо числа.
+// печатает прочерк вместо числа. From непуст только для переименования и
+// несёт путь-источник: обе стороны переименования — реальные цели записи, и
+// проверять их надо обе.
 type FileStat struct {
 	Path    string
+	From    string
 	Added   int
 	Deleted int
 }
@@ -280,47 +283,99 @@ func numstatValue(field string) int {
 // PatchStat разбирает патч patchPath в список FileStat относительно root.
 // Команда только читает: ни рабочее дерево, ни индекс она не трогает,
 // поэтому её можно звать до подтверждения пользователя.
+//
+// Запрашивается машинно-читаемая форма (-z): пути идут отдельными полями,
+// завершёнными NUL, и без экранирования. Человеческая форма --numstat
+// печатает переименование одним компактным полем вида "dir/{old => new}" —
+// именно она делала CheckPaths бесполезной: путь "{a => /etc/passwd}"
+// распадался на сегменты "{a => ", "etc", "passwd}", ни один из которых не
+// ".." и ни один не абсолютный, поэтому единственный предохранитель молчал,
+// а список файлов, показанный пользователю, называл не то, что будет
+// записано.
 func PatchStat(ctx context.Context, root, patchPath string) ([]FileStat, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "apply", "--numstat", patchPath)
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "apply", "--numstat", "-z", patchPath)
 	out, err := runCmd(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("repo: не удалось разобрать патч %s: %s: %w", patchPath, firstLine(err.Error()), ErrApplyFailed)
 	}
+	return parseNumstatZ(out), nil
+}
+
+// parseNumstatZ разбирает вывод `git apply --numstat -z`. Форма записи:
+// "<добавлено>\t<удалено>\t" и следом путь, завершённый NUL; для
+// переименования поле пути пусто, а следом идут два NUL-поля — старый путь и
+// новый. Незнакомая запись пропускается молча: разбор не должен превращать
+// незнакомую строку в путь.
+func parseNumstatZ(out string) []FileStat {
+	tokens := strings.Split(out, "\x00")
 
 	var stats []FileStat
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			continue
-		}
-		fields := strings.SplitN(line, "\t", 3)
+	for i := 0; i < len(tokens); i++ {
+		fields := strings.SplitN(tokens[i], "\t", 3)
 		if len(fields) != 3 {
 			continue
 		}
+		added, deleted := numstatValue(fields[0]), numstatValue(fields[1])
+
+		if fields[2] != "" {
+			stats = append(stats, FileStat{Path: fields[2], Added: added, Deleted: deleted})
+			continue
+		}
+		if i+2 >= len(tokens) {
+			continue
+		}
 		stats = append(stats, FileStat{
-			Path:    fields[2],
-			Added:   numstatValue(fields[0]),
-			Deleted: numstatValue(fields[1]),
+			From:    tokens[i+1],
+			Path:    tokens[i+2],
+			Added:   added,
+			Deleted: deleted,
 		})
+		i += 2
 	}
-	return stats, nil
+	return stats
+}
+
+// unsafePath сообщает, ведёт ли путь за пределы репозитория: абсолютный (в
+// любой из форм — ведущая косая черта, ведущая обратная косая черта, буква
+// диска Windows) или содержащий сегмент "..". Разделителем считаются и "/",
+// и "\": сборка утилиты под одну платформу не должна решать, чем разделены
+// сегменты в патче, снятом на другой — filepath.IsAbs Windows-сборки не
+// признаёт абсолютным "/etc/x", а Unix-сборка не видит ".." за обратной
+// косой чертой.
+func unsafePath(p string) bool {
+	if p == "" {
+		return true
+	}
+	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
+		return true
+	}
+	if len(p) > 1 && p[1] == ':' {
+		return true
+	}
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckPaths — единственный предохранитель от записи за пределы
 // репозитория: путь отвергается, если он абсолютный или если среди его
-// сегментов встречается переход на уровень вверх. Проверка своя, а не
-// «git разберётся»: git и так откажется писать наружу, но отказ должен быть
-// нашим и понятным, и он обязан случиться до того, как в рабочее дерево
+// сегментов встречается переход на уровень вверх. Проверяются обе стороны
+// переименования: и источник, и цель — реальные пути записи. Проверка своя,
+// а не «git разберётся»: git и так откажется писать наружу, но отказ должен
+// быть нашим и понятным, и он обязан случиться до того, как в рабочее дерево
 // пользователя ляжет хоть один байт.
 func CheckPaths(stats []FileStat) error {
 	for _, s := range stats {
-		if filepath.IsAbs(s.Path) {
-			return fmt.Errorf("repo: путь %s абсолютный: %w", s.Path, ErrPatchUnsafe)
+		// Источник есть только у переименования — у обычного изменения
+		// проверять нечего.
+		if s.From != "" && unsafePath(s.From) {
+			return fmt.Errorf("repo: путь %q выходит за пределы репозитория: %w", s.From, ErrPatchUnsafe)
 		}
-		for _, seg := range strings.Split(s.Path, "/") {
-			if seg == ".." {
-				return fmt.Errorf("repo: путь %s выходит за пределы репозитория: %w", s.Path, ErrPatchUnsafe)
-			}
+		if unsafePath(s.Path) {
+			return fmt.Errorf("repo: путь %q выходит за пределы репозитория: %w", s.Path, ErrPatchUnsafe)
 		}
 	}
 	return nil

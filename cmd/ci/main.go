@@ -916,7 +916,14 @@ func runApply(args []string) {
 		if s.Deleted >= 0 {
 			deletedStr = fmt.Sprintf("-%d", s.Deleted)
 		}
-		fmt.Fprintf(os.Stderr, "  %s   %s %s\n", s.Path, addedStr, deletedStr)
+		// Переименование печатается обеими сторонами: пользователь должен
+		// видеть ровно те пути, которые проверены CheckPaths и будут
+		// записаны, а не компактную форму git с фигурными скобками.
+		name := s.Path
+		if s.From != "" {
+			name = s.From + " → " + s.Path
+		}
+		fmt.Fprintf(os.Stderr, "  %s   %s %s\n", name, addedStr, deletedStr)
 	}
 	fmt.Fprintln(os.Stderr)
 
