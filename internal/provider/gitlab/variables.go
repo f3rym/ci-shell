@@ -21,6 +21,11 @@ type variableResponse struct {
 	Protected        bool   `json:"protected"`
 	VariableType     string `json:"variable_type"`
 	EnvironmentScope string `json:"environment_scope"`
+	// Hidden — переменная типа masked_and_hidden (GitLab 17.4+): значение
+	// записывается один раз и не читается через API уже никогда, в ответе
+	// приходит пустым. Единственный класс, который приходится добирать из
+	// локального файла секретов.
+	Hidden bool `json:"hidden"`
 }
 
 // Variables возвращает переменные проекта и всех родительских групп,
@@ -63,9 +68,15 @@ func (c *Client) Variables(ctx context.Context, job provider.Job) (provider.Vari
 // пустой список без ошибки; любая другая ошибка транспорта возвращается
 // как есть, потому что не является ожидаемой деградацией.
 //
-// Маскированные значения не забираются: если ответ помечает переменную
-// masked: true, в provider.Variable кладётся ключ и Masked: true, а поле
-// Value остаётся пустым, даже если в теле ответа что-то пришло (T-02-02).
+// Значение берётся из ответа как есть, включая маскированные переменные:
+// маскирование в GitLab скрывает значение в логах джобы, а не в API, и
+// сервер отдаёт его тому, чья роль это позволяет. Раз ответ пришёл — право
+// на значение у токена уже есть, и добывать его повторно через локальный
+// файл значило бы заставлять человека вручную переписывать то, что и так
+// получено. Masked при этом сохраняется: значение не печатается в выводе.
+//
+// Исключение единственное — hidden (masked_and_hidden): такое значение
+// сервер не отдаёт никому и никогда, для него остаётся файл секретов.
 func (c *Client) fetchVariables(ctx context.Context, path string, scope provider.VariableScope, owner string) ([]provider.Variable, []string, error) {
 	body, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
@@ -95,7 +106,7 @@ func (c *Client) fetchVariables(ctx context.Context, path string, scope provider
 			Scope:             scope,
 			Owner:             owner,
 		}
-		if !r.Masked {
+		if !r.Hidden {
 			v.Value = r.Value
 		}
 		vars = append(vars, v)
