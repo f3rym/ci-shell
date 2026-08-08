@@ -29,9 +29,16 @@ type BannerInput struct {
 	// SecretsPath — фактический путь к файлу секретов, где заполняются
 	// недостающие значения.
 	SecretsPath string
-	// FileVars — ключи файловых переменных, переданных содержимым, а не
-	// путём к файлу (известное ограничение Фазы 3, закрывается в Фазе 6).
+	// FileVars — ключи файловых переменных, материализованных файлами
+	// успешно (internal/runner/filevars.go).
 	FileVars []string
+	// FileVarsDir — каталог внутри контейнера, где лежат материализованные
+	// файлы (точка монтирования, не хостовый путь). Пусто, когда
+	// материализовывать было нечего.
+	FileVarsDir string
+	// FileVarsSkipped — ключи файловых переменных, которые материализовать
+	// не удалось: имя не годится для переменной окружения.
+	FileVarsSkipped []string
 	// CodeSource — готовая строка «откуда и куда»: источник и каталог кода,
 	// собранная вызывающим (Фаза 5). Печатается всегда, когда непуста —
 	// пользователь обязан видеть, какой именно код поедет в контейнер.
@@ -93,7 +100,10 @@ func bannerLines(in BannerInput) []string {
 	}
 
 	if len(in.FileVars) > 0 {
-		lines = append(lines, fmt.Sprintf("файловые переменные переданы содержимым, а не путём к файлу: %s", strings.Join(in.FileVars, ", ")))
+		lines = append(lines, fmt.Sprintf("файловые переменные материализованы файлами в %s: %s — в настоящей джобе каталог другой", in.FileVarsDir, strings.Join(in.FileVars, ", ")))
+	}
+	if len(in.FileVarsSkipped) > 0 {
+		lines = append(lines, fmt.Sprintf("файловые переменные не попали в контейнер, их имя не годится для переменной окружения: %s", strings.Join(in.FileVarsSkipped, ", ")))
 	}
 
 	return append(lines,

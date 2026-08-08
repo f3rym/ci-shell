@@ -400,25 +400,31 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		}
 	}
 
-	// Ключи файловых переменных: значения в контейнер уходят содержимым, а
-	// не путём к файлу (WR-05, материализация — Фаза 6) — честная строка
-	// баннера, а не молчаливое ограничение.
-	var fileVars []string
-	for _, v := range e.Vars {
-		if v.Kind == env.KindFile {
-			fileVars = append(fileVars, v.Key)
-		}
+	// Ключи файловых переменных, материализованных файлами (задача 1,
+	// internal/runner/filevars.go): отсортированный список из карты путей —
+	// источник правды теперь то, что реально легло на диск, а не признак
+	// Kind в собранном окружении. Прежний обход e.Vars по типу переменной
+	// для баннера больше не нужен.
+	fileVars := make([]string, 0, len(fv.Paths))
+	for k := range fv.Paths {
+		fileVars = append(fileVars, k)
 	}
+	sort.Strings(fileVars)
 
 	banner := render.BannerInput{
-		ImageRef:       img.Ref,
-		ImageAssumed:   img.Source == runner.ImageSourceDefault,
-		Missing:        e.Missing,
-		SecretsPath:    e.SecretsPath,
-		FileVars:       fileVars,
-		CodeSource:     fmt.Sprintf("%s — %s", code.Source, code.Dir),
-		GitDirExternal: !code.SelfContained,
+		ImageRef:        img.Ref,
+		ImageAssumed:    img.Source == runner.ImageSourceDefault,
+		Missing:         e.Missing,
+		SecretsPath:     e.SecretsPath,
+		FileVars:        fileVars,
+		FileVarsSkipped: fv.Skipped,
+		CodeSource:      fmt.Sprintf("%s — %s", code.Source, code.Dir),
+		GitDirExternal:  !code.SelfContained,
 	}
+	// Присваивается отдельно, а не полем литерала: runner.Spec несёт
+	// одноимённое поле FileVarsDir с другим смыслом (каталог на хосте) —
+	// здесь это каталог ВНУТРИ контейнера, и явный шаг исключает путаницу.
+	banner.FileVarsDir = fv.Mount
 	if img.Source == runner.ImageSourceFlag && img.Configured != "" {
 		banner.ImageOverridden = img.Configured
 	}
