@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrUnavailable — ни XDG_CACHE_HOME, ни HOME не заданы: каталог кэша
@@ -42,4 +43,36 @@ func Dir(parts ...string) (string, error) {
 		return "", fmt.Errorf("cache: не удалось создать каталог %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+// CheckoutBase — неинтерактивное решение о каталоге чекаута кода джобы,
+// общее у обычного режима (cmd/ci) и консольного интерфейса
+// (internal/ui/session.go): непустая настройка пользователя configured
+// раскрывается (ведущий "~" — через HOME, путь приводится к абсолютному,
+// каталог создаётся с правами 0700); пустая настройка даёт подкаталог
+// чекаутов внутри этого же каталога кэша (Dir("checkouts")).
+//
+// Третий источник обычного режима — вопрос в терминале, когда настройки нет
+// вовсе, — сюда не переезжает: посреди альтернативного экрана интерфейса
+// вопрос в терминале испортил бы кадр и перехватил бы клавиши, а обычный
+// режим продолжает задавать его сам (cmd/ci/main.go, checkoutBase). Пакет
+// при этом остаётся нижним уровнем: настройка приходит параметром, читает
+// её вызывающий, а не CheckoutBase.
+func CheckoutBase(configured string) (string, error) {
+	if configured == "" {
+		return Dir("checkouts")
+	}
+
+	dir := configured
+	if home := os.Getenv("HOME"); home != "" && strings.HasPrefix(dir, "~") {
+		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("cache: не удалось привести каталог чекаутов %s к абсолютному пути: %w", dir, err)
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return "", fmt.Errorf("cache: не удалось создать каталог чекаутов %s: %w", abs, err)
+	}
+	return abs, nil
 }

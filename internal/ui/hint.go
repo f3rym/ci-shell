@@ -52,3 +52,40 @@ func HintRetryJobs() string {
 func HintBlocked(reason string) string {
 	return fmt.Sprintf("%s — подробности в логе", reason)
 }
+
+// Формулировки строки подсказки экрана джобы (09-UI-SPEC.md, «Строка
+// подсказки», раздел «Джоба») — план 09-02. Каждая функция называет ровно
+// одну строку таблицы контракта, чтобы формулировка жила в одном месте.
+
+// HintImageReady — образ готов, шелл ещё не открывали.
+func HintImageReady(image string) string {
+	return fmt.Sprintf("образ %s готов — нажмите s, чтобы войти в контейнер", image)
+}
+
+// HintLeftShell — вышли из шелла (после возврата терминала), R ещё не нажимали.
+func HintLeftShell() string {
+	return "вышли из шелла — нажмите R, чтобы проверить починку на упавшем шаге"
+}
+
+// HintHandingTerminal — терминал передаётся контейнеру: последний полный
+// кадр перед уходом механизма передачи терминала (09-UI-SPEC.md, «Вход и
+// выход», пункт 2).
+func HintHandingTerminal() string {
+	return "передаю терминал контейнеру…"
+}
+
+// HintPullingImage — тяга образа началась, число слоёв ещё не известно.
+func HintPullingImage(image string) string {
+	return fmt.Sprintf("тяну образ %s…", image)
+}
+
+// HintPullingLayers — тяга образа идёт, число слоёв уже известно.
+func HintPullingLayers(image string, done, total int) string {
+	return fmt.Sprintf("тяну образ %s… слой %d из %d", image, done, total)
+}
+
+// HintCanceling — Ctrl-C во время долгой операции: секунда до возврата на
+// предыдущее устойчивое состояние, без клейма ошибки.
+func HintCanceling() string {
+	return "отменяю…"
+}

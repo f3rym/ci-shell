@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // screen — экран интерфейса. screenJobs и screenJob объявлены здесь же,
@@ -34,9 +36,18 @@ type App struct {
 	current screen
 	splash  splashModel
 	jobs    jobsModel
+	job     jobModel
 
 	keys KeyMap
 }
+
+// programSend — функция отправки сообщения в запущенную программу Bubble
+// Tea; ставится в Run() сразу после tea.NewProgram, потому что раньше самой
+// программы не существует. Единственный потребитель — мост событий
+// (Bridge.Attach), подключаемый в Update() при переходе на экран джобы: сама
+// модель App не хранит ссылку на программу (Bubble Tea её и не передаёт), а
+// без пакетной переменной мосту неоткуда было бы взять функцию отправки.
+var programSend func(tea.Msg)
 
 // Init запускает программу пакетом команд: запрос цвета фона терминала
 // (цвет фона в Bubble Tea v2 приходит сообщением, а не запрашивается
@@ -59,6 +70,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		a.splash.width, a.splash.height = msg.Width, msg.Height
 		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
+		a.job = a.job.setSize(msg.Width, msg.Height)
 		return a, nil
 	case tea.BackgroundColorMsg:
 		a.dark = msg.IsDark()
@@ -66,9 +78,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case tea.KeyPressMsg:
 		if key.Matches(msg, a.keys.Quit) && a.current != screenSplash {
+			if a.current == screenJob && a.job.session != nil {
+				// Уборка сессии (контейнер, файловые переменные, чекаут)
+				// обязана произойти и при выходе прямо с экрана джобы, а не
+				// только после явного возврата к списку — иначе выход из
+				// интерфейса клавишей q оставлял бы контейнер и чекаут на
+				// диске (T-09-18).
+				sess := a.job.session
+				return a, func() tea.Msg { sess.Close(); return tea.Quit() }
+			}
 			return a, tea.Quit
 		}
 		if key.Matches(msg, a.keys.Back) && a.current != screenSplash {
+			if a.current == screenJob && a.job.session != nil {
+				sess := a.job.session
+				a.current = screenJobs
+				return a, func() tea.Msg { sess.Close(); return nil }
+			}
 			a.current = screenSplash
 			return a, nil
 		}
@@ -81,8 +107,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.current = screenJobs
 		return a, a.jobs.load()
 	case openJobMsg:
+		// Мост подключается к программе ровно здесь и один раз: программа
+		// Bubble Tea уже существует (programSend поставлен в Run), а
+		// экран джобы ещё нет — создание сессии, моста и подготовка идут
+		// одним переходом, чтобы второе место подключения не появилось.
+		bridge := NewBridge()
+		bridge.Attach(programSend)
+		sess := NewSession(a.jobs.ref, a.jobs.p, msg.job, event.Emitter{Sink: bridge})
+		a.job = newJobModel(sess, a.theme, a.keys)
+		a.job = a.job.setSize(a.width, a.height)
 		a.current = screenJob
-		return a, nil
+		return a, a.job.init()
 	}
 
 	switch a.current {
@@ -93,6 +128,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenJobs:
 		var cmd tea.Cmd
 		a.jobs, cmd = a.jobs.update(msg)
+		return a, cmd
+	case screenJob:
+		var cmd tea.Cmd
+		a.job, cmd = a.job.update(msg)
 		return a, cmd
 	}
 	return a, nil
@@ -121,10 +160,9 @@ func (a App) View() tea.View {
 		keybar = a.jobs.keyBar()
 		hint = RenderHint(a.theme, a.jobs.hintText())
 	case screenJob:
-		// Наполняет план 09-02 — здесь только раскладка кадра, чтобы
-		// второй план не заводил второе место её сборки.
-		keybar = KeyBar(a.theme, a.keys.Back, a.keys.Quit)
-		hint = RenderHint(a.theme, "")
+		body = a.job.bodyView()
+		keybar = a.job.keyBar()
+		hint = RenderHint(a.theme, a.job.hintText())
 	}
 
 	margin := strings.Repeat(" ", OuterMargin)
@@ -162,6 +200,10 @@ func Run(ctx context.Context) error {
 		splash: newSplashModel(),
 	}
 	p := tea.NewProgram(app, tea.WithContext(ctx), tea.WithAltScreen())
+	// Функция отправки существует только теперь — раньше программы не
+	// было. Мост событий экрана джобы (internal/ui/bridge.go) подключается
+	// к ней при первом открытии джобы (App.Update, openJobMsg).
+	programSend = p.Send
 	_, err := p.Run()
 	return err
 }

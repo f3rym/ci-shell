@@ -358,10 +358,9 @@ func (c *Container) Exec(ctx context.Context, command string, out, errOut io.Wri
 // её сам, как раньше делал Shell.
 //
 // Стандартные потоки метод НЕ назначает намеренно: команду забирает механизм
-// передачи терминала Bubble Tea (tea.ExecProcess, internal/ui), и он сам
-// подключает к ней терминал пользователя — назначенные заранее потоки
-// отняли бы у него это право. Обычный режим (Shell ниже) назначает их сам,
-// сразу после сборки.
+// передачи терминала Bubble Tea (internal/ui), и он сам подключает к ней
+// терминал пользователя — назначенные заранее потоки отняли бы у него это
+// право. Обычный режим (Shell ниже) назначает их сам, сразу после сборки.
 func (c *Container) ShellCommand(ctx context.Context) (*exec.Cmd, error) {
 	if c.shell == "" {
 		if err := c.DetectShell(ctx); err != nil {

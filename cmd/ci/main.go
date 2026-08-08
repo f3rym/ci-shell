@@ -225,16 +225,12 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 		return "", false, err
 	}
 	if settings.CheckoutDir != "" {
-		dir := settings.CheckoutDir
-		if home := os.Getenv("HOME"); home != "" && strings.HasPrefix(dir, "~") {
-			dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
-		}
-		abs, err := filepath.Abs(dir)
+		// Раскрытие настроенного каталога — общая с интерфейсом (Фаза 9)
+		// функция: cache.CheckoutBase. Каталог по умолчанию, вопрос в
+		// терминале и сохранение ответа ниже остаются здесь без изменений.
+		abs, err := cache.CheckoutBase(settings.CheckoutDir)
 		if err != nil {
-			return "", false, fmt.Errorf("не удалось привести каталог чекаутов %s к абсолютному пути: %w", dir, err)
-		}
-		if err := os.MkdirAll(abs, 0o700); err != nil {
-			return "", false, fmt.Errorf("не удалось создать каталог чекаутов %s: %w", abs, err)
+			return "", false, err
 		}
 		return abs, false, nil
 	}
