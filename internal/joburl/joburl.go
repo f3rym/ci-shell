@@ -80,3 +80,34 @@ func Parse(raw string) (Ref, error) {
 		WebURL:      "https://" + u.Host + u.Path,
 	}, nil
 }
+
+// JobNumber распознаёт аргумент, состоящий только из номера джобы: GitLab
+// показывает номер именно с ведущей решёткой, и пользователь копирует его
+// как есть, поэтому один ведущий "#" срезается перед разбором. Отрицательное,
+// нулевое значение или непустой хвост после цифр — false. Ошибка не
+// возвращается: «это не номер» — штатная ветка вызывающего кода (тогда
+// пробуется Parse), а не поломка.
+func JobNumber(raw string) (int64, bool) {
+	s := strings.TrimPrefix(raw, "#")
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// FromParts собирает Ref из уже известных частей — хоста и пути проекта,
+// выведенных из git remote origin, и номера джобы. WebURL строится в той же
+// форме, что и Parse (https, разделитель "/-/jobs/"), чтобы форма ссылки
+// оставалась в одном пакете и не расползалась по cmd/ci.
+func FromParts(host, projectPath string, jobID int64) Ref {
+	return Ref{
+		Host:        host,
+		ProjectPath: projectPath,
+		JobID:       jobID,
+		WebURL:      "https://" + host + "/" + projectPath + "/-/jobs/" + strconv.FormatInt(jobID, 10),
+	}
+}

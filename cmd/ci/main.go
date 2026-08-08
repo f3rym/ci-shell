@@ -37,7 +37,8 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "использование: ci shell <ссылка на джобу GitLab>")
+	fmt.Fprintln(os.Stderr, "использование: ci shell <ссылка на джобу GitLab | номер джобы>")
+	fmt.Fprintln(os.Stderr, "номер джобы работает из каталога репозитория проекта — хост и проект берутся из git remote origin")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -85,7 +86,11 @@ func explain(err error) string {
 	case errors.Is(err, repo.ErrGitUnavailable):
 		return fmt.Sprintf("%s\nпоставьте git — утилита ходит в него за кодом коммита джобы", err)
 	case errors.Is(err, repo.ErrNotAGitRepo):
-		return fmt.Sprintf("%s\nзапустите ci shell из рабочей копии того же проекта, что и упавшая джоба", err)
+		return fmt.Sprintf("%s\nзапустите ci shell из рабочей копии того же проекта, что и упавшая джоба, либо передайте полную ссылку на джобу", err)
+	case errors.Is(err, repo.ErrNoOrigin):
+		return fmt.Sprintf("%s\nнастройте remote origin (git remote add origin <ссылка>), либо передайте полную ссылку на джобу вместо номера", err)
+	case errors.Is(err, repo.ErrRemoteUnparsable):
+		return fmt.Sprintf("%s\nпередайте полную ссылку на джобу вместо номера — эту форму remote origin утилита не распознаёт", err)
 	case errors.Is(err, repo.ErrCommitNotFound):
 		return fmt.Sprintf("%s\nподтяните коммит: git fetch origin <sha> — иначе воспроизводить нечего", err)
 	case errors.Is(err, repo.ErrWorktreeFailed):
@@ -262,9 +267,32 @@ func runShell(args []string) {
 	}
 	raw := fs.Arg(0)
 
-	ref, err := joburl.Parse(raw)
-	if err != nil {
-		fail(err)
+	// Контекст создаётся здесь, а не только перед первым запросом к API:
+	// разбор номера джобы уже нуждается в нём для вызовов git.
+	ctx := context.Background()
+
+	var ref joburl.Ref
+	if jobID, isNumber := joburl.JobNumber(raw); isNumber {
+		root, err := repo.Root(ctx)
+		if err != nil {
+			fail(err)
+		}
+		host, projectPath, err := repo.OriginRef(ctx, root)
+		if err != nil {
+			fail(err)
+		}
+		// Хост в этой ветке приходит не от пользователя, а из клонированного
+		// репозитория — пользователь обязан увидеть, куда полетит его
+		// токен, прежде чем токен туда полетит (T-04-03). Печатается ДО
+		// резолва токена.
+		fmt.Fprintf(os.Stderr, "хост и проект определены из git remote origin: %s, %s\n", host, projectPath)
+		ref = joburl.FromParts(host, projectPath, jobID)
+	} else {
+		r, err := joburl.Parse(raw)
+		if err != nil {
+			fail(err)
+		}
+		ref = r
 	}
 
 	tok, err := token.Resolve(ref.Host)
@@ -277,7 +305,6 @@ func runShell(args []string) {
 	// provider.Provider (GLAB-04).
 	var p provider.Provider = gitlab.New(ref.Host, tok)
 
-	ctx := context.Background()
 	job, err := p.JobByID(ctx, ref.ProjectPath, ref.JobID)
 	if err != nil {
 		fail(err)
