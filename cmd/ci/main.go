@@ -39,8 +39,9 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "использование: ci shell <ссылка на джобу GitLab | номер джобы>")
+	fmt.Fprintln(os.Stderr, "использование: ci shell [--image <образ>] <ссылка на джобу GitLab | номер джобы>")
 	fmt.Fprintln(os.Stderr, "номер джобы работает из каталога репозитория проекта — хост и проект берутся из git remote origin")
+	fmt.Fprintln(os.Stderr, "--image ставится до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -133,7 +134,7 @@ func unreproducibleNote(err error) string {
 // выполнится, и на машине останутся worktree и (в следующей задаче)
 // контейнер. Любая поломка возвращается наружу как ошибка; печать и
 // завершение делает runShell уже после возврата из reproduce.
-func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, e env.Environment, pr render.Progress) error {
+func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, pr render.Progress) error {
 	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
 	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
 	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
@@ -150,7 +151,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 	pr.Stage("проверяю Docker и воспроизводимость джобы…")
-	if err := runner.Preflight(ctx, d, jobCfg.Image); err != nil {
+	if err := runner.Preflight(ctx, d, img.Ref); err != nil {
 		return err
 	}
 
@@ -180,7 +181,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 
 	// d.EnsureImage остаётся здесь, после подготовки кода: это уже дорогая
 	// операция с собственным прогрессом, а не дешёвая проверка Preflight.
-	if err := d.EnsureImage(ctx, jobCfg.Image); err != nil {
+	if err := d.EnsureImage(ctx, img.Ref); err != nil {
 		return err
 	}
 
@@ -201,7 +202,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 
 	c, skipped, err := d.Start(ctx, runner.Spec{
-		Image:     jobCfg.Image,
+		Image:     img.Ref,
 		SourceDir: wt.Dir,
 		WorkDir:   workDir,
 		Env:       envMap,
@@ -280,6 +281,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 // provider.Provider → печать метаданных джобы.
 func runShell(args []string) {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
+	imageFlag := fs.String("image", "", "образ контейнера вместо образа из конфига джобы")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -378,6 +380,11 @@ func runShell(args []string) {
 		}
 	}
 
+	// Единственное место в cmd/ci, где образ из разобранного конфига вообще
+	// читается; дальше по коду ходит только результат выбора (img.Ref) —
+	// джоба без image: в конфиге больше не отказ, а разумный дефолт (CLI-07).
+	img := runner.ResolveImage(jobCfg.Image, *imageFlag)
+
 	if err := render.Job(os.Stdout, job, jobCfg); err != nil {
 		fail(err)
 	}
@@ -420,7 +427,7 @@ func runShell(args []string) {
 	// Прогресс дальнейших этапов воспроизведения идёт в stderr, чтобы
 	// stdout оставался чистым выводом метаданных и окружения.
 	pr := render.Progress{W: os.Stderr}
-	if err := reproduce(ctx, ref, job, jobCfg, e, pr); err != nil {
+	if err := reproduce(ctx, ref, job, jobCfg, img, e, pr); err != nil {
 		fail(err)
 	}
 }
