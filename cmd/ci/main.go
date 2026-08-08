@@ -503,7 +503,14 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// могут: они лежат кэшем-соседом workDir+".tmp", а не внутри code.Dir
 	// (контракт плана 06-02) — Capture строит разницу только из состояния
 	// git-чекаута.
-	patch, _, captureErr := repo.Capture(ctx, code.Dir, job.ID, job.CommitSHA)
+	//
+	// Фоновый контекст, как у всей уборки ниже, и по более веской причине:
+	// SIGTERM или SIGINT, дошедший до группы процессов после возврата из
+	// шелла, отменил бы основной контекст, каждый вызов git внутри Capture
+	// упал бы мгновенно, патч не был бы записан — а отложенный
+	// code.Remove(context.Background()) всё равно снёс бы чекаут вместе с
+	// правками пользователя. Правки — это ровно то, ради чего он тут сидел.
+	patch, _, captureErr := repo.Capture(context.Background(), code.Dir, job.ID, job.CommitSHA)
 	switch {
 	case errors.Is(captureErr, repo.ErrNoChanges):
 		fmt.Fprintln(os.Stderr, "правок в чекауте нет — переносить нечего")
