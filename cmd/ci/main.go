@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -288,19 +290,39 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		}
 	}()
 
+	// Рабочий каталог берётся у доменной модели (правило GitLab по
+	// умолчанию живёт в env.Environment.WorkDir, не здесь) — от него зависит
+	// ещё и точка монтирования файловых переменных ниже.
+	workDir := e.WorkDir()
+
+	// Точка монтирования файловых переменных — рабочий каталог с суффиксом
+	// ".tmp": так делает сам ранер GitLab, и это соседний каталог, а не
+	// подкаталог кода, поэтому в чекаут (git-репозиторий, из которого
+	// Фаза 7 будет забирать правки пользователя) ничего не попадает.
+	fv, err := runner.MaterializeFileVars(e.FileContents(), workDir+".tmp")
+	if err != nil {
+		return err
+	}
+	// Регистрируется немедленно и ОБЯЗАТЕЛЬНО РАНЬШЕ отложенного снятия
+	// контейнера ниже: отложенные вызовы разворачиваются в обратном
+	// порядке, поэтому зарегистрированный раньше выполнится позже — файлы
+	// исчезнут, когда контейнер уже снят и читать их некому.
+	defer func() {
+		if err := fv.Remove(); err != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
+		}
+	}()
+	if len(fv.Skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "предупреждение: файловые переменные не материализованы, имя не годится для файла: %s\n", strings.Join(fv.Skipped, ", "))
+	}
+
 	// d.EnsureImage остаётся здесь, после подготовки кода: это уже дорогая
 	// операция с собственным прогрессом, а не дешёвая проверка Preflight.
 	if err := d.EnsureImage(ctx, img.Ref); err != nil {
 		return err
 	}
 
-	envMap := e.Map()
-	workDir := envMap["CI_PROJECT_DIR"]
-	if workDir == "" {
-		// Правило GitLab по умолчанию: /builds/<путь проекта> — шелл всё
-		// равно открывается там, где работала джоба.
-		workDir = "/builds/" + job.ProjectPath
-	}
+	envMap := e.Map(fv.Paths)
 
 	if len(e.Missing) > 0 {
 		keys := make([]string, 0, len(e.Missing))
@@ -311,11 +333,13 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 
 	c, skipped, err := d.Start(ctx, runner.Spec{
-		Image:     img.Ref,
-		SourceDir: code.Dir,
-		WorkDir:   workDir,
-		Env:       envMap,
-		JobID:     job.ID,
+		Image:         img.Ref,
+		SourceDir:     code.Dir,
+		WorkDir:       workDir,
+		Env:           envMap,
+		JobID:         job.ID,
+		FileVarsDir:   fv.Dir,
+		FileVarsMount: fv.Mount,
 	})
 	if err != nil {
 		return err

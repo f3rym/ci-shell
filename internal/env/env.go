@@ -94,10 +94,52 @@ type Missing struct {
 	Origin string
 }
 
-// Map отдаёт плоскую карту ключ→значение для Фазы 3 (docker run).
-func (e Environment) Map() map[string]string {
+// FileContents отдаёт ключ и содержимое переменных с KindFile. Единственное
+// место, где содержимое файловой переменной покидает доменную модель —
+// потребитель у неё ровно один: материализация в пакете runner
+// (internal/runner/filevars.go).
+func (e Environment) FileContents() map[string]string {
+	m := make(map[string]string)
+	for _, v := range e.Vars {
+		if v.Kind == KindFile {
+			m[v.Key] = v.Value
+		}
+	}
+	return m
+}
+
+// WorkDir — рабочий каталог джобы: значение CI_PROJECT_DIR из собранных
+// переменных, а при его отсутствии — правило GitLab по умолчанию, каталог
+// сборок с путём проекта (/builds/<ProjectPath>). Правило доменное, а не про
+// вывод, поэтому живёт здесь, а не в cmd/ci: от него зависит и рабочий
+// каталог контейнера, и точка монтирования файловых переменных (сосед
+// рабочего каталога с суффиксом .tmp).
+func (e Environment) WorkDir() string {
+	for _, v := range e.Vars {
+		if v.Key == "CI_PROJECT_DIR" {
+			return v.Value
+		}
+	}
+	return "/builds/" + e.ProjectPath
+}
+
+// Map отдаёт плоскую карту ключ→значение для docker run. Параметр filePaths
+// обязателен, а не необязателен: карта — единственный канал значений в
+// контейнер, и возможность собрать её без путей означала бы возможность
+// вернуть сегодняшнюю поломку (содержимое файловой переменной вместо пути к
+// ней) одной строкой. Для обычной переменной в карту уходит её значение, как
+// и раньше. Для переменной с KindFile в карту уходит путь из filePaths, а
+// если пути для неё нет (материализация её пропустила), ключ в карту не
+// попадает вовсе.
+func (e Environment) Map(filePaths map[string]string) map[string]string {
 	m := make(map[string]string, len(e.Vars))
 	for _, v := range e.Vars {
+		if v.Kind == KindFile {
+			if p, ok := filePaths[v.Key]; ok {
+				m[v.Key] = p
+			}
+			continue
+		}
 		m[v.Key] = v.Value
 	}
 	return m

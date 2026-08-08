@@ -109,6 +109,17 @@ type Spec struct {
 	WorkDir   string
 	Env       map[string]string
 	JobID     int64
+	// FileVarsDir — каталог на хосте с материализованными файловыми
+	// переменными (internal/runner/filevars.go). Пусто, когда
+	// материализовывать было нечего — тогда второе монтирование не
+	// добавляется вовсе.
+	FileVarsDir string
+	// FileVarsMount — каталог внутри контейнера, куда монтируется
+	// FileVarsDir: сосед рабочего каталога, а не подкаталог кода — каталог с
+	// кодом это git-чекаут, из которого Фаза 7 будет забирать правки
+	// пользователя, и секрет, положенный туда, показался бы в состоянии
+	// репозитория и мог уехать в коммит.
+	FileVarsMount string
 }
 
 // Container — поднятый контейнер джобы.
@@ -150,16 +161,25 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	// добивают его по захваченному id. Одиночный docker run -d id при
 	// отказе старта не гарантирует, и контейнер утекал бы навсегда:
 	// defer c.Remove регистрируется вызывающим только после успеха Start.
-	createCmd := exec.CommandContext(ctx, d.bin,
+	// Аргумент монтирования файловых переменных необязательный (пусто, когда
+	// материализовывать было нечего), поэтому собирается в отдельный срез, а
+	// не вписывается прямо в вызов, как остальные.
+	args := []string{
 		"create",
 		"--env-file", envPath,
 		"-v", mount,
+	}
+	if spec.FileVarsDir != "" && spec.FileVarsMount != "" {
+		args = append(args, "-v", spec.FileVarsDir+":"+spec.FileVarsMount)
+	}
+	args = append(args,
 		"-w", spec.WorkDir,
 		"--label", label,
 		"--entrypoint", "sh",
 		spec.Image,
 		"-c", holdCommand,
 	)
+	createCmd := exec.CommandContext(ctx, d.bin, args...)
 	out, err := runCaptured(createCmd)
 	id := strings.TrimSpace(out)
 	if err != nil || id == "" {
