@@ -65,7 +65,16 @@ func BuildRetryScript(steps []Step, failedIndex int, workDir, shell string) stri
 
 	hasFailed := failedIndex >= 1 && failedIndex <= len(steps)
 
+	// set -e и здесь, а не только в __ci_retry_rest: оригинальный прогон
+	// исполняет каждый шаг одной сессией с set -e (см. steps.go), поэтому шаг
+	// из нескольких команд (блочный скаляр YAML или "a; b") падает там на
+	// первой же ненулевой. Без set -e в этой подоболочке кодом возврата шага
+	// становится код его ПОСЛЕДНЕЙ команды: шаг, у которого падает первая
+	// команда, а последняя проходит, печатал бы «✓ шаг теперь проходит (в CI
+	// он падал)» — ровно тот ложный зелёный сигнал, которого петля фикса не
+	// имеет права подавать.
 	b.WriteString("__ci_retry_failed() (\n")
+	b.WriteString("    set -e\n")
 	if !hasFailed {
 		b.WriteString("    echo 'перезапускать нечего: ни один шаг не упал'\n")
 		b.WriteString("    exit 0\n")
