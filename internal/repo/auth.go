@@ -1,6 +1,33 @@
 package repo
 
-import "encoding/base64"
+import (
+	"encoding/base64"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// gitConfigCount возвращает число пар ключ/значение, уже заданных в base
+// переменной GIT_CONFIG_COUNT. Побеждает последнее вхождение — так же, как
+// при дедупликации окружения дочернего процесса. Нечисловое, отрицательное
+// или отсутствующее значение считается нулём: пользовательские пары в этом
+// случае git и сам не прочитает.
+func gitConfigCount(base []string) int {
+	const prefix = "GIT_CONFIG_COUNT="
+	n := 0
+	for _, kv := range base {
+		if !strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(kv, prefix)))
+		if err != nil || v < 0 {
+			n = 0
+			continue
+		}
+		n = v
+	}
+	return n
+}
 
 // AuthEnv возвращает копию среза base, дополненную конфигурацией git,
 // переданной переменными окружения дочернего процесса. Это единственный
@@ -10,9 +37,20 @@ import "encoding/base64"
 // джобы, а форма передачи конфигурации git аргументом командной строки
 // (-c http.extraHeader=...) видна в таблице процессов (idea-0.2.0 §4).
 //
-// GIT_CONFIG_COUNT задаёт число пар ключ/значение (2), обе пары несут
-// ключ http.extraHeader — это многозначный ключ git, поэтому две пары дают
-// два заголовка на запросе, а не перезапись одного другим.
+// Ключи привязаны к конкретному адресу — http.<адрес зеркала>.extraHeader, —
+// а не заданы глобальным http.extraHeader. Глобальный ключ git применяет ко
+// всякому HTTP-запросу процесса, включая запрос по редиректу: инстанс
+// GitLab (или подменивший его прокси/DNS), ответивший перенаправлением на
+// другой хост, получил бы вместе с ним и PRIVATE-TOKEN, и Authorization с
+// живым персональным токеном. Форма http.<url>.* этого не допускает: git
+// сверяет адрес запроса с адресом в ключе. Тем же адресом ограничен
+// followRedirects=false — переходить по редиректам этим запросам незачем
+// вовсе.
+//
+// GIT_CONFIG_COUNT наращивается от уже заданного пользователем значения, а
+// не выставляется числом наших пар: пользователь имеет право настраивать git
+// тем же способом, и затирание его пар индексами 0 и 1 молча меняло бы
+// поведение git у нас под ногами. Наши пары идут после пользовательских.
 //
 // Первое значение — заголовок PRIVATE-TOKEN со значением секрета: тот же
 // способ, которым в API ходит клиент Фазы 1 (контракт 01-SKELETON.md), и
@@ -24,28 +62,35 @@ import "encoding/base64"
 // угадывать версию сервера, а верифицировать вживую этот проект не может по
 // своим ограничениям (верификация — только чтением исходников). Оба
 // заголовка несут один и тот же секрет одному и тому же хосту — новой
-// поверхности утечки второй заголовок не создаёт.
-//
-// Порядок важен: пары добавляются в конец, поэтому при совпадении имён
-// побеждает наше значение — дедупликация окружения дочернего процесса в
-// stdlib оставляет последнее вхождение ключа. Заранее выставленные
-// пользователем одноимённые переменные нашу конфигурацию не перебьют.
+// поверхности утечки второй заголовок не создаёт. Ключ http.<url>.extraHeader
+// многозначный, поэтому две пары дают два заголовка на запросе, а не
+// перезапись одного другим.
 //
 // GIT_TERMINAL_PROMPT=0 не даёт git при отказе аутентификации уйти в диалог
 // логина в терминале и подвесить процесс посреди подготовки контейнера:
 // отказ должен быть ошибкой, а не зависанием.
-func AuthEnv(base []string, secret string) []string {
-	env := make([]string, len(base), len(base)+6)
+func AuthEnv(base []string, host, projectPath, secret string) []string {
+	env := make([]string, len(base), len(base)+8)
 	copy(env, base)
 
 	basic := base64.StdEncoding.EncodeToString([]byte("oauth2:" + secret))
+	prefix := "http." + mirrorURL(host, projectPath) + "."
+
+	n := gitConfigCount(base)
+	add := func(key, value string) {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", n, key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", n, value),
+		)
+		n++
+	}
+
+	add(prefix+"extraHeader", "PRIVATE-TOKEN: "+secret)
+	add(prefix+"extraHeader", "Authorization: Basic "+basic)
+	add(prefix+"followRedirects", "false")
 
 	return append(env,
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=PRIVATE-TOKEN: "+secret,
-		"GIT_CONFIG_KEY_1=http.extraHeader",
-		"GIT_CONFIG_VALUE_1=Authorization: Basic "+basic,
+		fmt.Sprintf("GIT_CONFIG_COUNT=%d", n),
 		"GIT_TERMINAL_PROMPT=0",
 	)
 }

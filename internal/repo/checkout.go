@@ -150,7 +150,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 		return nil, err
 	}
 
-	env := AuthEnv(os.Environ(), req.Token)
+	env := AuthEnv(os.Environ(), req.Host, req.ProjectPath, req.Token)
 	if err := fetchCommit(ctx, mirror, req.Host, req.ProjectPath, req.SHA, req.Ref, req.Tag, env, p); err != nil {
 		return nil, err
 	}
