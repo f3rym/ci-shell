@@ -169,6 +169,14 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 		return provider.Job{}, fmt.Errorf("gitlab: разбор ответа джобы %s #%d: %w", projectPath, jobID, err)
 	}
 
+	return toJob(resp, projectPath), nil
+}
+
+// toJob переносит одну запись ответа API (полученную и через JobByID, и
+// через PipelineJobs) в доменный provider.Job — единственное место сборки,
+// чтобы два места сборки из одного и того же ответа не разошлись при
+// первом добавленном поле.
+func toJob(resp jobResponse, projectPath string) provider.Job {
 	job := provider.Job{
 		ID:            resp.ID,
 		Name:          resp.Name,
@@ -192,7 +200,34 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 	if resp.FinishedAt != nil {
 		job.FinishedAt = *resp.FinishedAt
 	}
-	return job, nil
+	return job
+}
+
+// PipelineJobs возвращает джобы одного пайплайна pipelineID проекта
+// projectPath — одна страница до ста джоб (per_page=100). Постраничный
+// обход и кэш — требование BROW-02 Фазы 10; полнота страницы видна
+// вызывающему по длине среза — честную оговорку о неполном списке строит
+// подписчик (internal/ui/jobs.go), а не этот метод.
+func (c *Client) PipelineJobs(ctx context.Context, projectPath string, pipelineID int64) ([]provider.Job, error) {
+	path := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=100", url.PathEscape(projectPath), pipelineID)
+	body, err := c.do(ctx, http.MethodGet, path)
+	if err != nil {
+		if errors.Is(err, errStatusNotFound) {
+			return nil, fmt.Errorf("gitlab: пайплайн %s#%d на хосте %s не найден либо недоступен: %w", projectPath, pipelineID, c.host, provider.ErrJobNotFound)
+		}
+		return nil, err
+	}
+
+	var raw []jobResponse
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("gitlab: разбор списка джоб пайплайна %s#%d: %w", projectPath, pipelineID, err)
+	}
+
+	jobs := make([]provider.Job, 0, len(raw))
+	for _, r := range raw {
+		jobs = append(jobs, toJob(r, projectPath))
+	}
+	return jobs, nil
 }
 
 // FindFailedJob — автоопределение упавшей джобы без ссылки. Это требование

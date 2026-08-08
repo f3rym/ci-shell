@@ -38,6 +38,12 @@ type Provider interface {
 	// метод сегодня нигде не вызывается кроме cmd/ci, прежняя заглушка —
 	// единственная реализация.
 	Variables(ctx context.Context, job Job) (VariableSet, error)
+	// PipelineJobs возвращает джобы одного пайплайна (TUI-03). Расширение
+	// делается с прицелом на второй провайдер, а не «пока для GitLab»
+	// (idea-0.3.0 §5) — остальные списки (группы токена, проекты группы,
+	// пайплайны проекта, лог джобы) принадлежат Фазе 10 и добавляются туда
+	// же, тем же интерфейсом.
+	PipelineJobs(ctx context.Context, projectPath string, pipelineID int64) ([]Job, error)
 }
 
 // Job — метаданные джобы CI, полученные через API провайдера.

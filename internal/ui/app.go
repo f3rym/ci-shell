@@ -33,6 +33,7 @@ type App struct {
 
 	current screen
 	splash  splashModel
+	jobs    jobsModel
 
 	keys KeyMap
 }
@@ -57,6 +58,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.splash.width, a.splash.height = msg.Width, msg.Height
+		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
 		return a, nil
 	case tea.BackgroundColorMsg:
 		a.dark = msg.IsDark()
@@ -70,11 +72,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.current = screenSplash
 			return a, nil
 		}
+	case jobRefMsg:
+		// Переключение на список джоб и передача выбранной джобы
+		// объявляются здесь: экран джобы ещё пуст (наполняет план 09-02),
+		// но перечисление экранов и место переключения не должны
+		// расползаться правкой второго плана.
+		a.jobs = newJobsModel(msg.ref, msg.job, a.theme, a.keys)
+		a.current = screenJobs
+		return a, a.jobs.load()
+	case openJobMsg:
+		a.current = screenJob
+		return a, nil
 	}
 
-	if a.current == screenSplash {
+	switch a.current {
+	case screenSplash:
 		var cmd tea.Cmd
 		a.splash, cmd = a.splash.update(msg)
+		return a, cmd
+	case screenJobs:
+		var cmd tea.Cmd
+		a.jobs, cmd = a.jobs.update(msg)
 		return a, cmd
 	}
 	return a, nil
@@ -97,10 +115,14 @@ func (a App) View() tea.View {
 	switch a.current {
 	case screenSplash:
 		body = a.splash.view(a.theme)
-	default:
-		// screenJobs наполняет задача 3 этого плана, screenJob — план
-		// 09-02; здесь только раскладка кадра, чтобы следующие задачи не
-		// заводили второе место её сборки.
+	case screenJobs:
+		title = title + "  " + a.theme.Muted.Render(a.jobs.ref.Host)
+		body = a.jobs.bodyView()
+		keybar = a.jobs.keyBar()
+		hint = RenderHint(a.theme, a.jobs.hintText())
+	case screenJob:
+		// Наполняет план 09-02 — здесь только раскладка кадра, чтобы
+		// второй план не заводил второе место её сборки.
 		keybar = KeyBar(a.theme, a.keys.Back, a.keys.Quit)
 		hint = RenderHint(a.theme, "")
 	}
