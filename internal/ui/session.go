@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -313,6 +314,164 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		s.owner = owner
 
 		return sessionReadyMsg{outcome: outcome, skipped: skipped}
+	}
+}
+
+// runKind — вид прогона шагов джобы (задача 3): перезапуск упавшего шага,
+// прогон оставшихся, чистый прогон в свежем контейнере. Один тип, чтобы одно
+// сообщение об окончании (runFinishedMsg) обслуживало все три исхода —
+// данные у них одинаковые, а следующий шаг человека разный.
+type runKind int
+
+const (
+	runRetry runKind = iota
+	runRest
+	runClean
+)
+
+// runFinishedMsg — один из трёх прогонов задачи 3 закончился. offset —
+// смещение среза шагов относительно полного списка: абсолютный номер
+// упавшего шага в outcome уже посчитан с этим смещением (adjustOutcome), а
+// не заново самим экраном.
+type runFinishedMsg struct {
+	kind    runKind
+	outcome runner.Outcome
+	offset  int
+	err     error
+}
+
+// adjustOutcome переводит результат прогона среза шагов (индексы которого
+// считаются от начала среза) в абсолютный — только FailedIndex сдвигается на
+// offset, потому что только он используется как номер шага во внешнем мире;
+// нулевой Outcome (срез был пуст) сюда не попадает — вызывающие проверяют
+// длину среза заранее.
+func adjustOutcome(o runner.Outcome, offset int) runner.Outcome {
+	if o.Failed != nil {
+		o.FailedIndex += offset
+	}
+	return o
+}
+
+// RetryStepCmd перезапускает ровно упавший шаг (FIXUI-01): прогон шагов по
+// срезу из одного элемента, начинающемуся с упавшего — тем же прогоном
+// шагов, что и первый проход, с маркерами и точным номером. Команда retry
+// внутри контейнера (internal/runner/retry.go) по-прежнему устанавливается
+// и нужна человеку, вошедшему в шелл — там хост слеп, и знание об упавшем
+// шаге обязано быть внутри контейнера (решение фазы 7). Но интерфейс не
+// слеп: ему нужен точный номер шага, на котором всё остановилось, а его
+// дают только маркеры прогона шагов — семантика при этом та же самая, шаги
+// исполняются против того же грязного состояния, что оставили предыдущие.
+func (s *Session) RetryStepCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		if s.outcome.Failed == nil {
+			return runFinishedMsg{kind: runRetry, err: errNothingFailed}
+		}
+		offset := s.outcome.FailedIndex - 1
+		slice := s.steps[offset : offset+1]
+
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		outcome, err := runner.RunSteps(cctx, s.c, slice, s.log, s.log, s.em)
+		if err != nil {
+			if cctx.Err() != nil {
+				return runFinishedMsg{kind: runRetry, err: context.Canceled}
+			}
+			return runFinishedMsg{kind: runRetry, err: err}
+		}
+		s.outcome = adjustOutcome(outcome, offset)
+		return runFinishedMsg{kind: runRetry, outcome: s.outcome, offset: offset}
+	}
+}
+
+// RestCmd прогоняет шаги, идущие после упавшего, до конца (FIXUI-02) — тем
+// же прогоном шагов, что и RetryStepCmd, срезом сразу за упавшим шагом.
+func (s *Session) RestCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		if s.outcome.Failed == nil {
+			return runFinishedMsg{kind: runRest, err: errNothingFailed}
+		}
+		offset := s.outcome.FailedIndex
+		if offset >= len(s.steps) {
+			return runFinishedMsg{kind: runRest, err: errNoStepsAfter}
+		}
+		slice := s.steps[offset:]
+
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		outcome, err := runner.RunSteps(cctx, s.c, slice, s.log, s.log, s.em)
+		if err != nil {
+			if cctx.Err() != nil {
+				return runFinishedMsg{kind: runRest, err: context.Canceled}
+			}
+			return runFinishedMsg{kind: runRest, err: err}
+		}
+		s.outcome = adjustOutcome(outcome, offset)
+		return runFinishedMsg{kind: runRest, outcome: s.outcome, offset: offset}
+	}
+}
+
+// errNothingFailed/errNoStepsAfter — те же честные формулировки, что печатает
+// скрипт retry внутри контейнера (internal/runner/retry.go), для случаев,
+// когда перезапускать нечего.
+var (
+	errNothingFailed = errors.New("перезапускать нечего: ни один шаг не упал")
+	errNoStepsAfter  = errors.New("после упавшего шагов нет")
+)
+
+// CleanCmd — чистый прогон всех шагов в свежем контейнере (FIXUI-02): сначала
+// возврат владельца файлов, затем снятие первого контейнера, и только потом
+// чистый прогон по уже собранной спецификации spec. Порядок не переизобретён
+// — он взят у обычного режима (cmd/ci/main.go): двух живых контейнеров одной
+// джобы быть не должно, и второй не должен драться за смонтированный каталог
+// с первым. Отказ снятия — причина не запускать чистый прогон вовсе, а не
+// предупреждение. После чистого прогона сессия поднимает контейнер заново
+// той же спецификацией, заново пробует оболочку и заново кладёт команду
+// перезапуска — человек остаётся в интерфейсе и должен иметь возможность
+// продолжить чинить.
+func (s *Session) CleanCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		if s.owner != "" && !s.ownerRestored {
+			s.ownerRestored = true
+			if err := s.c.Chown(context.Background(), s.owner, s.spec.WorkDir); err != nil {
+				s.log.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
+			}
+		}
+		if err := s.c.Remove(context.Background()); err != nil {
+			return runFinishedMsg{kind: runClean, err: fmt.Errorf("чистый прогон пропущен: старый контейнер ещё жив: %w", err)}
+		}
+
+		outcome, err := runner.CleanRun(cctx, s.d, s.spec, s.steps, s.owner, s.log, s.log, s.em)
+		if err != nil {
+			if cctx.Err() != nil {
+				return runFinishedMsg{kind: runClean, err: context.Canceled}
+			}
+			return runFinishedMsg{kind: runClean, err: err}
+		}
+
+		c, _, startErr := s.d.Start(context.Background(), s.spec)
+		if startErr != nil {
+			return runFinishedMsg{kind: runClean, outcome: outcome, err: startErr}
+		}
+		if err := c.DetectShell(context.Background()); err != nil {
+			return runFinishedMsg{kind: runClean, outcome: outcome, err: err}
+		}
+		if err := runner.InstallRetry(context.Background(), c, s.steps, outcome.FailedIndex); err != nil {
+			s.log.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
+		}
+
+		s.ownerRestored = false
+		s.c = c
+		s.outcome = outcome
+
+		return runFinishedMsg{kind: runClean, outcome: outcome}
 	}
 }
 

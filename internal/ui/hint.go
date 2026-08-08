@@ -89,3 +89,51 @@ func HintPullingLayers(image string, done, total int) string {
 func HintCanceling() string {
 	return "отменяю…"
 }
+
+// Формулировки петли фикса (задача 3, FIXUI-01, FIXUI-02): по одной
+// именованной функции на строку таблицы контракта, в порядке прохождения
+// петли — починил, догнал, проверил начисто.
+
+// HintStepFixed — R/:R починил шаг: теперь проходит.
+func HintStepFixed(step int) string {
+	return fmt.Sprintf("шаг %d починен — :rest прогонит оставшиеся шаги", step)
+}
+
+// HintStepStillFails — R/:R — шаг всё ещё падает.
+func HintStepStillFails(step int) string {
+	return fmt.Sprintf("шаг %d всё ещё падает — s, чтобы вернуться в контейнер", step)
+}
+
+// HintRestPassed — :rest — оставшиеся шаги прошли.
+func HintRestPassed() string {
+	return "все шаги пройдены — :clean проверит начисто в свежем контейнере"
+}
+
+// HintRestFailed — :rest — что-то упало дальше.
+func HintRestFailed(step int) string {
+	return fmt.Sprintf("шаг %d упал при прогоне оставшихся — вернитесь в контейнер (s)", step)
+}
+
+// HintCleanGreen — :clean — чистый прогон зелёный.
+func HintCleanGreen() string {
+	return "чистый прогон зелёный — нажмите A, чтобы перенести правки в свой репозиторий"
+}
+
+// HintCleanFails — :clean — чистый прогон падает.
+func HintCleanFails(step int) string {
+	return fmt.Sprintf("чистый прогон падает на шаге %d — вернитесь в контейнер и проверьте ещё раз", step)
+}
+
+// HintRunning — долгая операция (перезапуск, :rest, :clean) идёт: what —
+// метка вида прогона (RunLabelRest/RunLabelClean или собственная строка
+// перезапуска шага), step/total — прогресс по маркерам прогона шагов.
+func HintRunning(what string, step, total int) string {
+	return fmt.Sprintf("выполняю %s… шаг %d из %d", what, step, total)
+}
+
+// Метки вида прогона, названные контрактом (09-UI-SPEC.md, «Долгие
+// операции»).
+const (
+	RunLabelRest  = "rest"
+	RunLabelClean = "чистый прогон"
+)

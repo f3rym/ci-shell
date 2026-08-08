@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,9 +33,7 @@ type envRow struct {
 }
 
 // loopPhase — состояние петли фикса, по таблице строки подсказки контракта
-// (09-UI-SPEC.md, «Строка подсказки», раздел «Джоба»). Пять состояний этого
-// плана; остальные (перезапуск шага, прогон оставшихся, чистый прогон)
-// добавляет задача 3.
+// (09-UI-SPEC.md, «Строка подсказки», раздел «Джоба»).
 type loopPhase int
 
 const (
@@ -43,6 +42,18 @@ const (
 	phaseHandingTerminal
 	phaseLeftShell
 	phaseBlocked
+	// phaseRunning — идёт перезапуск шага, :rest или :clean (задача 3):
+	// подсказка временно замещается HintRunning, кадр тикает спиннером.
+	phaseRunning
+	// phaseStepFixed/phaseStepStillFails — итог R/:R (FIXUI-01).
+	phaseStepFixed
+	phaseStepStillFails
+	// phaseRestPassed/phaseRestFailed — итог :rest (FIXUI-02).
+	phaseRestPassed
+	phaseRestFailed
+	// phaseCleanGreen/phaseCleanFails — итог :clean (FIXUI-02).
+	phaseCleanGreen
+	phaseCleanFails
 )
 
 // shellHandoffMsg гарантирует, что последний полный кадр с подсказкой
@@ -98,6 +109,15 @@ type jobModel struct {
 	// (09-UI-SPEC.md, «Состояния пустоты и ошибок по экранам») не потерялось
 	// при первом реальном источнике обрыва.
 	logErr string
+
+	// runLabel/runOffset/runStep — состояние идущего прогона задачи 3
+	// (phaseRunning): метка вида прогона для HintRunning, смещение среза
+	// шагов (то же, что получила RetryStepCmd/RestCmd/CleanCmd) и абсолютный
+	// номер шага, на котором прогон сейчас — считается из события
+	// event.StepStarted (относительный индекс события + runOffset).
+	runLabel  string
+	runOffset int
+	runStep   int
 
 	spin spinner.Model
 
@@ -174,8 +194,96 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		// при этом НЕ меняются: шелл сам по себе шаг не перезапускает.
 		return m, tea.ClearScreen
 
+	case runFinishedMsg:
+		return m.applyRunFinished(msg), nil
+
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+	}
+	return m, nil
+}
+
+// applyRunFinished разбирает итог одного из трёх прогонов задачи 3
+// (RetryStepCmd/RestCmd/CleanCmd) и переводит петлю фикса в следующее
+// состояние — строго по таблице строки подсказки контракта, по порядку
+// прохождения: починил/не починил, догнал/не догнал, чисто/не чисто.
+func (m jobModel) applyRunFinished(msg runFinishedMsg) jobModel {
+	m.canceling = false
+
+	if msg.err != nil {
+		if errors.Is(msg.err, context.Canceled) {
+			// Отмена — не ошибка, а осознанное действие человека: экран
+			// возвращается на предыдущее устойчивое состояние без клейма
+			// отказа (символа/цвета) — контракт, «Долгие операции».
+			m.phase = phaseLeftShell
+			return m
+		}
+		// Поломка самого инструмента (docker, оборванный демон) не
+		// превращает весь запуск в неудачу: человек уже получил шелл,
+		// ценность уже доставлена — та же политика, что в обычном режиме.
+		m.phase = phaseBlocked
+		m.banner = msg.err.Error()
+		return m
+	}
+
+	switch msg.kind {
+	case runRetry:
+		m.stepRows = stepRowsFromSession(m.session)
+		if msg.outcome.Failed == nil {
+			m.phase = phaseStepFixed
+		} else {
+			m.phase = phaseStepStillFails
+		}
+	case runRest:
+		m.stepRows = stepRowsFromSession(m.session)
+		if msg.outcome.Failed == nil {
+			m.phase = phaseRestPassed
+		} else {
+			m.phase = phaseRestFailed
+		}
+	case runClean:
+		// Чистый прогон гнал ВСЕ шаги джобы, а не хвост — отметки
+		// пересобираются по его результату целиком.
+		m.stepRows = stepRowsFromSession(m.session)
+		if msg.outcome.Failed == nil {
+			m.phase = phaseCleanGreen
+		} else {
+			m.phase = phaseCleanFails
+		}
+	}
+	return m
+}
+
+// canRun истинно, когда экран не занят другой долгой операцией (подготовка,
+// передача терминала, уже идущий прогон) — только тогда петля фикса может
+// принять новую команду.
+func (m jobModel) canRun() bool {
+	switch m.phase {
+	case phasePreparing, phaseHandingTerminal, phaseRunning:
+		return false
+	}
+	return true
+}
+
+// startRun запускает один из трёх прогонов задачи 3 по виду kind — единый
+// обработчик, который уже сегодня обслуживает клавишу перезапуска шага, а
+// после плана 09-03 обслужит и командный режим (:rest, :clean) без второго
+// места запуска прогонов.
+func (m jobModel) startRun(kind runKind) (jobModel, tea.Cmd) {
+	m.phase = phaseRunning
+	switch kind {
+	case runRetry:
+		m.runLabel = "перезапуск шага"
+		m.runOffset = m.session.outcome.FailedIndex - 1
+		return m, m.session.RetryStepCmd(context.Background())
+	case runRest:
+		m.runLabel = RunLabelRest
+		m.runOffset = m.session.outcome.FailedIndex
+		return m, m.session.RestCmd(context.Background())
+	case runClean:
+		m.runLabel = RunLabelClean
+		m.runOffset = 0
+		return m, m.session.CleanCmd(context.Background())
 	}
 	return m, nil
 }
@@ -195,16 +303,23 @@ func (m jobModel) applyEvent(e event.Event) jobModel {
 	case event.ContainerReady:
 		m.pulling = false
 	case event.StepStarted:
+		// e.Index считается от начала СРЕЗА, переданного в runner.RunSteps —
+		// runOffset переводит его в абсолютный номер шага джобы. Для самого
+		// первого прогона (PrepareCmd) срез — это все шаги целиком, а
+		// runOffset остаётся нулевым значением по умолчанию, поэтому формула
+		// работает без отдельной ветки.
+		abs := m.runOffset + e.Index
+		m.runStep = abs
 		for i := range m.stepRows {
 			switch {
-			case m.stepRows[i].Index == e.Index:
+			case m.stepRows[i].Index == abs:
 				m.stepRows[i].Status = "running"
-			case m.stepRows[i].Index < e.Index && m.stepRows[i].Status != "failed":
+			case m.stepRows[i].Index < abs && m.stepRows[i].Status != "failed":
 				m.stepRows[i].Status = "success"
 			}
 		}
 		if m.cursor < 0 {
-			m.cursor = e.Index - 1
+			m.cursor = abs - 1
 		}
 	case event.StepsSummary:
 		// Итог обхода расставляет отметки уже через sessionReadyMsg/
@@ -218,7 +333,7 @@ func (m jobModel) applyEvent(e event.Event) jobModel {
 func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Cancel):
-		if m.phase == phasePreparing {
+		if m.phase == phasePreparing || m.phase == phaseRunning {
 			m.session.Cancel()
 			m.canceling = true
 		}
@@ -231,6 +346,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		// подсказкой HintHandingTerminal нарисован до передачи терминала.
 		m.phase = phaseHandingTerminal
 		return m, func() tea.Msg { return shellHandoffMsg{} }
+
+	case key.Matches(msg, m.keys.Retry) && m.canRun() && m.session.outcome.Failed != nil:
+		// Клавиша перезапуска шага (FIXUI-01) — доступна и работает уже
+		// здесь; :rest и :clean вводятся командным режимом плана 09-03, но
+		// зовут тот же startRun.
+		return m.startRun(runRetry)
 
 	case key.Matches(msg, m.keys.Up):
 		if m.cursor > 0 {
@@ -437,11 +558,11 @@ func (m jobModel) bodyView() string {
 	return body
 }
 
-// keyBar собирает строку клавиш экрана джобы: шелл, назад, выход. Клавиша
-// повторить шаг подключается задачей 3 вместе с рабочим обработчиком —
-// показывать неработающую клавишу раньше времени не нужно.
+// keyBar собирает строку клавиш экрана джобы: шелл, повторить шаг, назад,
+// выход. Перенос правок и командный режим (:rest, :clean, :image) — план
+// 09-03, здесь их нет.
 func (m jobModel) keyBar() string {
-	return KeyBar(m.theme, m.keys.Shell, m.keys.Back, m.keys.Quit)
+	return KeyBar(m.theme, m.keys.Shell, m.keys.Retry, m.keys.Back, m.keys.Quit)
 }
 
 // hintText — (jobModel) hintText() string, единственная функция отображения
@@ -453,6 +574,8 @@ func (m jobModel) hintText() string {
 		return HintCanceling()
 	case m.phase == phasePreparing && m.pulling:
 		return HintPullingImage(m.pullImage)
+	case m.phase == phaseRunning:
+		return HintRunning(m.runLabel, m.runStep, len(m.stepRows))
 	case m.phase == phaseBlocked && m.blockedCanceled:
 		return "прервано пользователем — esc вернёт к списку джоб"
 	case m.phase == phaseBlocked:
@@ -461,6 +584,18 @@ func (m jobModel) hintText() string {
 		return HintHandingTerminal()
 	case m.phase == phaseLeftShell:
 		return HintLeftShell()
+	case m.phase == phaseStepFixed:
+		return HintStepFixed(m.runOffset + 1)
+	case m.phase == phaseStepStillFails:
+		return HintStepStillFails(m.runOffset + 1)
+	case m.phase == phaseRestPassed:
+		return HintRestPassed()
+	case m.phase == phaseRestFailed:
+		return HintRestFailed(m.session.outcome.FailedIndex)
+	case m.phase == phaseCleanGreen:
+		return HintCleanGreen()
+	case m.phase == phaseCleanFails:
+		return HintCleanFails(m.session.outcome.FailedIndex)
 	case m.phase == phaseImageReady:
 		return HintImageReady(m.session.img.Ref)
 	}
