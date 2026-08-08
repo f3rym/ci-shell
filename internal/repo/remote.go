@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+
+	"github.com/f3rym/ci-shell/internal/joburl"
 )
 
 // Sentinel-ошибки OriginRef — в стиле остального пакета: диагностический
@@ -79,7 +81,13 @@ func parseRemote(remote string) (host, projectPath string, ok bool) {
 	projectPath = strings.TrimSuffix(projectPath, ".git")
 	projectPath = strings.Trim(projectPath, "/")
 
-	if host == "" || projectPath == "" {
+	// Путь проекта проверяется здесь, на границе, а не у каждого
+	// потребителя: отсюда он уходит и в url.URL.Path адреса зеркала (а
+	// url.URL.String сегменты ".." не убирает — "a/../../x" улетел бы в
+	// запрос как есть), и в имя ссылки refs/ci-shell зеркала, и в origin
+	// внутри контейнера. Форма проверки — общая с разбором ссылки на джобу,
+	// чтобы номер джобы и полная ссылка давали одинаково валидный путь.
+	if host == "" || !joburl.ValidProjectPath(projectPath) {
 		return "", "", false
 	}
 	return host, projectPath, true

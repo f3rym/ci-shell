@@ -27,6 +27,38 @@ var (
 	ErrInsecureScheme = errors.New("поддерживается только https")
 )
 
+// ValidProjectPath проверяет путь проекта на пригодность к дальнейшему
+// употреблению: непустые сегменты, ни одного "." или "..", только латинские
+// буквы, цифры, точка, дефис, подчёркивание и косая черта как разделитель.
+// Ровно этот набор GitLab и разрешает в пути группы и проекта.
+//
+// Проверка живёт на границе (здесь и в repo.parseRemote — двух местах, где
+// путь проекта вообще попадает в программу), а не у каждого потребителя,
+// потому что дальше эта строка расходится по слишком многим адресам:
+// url.URL.Path зеркала (url.URL.String не убирает сегменты "..", так что
+// "a/../../x" уехал бы в запрос как есть), имя ссылки refs/ci-shell в
+// зеркале, значение origin внутри контейнера, путь каталога в кэше. Валидный
+// на входе путь снимает вопрос во всех них сразу.
+func ValidProjectPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+		for _, r := range seg {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+				r == '.', r == '-', r == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Parse разбирает произвольную строку со ссылкой на джобу GitLab.
 func Parse(raw string) (Ref, error) {
 	u, err := url.Parse(raw)
@@ -61,7 +93,7 @@ func Parse(raw string) (Ref, error) {
 	}
 
 	projectPath := strings.Trim(left, "/")
-	if projectPath == "" {
+	if !ValidProjectPath(projectPath) {
 		return Ref{}, ErrNotAJobURL
 	}
 
