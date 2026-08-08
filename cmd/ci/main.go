@@ -267,6 +267,33 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		}
 	}
 
+	// Ключи файловых переменных: значения в контейнер уходят содержимым, а
+	// не путём к файлу (WR-05, материализация — Фаза 6) — честная строка
+	// баннера, а не молчаливое ограничение.
+	var fileVars []string
+	for _, v := range e.Vars {
+		if v.Kind == env.KindFile {
+			fileVars = append(fileVars, v.Key)
+		}
+	}
+
+	banner := render.BannerInput{
+		ImageRef:     img.Ref,
+		ImageAssumed: img.Source == runner.ImageSourceDefault,
+		Missing:      e.Missing,
+		SecretsPath:  e.SecretsPath,
+		FileVars:     fileVars,
+	}
+	if img.Source == runner.ImageSourceFlag && img.Configured != "" {
+		banner.ImageOverridden = img.Configured
+	}
+	// Баннер — последнее, что видит пользователь ДО того, как терминал
+	// уйдёт в контейнер: печатается строго перед c.Shell, иначе уедет за
+	// спину пользователю, уже работающему внутри.
+	if err := render.Banner(os.Stderr, banner); err != nil {
+		return err
+	}
+
 	pr.Stage("вы внутри контейнера, рабочий каталог %s; для выхода — exit или Ctrl-D", workDir)
 	if err := c.Shell(ctx); err != nil {
 		return err
