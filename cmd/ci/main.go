@@ -97,7 +97,13 @@ func explain(err error) string {
 	case errors.Is(err, cache.ErrUnavailable):
 		return fmt.Sprintf("%s\nзадайте XDG_CACHE_HOME или HOME — утилите нужен постоянный каталог для файла окружения и worktree", err)
 	case errors.Is(err, repo.ErrCommitNotFound):
-		return fmt.Sprintf("%s\nподтяните коммит: git fetch origin <sha> — иначе воспроизводить нечего", err)
+		return fmt.Sprintf("%s\nу джобы нет коммита — воспроизводить нечего", err)
+	case errors.Is(err, repo.ErrUnsafeProject):
+		return fmt.Sprintf("%s\nпроверьте ссылку и путь проекта", err)
+	case errors.Is(err, repo.ErrMirrorFailed):
+		return fmt.Sprintf("%s\nпроверьте права и место на диске в каталоге кэша", err)
+	case errors.Is(err, repo.ErrFetchFailed):
+		return fmt.Sprintf("%s\nпроверьте область действия токена и доступность проекта — читать репозиторий тем же токеном, что и API", err)
 	case errors.Is(err, repo.ErrWorktreeFailed):
 		return fmt.Sprintf("%s\nснимите зависший worktree: git worktree prune", err)
 	case errors.Is(err, runner.ErrDockerUnavailable):
@@ -128,13 +134,14 @@ func unreproducibleNote(err error) string {
 	return "проверьте состояние машины и повторите"
 }
 
-// reproduce приводит рабочую копию к коммиту упавшей джобы во временном
-// worktree. Функция владеет очисткой через defer и никогда не завершает
+// reproduce готовит код упавшей джобы на нужном коммите (repo.Materialize —
+// worktree рабочей копии или чекаут из зеркала в кэше) и поднимает
+// контейнер. Функция владеет очисткой через defer и никогда не завершает
 // процесс — ни через fail, ни прямым выходом: иначе отложенная очистка не
-// выполнится, и на машине останутся worktree и (в следующей задаче)
-// контейнер. Любая поломка возвращается наружу как ошибка; печать и
-// завершение делает runShell уже после возврата из reproduce.
-func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, pr render.Progress) error {
+// выполнится, и на машине останутся чекаут и контейнер. Любая поломка
+// возвращается наружу как ошибка; печать и завершение делает runShell уже
+// после возврата из reproduce.
+func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, pr render.Progress) error {
 	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
 	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
 	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
@@ -155,26 +162,30 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 
-	root, err := repo.Root(ctx)
+	checkoutBase, err := cache.Dir("checkouts")
 	if err != nil {
 		return err
 	}
 
-	if remote, ok := repo.RemoteMatches(ctx, root, ref.ProjectPath); !ok {
-		fmt.Fprintf(os.Stderr, "предупреждение: remote origin (%s) не похож на проект джобы (%s) — рабочая копия может быть не той\n", remote, ref.ProjectPath)
-	}
-
-	wt, err := repo.Prepare(ctx, root, job.CommitSHA, pr)
+	code, err := repo.Materialize(ctx, repo.Request{
+		Host:        ref.Host,
+		ProjectPath: ref.ProjectPath,
+		SHA:         job.CommitSHA,
+		Ref:         job.Ref,
+		Tag:         job.Tag,
+		Base:        checkoutBase,
+		Token:       tok.Secret,
+	}, pr)
 	if err != nil {
 		return err
 	}
 	// Фоновый контекст: отмена основного контекста не должна помешать
-	// уборке временного worktree. Неудача снятия печатается предупреждением
+	// уборке временного чекаута. Неудача снятия печатается предупреждением
 	// — путь остатка и готовая команда добивки входят в текст самой ошибки
-	// (см. Worktree.Remove) — пользователь не должен обнаруживать остаток
+	// (см. Checkout.Remove) — пользователь не должен обнаруживать остаток
 	// через неделю.
 	defer func() {
-		if err := wt.Remove(context.Background()); err != nil {
+		if err := code.Remove(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
 		}
 	}()
@@ -203,7 +214,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 
 	c, skipped, err := d.Start(ctx, runner.Spec{
 		Image:     img.Ref,
-		SourceDir: wt.Dir,
+		SourceDir: code.Dir,
 		WorkDir:   workDir,
 		Env:       envMap,
 		JobID:     job.ID,
@@ -232,7 +243,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 			chownCmd := fmt.Sprintf("chown -R %d:%d %s", uid, gid, workDir)
 			// Ошибка и ненулевой код не фатальны и не печатаются как ошибка
 			// — в образе может не быть chown; на этот случай в
-			// Worktree.Remove уже есть готовая команда добивки. Вывод
+			// Checkout.Remove уже есть готовая команда добивки. Вывод
 			// chown пользователю не нужен.
 			_, _ = c.Exec(chownCtx, chownCmd, io.Discard, io.Discard)
 		}()
@@ -278,11 +289,13 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 
 	banner := render.BannerInput{
-		ImageRef:     img.Ref,
-		ImageAssumed: img.Source == runner.ImageSourceDefault,
-		Missing:      e.Missing,
-		SecretsPath:  e.SecretsPath,
-		FileVars:     fileVars,
+		ImageRef:       img.Ref,
+		ImageAssumed:   img.Source == runner.ImageSourceDefault,
+		Missing:        e.Missing,
+		SecretsPath:    e.SecretsPath,
+		FileVars:       fileVars,
+		CodeSource:     fmt.Sprintf("%s — %s", code.Source, code.Dir),
+		GitDirExternal: !code.SelfContained,
 	}
 	if img.Source == runner.ImageSourceFlag && img.Configured != "" {
 		banner.ImageOverridden = img.Configured
@@ -298,7 +311,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	if err := c.Shell(ctx); err != nil {
 		return err
 	}
-	pr.Stage("убираю контейнер и временный worktree…")
+	pr.Stage("убираю контейнер и временный чекаут…")
 
 	return nil
 }
@@ -454,7 +467,7 @@ func runShell(args []string) {
 	// Прогресс дальнейших этапов воспроизведения идёт в stderr, чтобы
 	// stdout оставался чистым выводом метаданных и окружения.
 	pr := render.Progress{W: os.Stderr}
-	if err := reproduce(ctx, ref, job, jobCfg, img, e, pr); err != nil {
+	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, pr); err != nil {
 		fail(err)
 	}
 }

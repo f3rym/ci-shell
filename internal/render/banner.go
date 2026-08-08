@@ -32,6 +32,15 @@ type BannerInput struct {
 	// FileVars — ключи файловых переменных, переданных содержимым, а не
 	// путём к файлу (известное ограничение Фазы 3, закрывается в Фазе 6).
 	FileVars []string
+	// CodeSource — готовая строка «откуда и куда»: источник и каталог кода,
+	// собранная вызывающим (Фаза 5). Печатается всегда, когда непуста —
+	// пользователь обязан видеть, какой именно код поедет в контейнер.
+	CodeSource string
+	// GitDirExternal — true, когда служебный каталог git чекаута лежит вне
+	// смонтированного каталога (локальный worktree): команды git внутри
+	// контейнера не сработают, потому что служебный каталог остался на
+	// хосте вне монтирования.
+	GitDirExternal bool
 }
 
 // Banner печатает баннер допущений — последнее, что видит пользователь
@@ -59,6 +68,13 @@ func Banner(w io.Writer, in BannerInput) error {
 // запуске.
 func bannerLines(in BannerInput) []string {
 	var lines []string
+
+	if in.CodeSource != "" {
+		lines = append(lines, fmt.Sprintf("код: %s", in.CodeSource))
+	}
+	if in.GitDirExternal {
+		lines = append(lines, "служебный каталог git остался на хосте вне монтирования: команды git внутри контейнера не сработают")
+	}
 
 	switch {
 	case in.ImageAssumed:
