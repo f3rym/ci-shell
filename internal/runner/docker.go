@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // Sentinel-ошибки пакета.
@@ -49,19 +49,26 @@ var containerCLI = "docker"
 
 // Docker — точка доступа к локальному демону через docker-совместимый CLI.
 type Docker struct {
-	bin      string
-	progress render.Progress
+	bin string
+	// em — переносчик типизированных событий: тяга образа, подъём и
+	// готовность контейнера уходят структурами, а не строками.
+	em event.Emitter
+	// raw — сквозной писатель для потоков дочерних процессов, которые мы не
+	// разбираем и не превращаем в события: полоса прогресса `docker pull`
+	// не наша, мы её не формируем и не парсим по строке на событие
+	// (тринадцатигигабайтный образ не заваливает подписчика).
+	raw io.Writer
 }
 
 // New ищет контейнерный CLI в PATH. Демон при этом не дёргается: проверка
 // PATH мгновенная, а «CLI установлен» и «демон отвечает» — разные поломки с
 // разными подсказками (см. Ping).
-func New(p render.Progress) (*Docker, error) {
+func New(em event.Emitter, raw io.Writer) (*Docker, error) {
 	bin, err := exec.LookPath(containerCLI)
 	if err != nil {
 		return nil, fmt.Errorf("runner: %s не найден в PATH: %w", containerCLI, ErrDockerUnavailable)
 	}
-	return &Docker{bin: bin, progress: p}, nil
+	return &Docker{bin: bin, em: em, raw: raw}, nil
 }
 
 // Ping проверяет, что демон Docker отвечает.
@@ -84,14 +91,14 @@ func (d *Docker) EnsureImage(ctx context.Context, image string) error {
 
 	inspectCmd := exec.CommandContext(ctx, d.bin, "image", "inspect", image)
 	if _, err := runCaptured(inspectCmd); err == nil {
-		d.progress.Stage("образ %s уже есть локально", image)
+		d.em.Emit(event.ImageLocal{Image: image})
 		return nil
 	}
 
-	d.progress.Stage("тяну образ %s…", image)
+	d.em.Emit(event.ImagePulling{Image: image})
 	pullCmd := exec.CommandContext(ctx, d.bin, "pull", image)
-	pullCmd.Stdout = d.progress.W
-	pullCmd.Stderr = d.progress.W
+	pullCmd.Stdout = d.raw
+	pullCmd.Stderr = d.raw
 	if err := pullCmd.Run(); err != nil {
 		// Прерванная Ctrl-C тяга — не «образ недоступен» с советом про
 		// docker login, а отмена: возвращаем её раньше доменной ошибки.
@@ -225,7 +232,7 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 		return nil, nil, fmt.Errorf("runner: docker create отказал: %s: %w", err, ErrContainerFailed)
 	}
 
-	d.progress.Stage("поднимаю контейнер из образа %s…", spec.Image)
+	d.em.Emit(event.ContainerStarting{Image: spec.Image})
 	startCmd := exec.CommandContext(ctx, d.bin, "start", id)
 	if _, err := runCaptured(startCmd); err != nil {
 		// Фоновый контекст: созданный контейнер убирается и тогда, когда
@@ -234,7 +241,7 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 		_, _ = runCaptured(rm)
 		return nil, nil, fmt.Errorf("runner: контейнер %s не стартовал: %s: %w", shortID(id), err, ErrContainerFailed)
 	}
-	d.progress.Stage("контейнер %s готов, рабочий каталог %s", shortID(id), spec.WorkDir)
+	d.em.Emit(event.ContainerReady{ID: id, WorkDir: spec.WorkDir})
 
 	return &Container{ID: id, d: d, workDir: spec.WorkDir}, skipped, nil
 }

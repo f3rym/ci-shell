@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // CleanRun поднимает свежий контейнер по уже готовой спецификации spec —
@@ -23,8 +23,8 @@ import (
 // каталоге, и без возврата владельца чистый прогон оставлял бы за собой
 // root-файлы, о которые спотыкается уборка чекаута — а при --here они
 // оседали бы прямо в рабочей копии пользователя.
-func CleanRun(ctx context.Context, d *Docker, spec Spec, steps []Step, owner string, out, errOut io.Writer, p render.Progress) (Outcome, error) {
-	p.Stage("поднимаю свежий контейнер из образа %s для чистого прогона…", spec.Image)
+func CleanRun(ctx context.Context, d *Docker, spec Spec, steps []Step, owner string, out, errOut io.Writer, em event.Emitter) (Outcome, error) {
+	em.Emit(event.CleanRunStarting{Image: spec.Image})
 
 	c, _, err := d.Start(ctx, spec)
 	if err != nil {
@@ -32,11 +32,11 @@ func CleanRun(ctx context.Context, d *Docker, spec Spec, steps []Step, owner str
 	}
 	// Фоновый контекст: прерывание пользователем во время чистого прогона
 	// не должно оставить второй контейнер на машине. Неудача снятия не
-	// фатальна — печатается предупреждением с сокращённым id и готовой
-	// командой добивки, тем же приёмом, что уже использует уборка чекаута.
+	// фатальна — эмитится предупреждением с полным id и готовой командой
+	// добивки, тем же приёмом, что уже использует уборка чекаута.
 	defer func() {
 		if err := c.Remove(context.Background()); err != nil {
-			p.Stage("предупреждение: %s; добейте вручную: docker rm -f %s", err, c.ID)
+			em.Emit(event.ContainerRemoveFailed{Reason: err.Error(), ID: c.ID})
 		}
 	}()
 	// Регистрируется ПОСЛЕ отложенного снятия контейнера, поэтому по LIFO
@@ -47,7 +47,7 @@ func CleanRun(ctx context.Context, d *Docker, spec Spec, steps []Step, owner str
 	if owner != "" {
 		defer func() {
 			if err := c.Chown(context.Background(), owner, spec.WorkDir); err != nil {
-				p.Stage("предупреждение: %s; файлы в каталоге кода могли остаться под root", err)
+				em.Emit(event.OwnerRestoreFailed{Reason: err.Error()})
 			}
 		}()
 	}
@@ -60,5 +60,5 @@ func CleanRun(ctx context.Context, d *Docker, spec Spec, steps []Step, owner str
 
 	// Все шаги джобы, а не только оставшиеся: смысл третьего уровня
 	// доверия ровно в том, что проверяется весь путь с нуля.
-	return RunSteps(ctx, c, steps, out, errOut, p)
+	return RunSteps(ctx, c, steps, out, errOut, em)
 }

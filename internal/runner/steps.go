@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/provider"
-	"github.com/f3rym/ci-shell/internal/render"
 )
 
 // Step — один шаг джобы: секция (before_script или script), в которой он
@@ -58,22 +58,27 @@ func appendSteps(steps []Step, section string, commands []string) []Step {
 // шага N действуют в шаге N+1. Все шаги склеиваются buildScript в один
 // скрипт с set -e и echo-маркером перед каждым шагом; скрипт уходит одним
 // docker exec, маркеры вылавливаются из stdout на лету (markerScanner): по
-// ним печатается пошаговый прогресс через p, сами маркеры в out не
-// попадают, остальной вывод идёт в out и errOut насквозь. Упавший шаг
-// определяется последним увиденным маркером: set -e обрывает скрипт на
-// первом ненулевом коде с кодом упавшей команды, поэтому шаги после
-// упавшего не выполняются никогда — их выполнение изменило бы состояние
-// контейнера относительно воспроизводимого прогона. Ненулевой err означает
-// сбой самого docker (контейнер умер, демон отвалился) или прерывание
-// пользователем — вызывающий код должен убрать за собой.
-func RunSteps(ctx context.Context, c *Container, steps []Step, out, errOut io.Writer, p render.Progress) (Outcome, error) {
+// ним em эмитит пошаговый прогресс, сами маркеры в out не попадают,
+// остальной вывод идёт в out и errOut насквозь. Упавший шаг определяется
+// последним увиденным маркером: set -e обрывает скрипт на первом ненулевом
+// коде с кодом упавшей команды, поэтому шаги после упавшего не выполняются
+// никогда — их выполнение изменило бы состояние контейнера относительно
+// воспроизводимого прогона. Ненулевой err означает сбой самого docker
+// (контейнер умер, демон отвалился) или прерывание пользователем —
+// вызывающий код должен убрать за собой.
+//
+// Вердикт о шагах (упал/прошли) здесь НЕ эмитится: только оркестратор знает,
+// первый это прогон или чистый, и только у него вердикт стоит на своём
+// месте в порядке строк — эмиссия отсюда переставила бы строки местами
+// относительно отложенных предупреждений об уборке чистого прогона.
+func RunSteps(ctx context.Context, c *Container, steps []Step, out, errOut io.Writer, em event.Emitter) (Outcome, error) {
 	o := Outcome{Total: len(steps)}
 	if len(steps) == 0 {
-		p.Summary(0, 0, false)
+		em.Emit(event.StepsSummary{Executed: 0, Total: 0, Stopped: false})
 		return o, nil
 	}
 
-	scan := &markerScanner{out: out, steps: steps, p: p}
+	scan := &markerScanner{out: out, steps: steps, em: em}
 	code, err := c.Exec(ctx, buildScript(steps), scan, errOut)
 	scan.flush()
 	if err != nil {
@@ -96,7 +101,7 @@ func RunSteps(ctx context.Context, c *Container, steps []Step, out, errOut io.Wr
 		o.Executed = len(steps)
 	}
 
-	p.Summary(o.Executed, o.Total, o.Failed != nil)
+	em.Emit(event.StepsSummary{Executed: o.Executed, Total: o.Total, Stopped: o.Failed != nil})
 	return o, nil
 }
 
@@ -141,13 +146,13 @@ func parseMarker(line string) (int, bool) {
 }
 
 // markerScanner — io.Writer поверх out, вылавливающий строки-маркеры из
-// stdout скрипта: маркер превращается в строку прогресса и в out не
-// попадает, остальной вывод проходит насквозь. Неполные строки копятся в
-// буфере до перевода строки; хвост без перевода строки дописывает flush.
+// stdout скрипта: маркер превращается в событие шага и в out не попадает,
+// остальной вывод проходит насквозь. Неполные строки копятся в буфере до
+// перевода строки; хвост без перевода строки дописывает flush.
 type markerScanner struct {
 	out   io.Writer
 	steps []Step
-	p     render.Progress
+	em    event.Emitter
 	last  int // номер последнего встреченного маркера, считая от единицы
 	buf   bytes.Buffer
 }
@@ -166,14 +171,16 @@ func (m *markerScanner) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// line обрабатывает одну строку: маркер — в прогресс, всё остальное —
-// насквозь в out. Ошибка записи в out игнорируется по образцу
-// render.Progress: сбой служебного вывода не должен ронять воспроизведение.
+// line обрабатывает одну строку: маркер — событием шага, всё остальное —
+// насквозь в out. Метод исполняется в горутине копирования стандартного
+// вывода дочернего процесса (Container.Exec запускает cmd.Run синхронно, но
+// сам docker exec копирует поток в scan из своей горутины io.Copy) — поэтому
+// подписчик обязан быть потокобезопасным (контракт event.Sink, план 08-01).
 func (m *markerScanner) line(line string) {
 	if n, ok := parseMarker(line); ok && n <= len(m.steps) {
 		m.last = n
 		s := m.steps[n-1]
-		m.p.Step(n, len(m.steps), s.Section, s.Command)
+		m.em.Emit(event.StepStarted{Index: n, Total: len(m.steps), Section: s.Section, Command: s.Command})
 		return
 	}
 	_, _ = m.out.Write([]byte(line))
