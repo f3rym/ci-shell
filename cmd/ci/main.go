@@ -17,6 +17,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/env"
+	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/prompt"
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -277,7 +278,7 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 // выполнится, и на машине останутся чекаут и контейнер. Любая поломка
 // возвращается наружу как ошибка; печать и завершение делает runShell уже
 // после возврата из reproduce.
-func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, base string, persist bool, pr render.Progress) error {
+func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, base string, persist bool, em event.Emitter) error {
 	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
 	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
 	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
@@ -289,11 +290,11 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// самом начале — до подготовки кода и до тяги образа: пользователь с
 	// невоспроизводимой джобой или без запущенного Docker получает ответ за
 	// секунду и без единого артефакта на диске (idea §7).
-	d, err := runner.New(pr)
+	d, err := runner.New(em, os.Stderr)
 	if err != nil {
 		return err
 	}
-	pr.Stage("проверяю Docker и воспроизводимость джобы…")
+	em.Emit(event.PreflightStarted{})
 	if err := runner.Preflight(ctx, d, img.Ref); err != nil {
 		return err
 	}
@@ -307,7 +308,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		Base:        base,
 		Persist:     persist,
 		Token:       tok.Secret,
-	}, pr)
+	}, em)
 	if err != nil {
 		return err
 	}
@@ -459,20 +460,22 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	if len(steps) == 0 {
 		fmt.Fprintln(os.Stderr, "предупреждение: в конфиге джобы нет шагов — возможно, всё делает entrypoint образа")
 	} else {
-		o, err := runner.RunSteps(ctx, c, steps, os.Stdout, os.Stderr, pr)
+		o, err := runner.RunSteps(ctx, c, steps, os.Stdout, os.Stderr, em)
 		if err != nil {
 			return err
 		}
 		outcome = o
 		if outcome.Failed != nil {
-			fmt.Fprintf(os.Stderr, "шаг %d/%d (%s) упал с кодом %d: %s\nшелл открывается сразу после последнего успешного шага\n"+
-				"  retry           — перезапустить этот шаг против того же грязного состояния, что оставили предыдущие шаги\n"+
-				"  retry --rest    — прогнать оставшиеся шаги, тоже против грязного состояния\n"+
-				"  единственная честная проверка «в CI будет зелено» — прогон начисто в свежем контейнере, который утилита предложит после выхода из шелла\n"+
-				"  файлы правятся в своей IDE на хосте: каталог смонтирован, редактор внутри образа не нужен\n",
-				outcome.FailedIndex, outcome.Total, outcome.Failed.Section, outcome.ExitCode, outcome.Failed.Command)
+			em.Emit(event.StepsFailed{
+				Kind:     event.RunFirst,
+				Index:    outcome.FailedIndex,
+				Total:    outcome.Total,
+				Section:  outcome.Failed.Section,
+				Command:  outcome.Failed.Command,
+				ExitCode: outcome.ExitCode,
+			})
 		} else {
-			fmt.Fprintf(os.Stderr, "все %d шагов прошли — сбой не воспроизвёлся. Вероятные причины: недостающие маскированные значения (см. предупреждение выше), артефакты предыдущих стадий и кэш ранера, которые v0.1.0 не восстанавливает\n", outcome.Total)
+			em.Emit(event.StepsPassed{Kind: event.RunFirst, Total: outcome.Total})
 		}
 	}
 
@@ -519,7 +522,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		return err
 	}
 
-	pr.Stage("вы внутри контейнера, рабочий каталог %s; для выхода — exit или Ctrl-D", workDir)
+	em.Emit(event.ShellOpening{WorkDir: workDir})
 	if err := c.Shell(ctx); err != nil {
 		return err
 	}
@@ -599,7 +602,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 				if err := c.Remove(context.Background()); err != nil {
 					fmt.Fprintf(os.Stderr, "предупреждение: %s\nчистый прогон пропущен: старый контейнер ещё жив\n", err)
 				} else {
-					cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, owner, os.Stdout, os.Stderr, pr)
+					cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, owner, os.Stdout, os.Stderr, em)
 					switch {
 					case err != nil:
 						// Сломался сам инструмент (docker, прерывание) — не
@@ -607,10 +610,16 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 						// уже получил, ценность уже доставлена.
 						fmt.Fprintf(os.Stderr, "предупреждение: чистый прогон не завершился: %s\n", explain(err))
 					case cleanOutcome.Failed == nil:
-						fmt.Fprintln(os.Stderr, "✓ джоба воспроизводится зелёной, можно пушить")
+						em.Emit(event.StepsPassed{Kind: event.RunClean, Total: cleanOutcome.Total})
 					default:
-						fmt.Fprintf(os.Stderr, "чистый прогон: шаг %d/%d (%s) всё ещё падает с кодом %d — фикс ещё не готов\n",
-							cleanOutcome.FailedIndex, cleanOutcome.Total, cleanOutcome.Failed.Section, cleanOutcome.ExitCode)
+						em.Emit(event.StepsFailed{
+							Kind:     event.RunClean,
+							Index:    cleanOutcome.FailedIndex,
+							Total:    cleanOutcome.Total,
+							Section:  cleanOutcome.Failed.Section,
+							Command:  cleanOutcome.Failed.Command,
+							ExitCode: cleanOutcome.ExitCode,
+						})
 					}
 				}
 			}
@@ -621,7 +630,7 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		}
 	}
 
-	pr.Stage("убираю контейнер и временный чекаут…")
+	em.Emit(event.CleanupStarted{})
 
 	return nil
 }
@@ -822,8 +831,12 @@ func runShell(args []string) {
 
 	// Прогресс дальнейших этапов воспроизведения идёт в stderr, чтобы
 	// stdout оставался чистым выводом метаданных и окружения.
-	pr := render.Progress{W: os.Stderr}
-	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, base, persist, pr); err != nil {
+	//
+	// Единственное место в проекте, где выбирается подписчик событий: Фаза 9
+	// подменяет здесь render.NewPrinter на реализацию интерфейса Bubble Tea,
+	// не трогая ни одного доменного пакета.
+	em := event.Emitter{Sink: render.NewPrinter(os.Stderr)}
+	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, base, persist, em); err != nil {
 		fail(err)
 	}
 }
