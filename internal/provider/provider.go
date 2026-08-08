@@ -83,6 +83,11 @@ type JobConfig struct {
 	BeforeScript []string
 	Script       []string
 	Variables    map[string]string
+	// Environment — имя окружения джобы (environment: name или короткая
+	// форма environment: <имя>), пустое, если у джобы окружения нет. Без
+	// него переменные с областью окружения не с чем сверять, и они
+	// пропадают из окружения молча (ENV-05).
+	Environment string
 }
 
 // Artifact — артефакт предыдущей стадии джобы.

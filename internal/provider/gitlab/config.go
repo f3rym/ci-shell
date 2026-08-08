@@ -158,6 +158,11 @@ func buildJobConfig(name string, job, defaultBlock, root map[string]yaml.Node, r
 		return provider.JobConfig{}, fmt.Errorf("variables: %w", err)
 	}
 
+	environment, err := decodeEnvironment(job["environment"])
+	if err != nil {
+		return provider.JobConfig{}, fmt.Errorf("environment: %w", err)
+	}
+
 	return provider.JobConfig{
 		Name:         name,
 		Stage:        stage,
@@ -165,7 +170,36 @@ func buildJobConfig(name string, job, defaultBlock, root map[string]yaml.Node, r
 		BeforeScript: beforeScript,
 		Script:       script,
 		Variables:    mergeVariables(rootVariables, jobVariables),
+		Environment:  environment,
 	}, nil
+}
+
+// decodeEnvironment принимает environment строкой (короткая форма
+// environment: <имя>) или отображением с ключом name (environment: {name:
+// <имя>, url: ...}). Наследование из default/корня не делается умышленно:
+// GitLab не позволяет задавать окружение вне джобы, и искать его там
+// значило бы придумывать поведение, которого нет.
+func decodeEnvironment(n yaml.Node) (string, error) {
+	switch n.Kind {
+	case 0: // ключ отсутствует
+		return "", nil
+	case yaml.ScalarNode:
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return "", err
+		}
+		return s, nil
+	case yaml.MappingNode:
+		var m struct {
+			Name string `yaml:"name"`
+		}
+		if err := n.Decode(&m); err != nil {
+			return "", err
+		}
+		return m.Name, nil
+	default:
+		return "", fmt.Errorf("неожиданный формат environment")
+	}
 }
 
 // resolveImage ищет ключ image в джобе, затем в default, затем в корне —

@@ -150,16 +150,30 @@ func Assemble(in Input) Environment {
 
 	notices := append([]string{}, in.Notices...)
 
+	// Имя окружения раскрывается из уже собранных переменных (Predefined +
+	// JobConfig) до сверки областей: environment: preprod/$CI_COMMIT_REF_SLUG
+	// — типовая запись, и без раскрытия сверка сравнивала бы шаблон со
+	// строкой, содержащей знак доллара, теряя переменные молча.
+	environment, unresolvedEnv := expandEnvName(in.JobConfig.Environment, vars)
+	if len(unresolvedEnv) > 0 {
+		notices = append(notices, fmt.Sprintf("имя окружения %q: не раскрыты подстановки %v", in.JobConfig.Environment, unresolvedEnv))
+	}
+	if environment != "" {
+		// В настоящей джобе с environment: эта переменная есть — её
+		// отсутствие видно любым echo внутри контейнера.
+		vars["CI_ENVIRONMENT_NAME"] = Variable{Key: "CI_ENVIRONMENT_NAME", Value: environment, Source: SourceConfig}
+	}
+
 	// Слой групп, затем слой проекта — оба прохода устойчивы, поэтому
 	// внутри каждой группы сохраняется порядок, в котором её вернул
 	// провайдер (внешние раньше внутренних).
-	applyAPILayer(vars, in.APIVars, provider.ScopeGroup, SourceGroup, &notices)
-	applyAPILayer(vars, in.APIVars, provider.ScopeProject, SourceProject, &notices)
+	applyAPILayer(vars, in.APIVars, provider.ScopeGroup, SourceGroup, environment, &notices)
+	applyAPILayer(vars, in.APIVars, provider.ScopeProject, SourceProject, environment, &notices)
 
 	// Слой пайплайна — выше проекта и групп: в самом GitLab переменные,
 	// переданные при запуске пайплайна, перекрывают переменные проекта и
 	// групп, но остаются ниже локального файла секретов.
-	applyAPILayer(vars, in.APIVars, provider.ScopePipeline, SourcePipeline, &notices)
+	applyAPILayer(vars, in.APIVars, provider.ScopePipeline, SourcePipeline, environment, &notices)
 
 	// Секреты — верхний слой приоритета. Ключ из файла секретов, которого
 	// нет ни в одном другом слое (пользователь мог добавить переменную,
@@ -201,23 +215,26 @@ func Assemble(in Input) Environment {
 	}
 }
 
-// applyAPILayer накладывает на vars переменные apiVars с областью scope,
-// помечая их source и Origin (путь группы или проекта). Переменная
-// с EnvironmentScope, отличным от "*" или пустого, не подставляется — в
-// notices уходит строка с её ключом и областью (idea §1: утилита не должна
-// подставлять окружение, не соответствующее упавшему прогону). Защищённая
-// (Protected) переменная подставляется, но с оговоркой в notices — API не
-// говорит, был ли ref прогона защищённым. Маскированные переменные попадают
-// в vars с пустым Value и Secret: true — как существующие, но без значения.
-func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope provider.VariableScope, source Source, notices *[]string) {
-	for _, v := range apiVars {
-		if v.Scope != scope {
-			continue
-		}
-		if v.EnvironmentScope != "" && v.EnvironmentScope != "*" {
-			*notices = append(*notices, fmt.Sprintf("%s (%s %s): область окружения %q — переменная не подставлена", v.Key, scope, v.Owner, v.EnvironmentScope))
-			continue
-		}
+// applyAPILayer накладывает на vars переменные apiVars с областью
+// provider-scope scope, помечая их source и Origin (путь группы,
+// проекта или #<id> пайплайна). Переменная подставляется, когда
+// scopeMatches(v.EnvironmentScope, environment) истинно; иначе она
+// по-прежнему не подставляется, но в notices уходит оговорка, называющая
+// ключ, источник, область переменной и имя окружения джобы (прочерк, когда
+// окружения нет) — idea §1: утилита не должна подставлять окружение, не
+// соответствующее упавшему прогону, но и не должна терять переменную
+// молча. Защищённая (Protected) переменная подставляется, но с оговоркой в
+// notices — API не говорит, был ли ref прогона защищённым. Маскированные
+// переменные попадают в vars с пустым Value и Secret: true — как
+// существующие, но без значения.
+//
+// Проход внутри слоя двухпроходный: сначала накладываются переменные с
+// неограниченной областью (unrestrictedScope), затем — с конкретной
+// совпавшей. Так при совпадении ключей побеждает более конкретная область,
+// а не та, что случайно оказалась позже в ответе API — ровно тот случай,
+// когда у проекта заведены и общий DEPLOY_URL, и DEPLOY_URL для preprod/*.
+func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope provider.VariableScope, source Source, environment string, notices *[]string) {
+	apply := func(v provider.Variable) {
 		// Jobs API в v0.1.0 не сообщает, защищён ли ref упавшего прогона,
 		// поэтому protected-переменная подставляется, но с честной оговоркой:
 		// если джоба шла по незащищённой ветке, в реальном прогоне этой
@@ -237,5 +254,26 @@ func applyAPILayer(vars map[string]Variable, apiVars []provider.Variable, scope 
 			Secret: v.Masked,
 			Kind:   kind,
 		}
+	}
+
+	for _, v := range apiVars {
+		if v.Scope != scope || !unrestrictedScope(v.EnvironmentScope) {
+			continue
+		}
+		apply(v)
+	}
+	for _, v := range apiVars {
+		if v.Scope != scope || unrestrictedScope(v.EnvironmentScope) {
+			continue
+		}
+		envDesc := environment
+		if envDesc == "" {
+			envDesc = "—"
+		}
+		if !scopeMatches(v.EnvironmentScope, environment) {
+			*notices = append(*notices, fmt.Sprintf("%s (%s %s): область окружения %q не совпадает с окружением джобы %q — переменная не подставлена", v.Key, scope, v.Owner, v.EnvironmentScope, envDesc))
+			continue
+		}
+		apply(v)
 	}
 }
