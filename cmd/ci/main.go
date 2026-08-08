@@ -335,7 +335,11 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		fmt.Fprintf(os.Stderr, "предупреждение: без значений маскированных переменных (%s, файл %s) может воспроизвестись не тот сбой\n", strings.Join(keys, ", "), e.SecretsPath)
 	}
 
-	c, skipped, err := d.Start(ctx, runner.Spec{
+	// Собирается в переменную, а не литералом на месте вызова: ту же
+	// спецификацию переиспользует чистый прогон (runner.CleanRun) ниже —
+	// второе построение по памяти рано или поздно разъехалось бы с первым,
+	// и «чистый прогон» проверял бы уже не ту джобу.
+	spec := runner.Spec{
 		Image:         img.Ref,
 		SourceDir:     code.Dir,
 		WorkDir:       workDir,
@@ -343,7 +347,8 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 		JobID:         job.ID,
 		FileVarsDir:   fv.Dir,
 		FileVarsMount: fv.Mount,
-	})
+	}
+	c, skipped, err := d.Start(ctx, spec)
 	if err != nil {
 		return err
 	}
@@ -388,19 +393,36 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 
 	steps := runner.Steps(jobCfg)
+	// Нулевое значение (Failed == nil, FailedIndex == 0) остаётся, когда
+	// шагов нет вовсе — тем же кодом ниже кладёт в контейнер retry,
+	// сообщающий, что перезапускать нечего.
+	var outcome runner.Outcome
 	if len(steps) == 0 {
 		fmt.Fprintln(os.Stderr, "предупреждение: в конфиге джобы нет шагов — возможно, всё делает entrypoint образа")
 	} else {
-		outcome, err := runner.RunSteps(ctx, c, steps, os.Stdout, os.Stderr, pr)
+		o, err := runner.RunSteps(ctx, c, steps, os.Stdout, os.Stderr, pr)
 		if err != nil {
 			return err
 		}
+		outcome = o
 		if outcome.Failed != nil {
-			fmt.Fprintf(os.Stderr, "шаг %d/%d (%s) упал с кодом %d: %s\nшелл открывается сразу после последнего успешного шага\n",
+			fmt.Fprintf(os.Stderr, "шаг %d/%d (%s) упал с кодом %d: %s\nшелл открывается сразу после последнего успешного шага\n"+
+				"  retry           — перезапустить этот шаг против того же грязного состояния, что оставили предыдущие шаги\n"+
+				"  retry --rest    — прогнать оставшиеся шаги, тоже против грязного состояния\n"+
+				"  единственная честная проверка «в CI будет зелено» — прогон начисто в свежем контейнере, который утилита предложит после выхода из шелла\n"+
+				"  файлы правятся в своей IDE на хосте: каталог смонтирован, редактор внутри образа не нужен\n",
 				outcome.FailedIndex, outcome.Total, outcome.Failed.Section, outcome.ExitCode, outcome.Failed.Command)
 		} else {
 			fmt.Fprintf(os.Stderr, "все %d шагов прошли — сбой не воспроизвёлся. Вероятные причины: недостающие маскированные значения (см. предупреждение выше), артефакты предыдущих стадий и кэш ранера, которые v0.1.0 не восстанавливает\n", outcome.Total)
 		}
+	}
+
+	// Кладётся в контейнер до выдачи шелла: хост слепнет внутри
+	// интерактивного exec, поэтому знание об упавшем шаге должно быть уже
+	// внутри. Неудача не прерывает работу (принцип v0.2.0: доводить до
+	// шелла) — только предупреждает, что шаг придётся перезапускать руками.
+	if err := runner.InstallRetry(ctx, c, steps, outcome.FailedIndex); err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: %s — команда retry в контейнере недоступна, упавший шаг придётся перезапускать руками\n", err)
 	}
 
 	// Ключи файловых переменных, материализованных файлами (задача 1,
@@ -442,9 +464,70 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	if err := c.Shell(ctx); err != nil {
 		return err
 	}
+
+	// Петля фикса замыкается здесь: чинить было что, только если шаг упал.
+	// Третий, честный уровень доверия — прогон начисто в свежем
+	// контейнере — предлагается вопросом с хоста только в интерактивном
+	// запуске; форма изнутри контейнера (retry --clean) требует канала
+	// контейнер→хост и в этой фазе не появляется.
+	if outcome.Failed != nil {
+		if token.Interactive() {
+			question := fmt.Sprintf(
+				"шаг %d/%d (%s) чинился — прогнать все шаги начисто в свежем контейнере на исправленном коде?",
+				outcome.FailedIndex, outcome.Total, outcome.Failed.Section,
+			)
+			if confirm(question) {
+				// Сначала снимается первый контейнер — двух живых
+				// контейнеров одной джобы быть не должно, и второй не
+				// должен драться за смонтированный каталог с первым.
+				// Идемпотентность Remove делает отложенное снятие ниже
+				// безвредным.
+				if err := c.Remove(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
+				}
+				cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, os.Stdout, os.Stderr, pr)
+				switch {
+				case err != nil:
+					// Сломался сам инструмент (docker, прерывание) — не
+					// превращает весь запуск в неудачу: шелл пользователь
+					// уже получил, ценность уже доставлена.
+					fmt.Fprintf(os.Stderr, "предупреждение: чистый прогон не завершился: %s\n", explain(err))
+				case cleanOutcome.Failed == nil:
+					fmt.Fprintln(os.Stderr, "✓ джоба воспроизводится зелёной, можно пушить")
+				default:
+					fmt.Fprintf(os.Stderr, "чистый прогон: шаг %d/%d (%s) всё ещё падает с кодом %d — фикс ещё не готов\n",
+						cleanOutcome.FailedIndex, cleanOutcome.Total, cleanOutcome.Failed.Section, cleanOutcome.ExitCode)
+				}
+			}
+		} else {
+			// Тот же предохранитель от подвисшего процесса, что у вопроса
+			// о токене (план 04-01): в пайпе и в CI спрашивать некого.
+			fmt.Fprintln(os.Stderr, "чистый прогон не предлагается вне терминала")
+		}
+	}
+
 	pr.Stage("убираю контейнер и временный чекаут…")
 
 	return nil
+}
+
+// confirm печатает question в поток ошибок с пометкой, что пустой ответ
+// значит согласие, читает одну строку стандартного ввода, обрезает её по
+// краям пробельными символами и признаёт согласием пустой ответ и ответы,
+// начинающиеся с «д» или латинской «y»; всё прочее — отказ. Ошибка чтения —
+// тоже отказ: молча писать или запускать что-то на неполученном ответе
+// нельзя. Единственный подтверждающий диалог этого плана.
+func confirm(question string) bool {
+	fmt.Fprintf(os.Stderr, "%s (пустой ответ — да): ", question)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer == "" {
+		return true
+	}
+	return strings.HasPrefix(answer, "д") || strings.HasPrefix(answer, "y")
 }
 
 // runShell реализует единственную подкоманду: разбор ссылки → резолв
