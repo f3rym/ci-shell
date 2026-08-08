@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -19,6 +18,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/joburl"
+	"github.com/f3rym/ci-shell/internal/prompt"
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
 	"github.com/f3rym/ci-shell/internal/render"
@@ -214,7 +214,7 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 
 	if token.Interactive() {
 		fmt.Fprintf(os.Stderr, "где хранить код воспроизводимых джоб? Enter — %s: ", defaultDir)
-		line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+		line, readErr := prompt.Line()
 		answer := strings.TrimSpace(line)
 		// Оборванное чтение (EOF посреди строки, закрытый пайп) с уже
 		// набранным куском ответа — это НЕ ответ пользователя: недочитанный
@@ -604,7 +604,11 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 // нельзя. Единственный подтверждающий диалог этого плана.
 func confirm(question string) bool {
 	fmt.Fprintf(os.Stderr, "%s (пустой ответ — да): ", question)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	// Тот же общий на процесс читатель, что у остальных вопросов
+	// (internal/prompt): собственный bufio выбрасывал бы хвост
+	// забуферизованного ввода, и этот вопрос получал бы EOF — то есть
+	// молчаливый отказ — после ответа на предыдущий.
+	line, err := prompt.Line()
 	if err != nil {
 		return false
 	}

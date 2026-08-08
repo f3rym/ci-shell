@@ -1,11 +1,12 @@
 package token
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/f3rym/ci-shell/internal/prompt"
 )
 
 // Interactive сообщает, подключён ли стандартный ввод к терминалу. Пайп,
@@ -37,7 +38,10 @@ func Prompt(host string) (Token, error) {
 		fmt.Fprintln(os.Stderr)
 	}()
 
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	// Читатель общий на процесс (internal/prompt): свой на каждый вопрос
+	// выбрасывал бы всё, что успел забуферизовать после первой строки, и
+	// следующий вопрос читал бы пустоту.
+	line, err := prompt.Line()
 	secret := strings.TrimSpace(line)
 	if err != nil && secret == "" {
 		return Token{}, ErrNoToken
