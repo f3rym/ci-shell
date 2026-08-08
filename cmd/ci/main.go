@@ -27,6 +27,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/runner"
 	"github.com/f3rym/ci-shell/internal/term"
 	"github.com/f3rym/ci-shell/internal/token"
+	"github.com/f3rym/ci-shell/internal/ui"
 )
 
 func main() {
@@ -57,13 +58,16 @@ func main() {
 // пайп, CI и ssh без -t не должны заметить, что в утилите появился
 // интерфейс (EVT-03).
 //
-// При истинном — сюда Фаза 9 ставит запуск интерфейса, заменяя тело этой
-// ветки и не заводя второго условия. Пока интерфейс не собран, печатается
-// одна честная строка об этом, а дальше та же подсказка и тот же код
-// возврата.
+// При истинном — запускается полноэкранный интерфейс (TUI-01). Ошибка его
+// запуска печатается той же функцией explain, что и у остальных подкоманд,
+// чтобы поломка интерфейса объяснялась тем же словарём, что и поломка
+// воспроизведения.
 func runDefault() {
 	if term.UIEnabled() {
-		fmt.Fprintln(os.Stderr, "консольный интерфейс ещё не собран — запустите ci shell со ссылкой на упавшую джобу")
+		if err := ui.Run(context.Background()); err != nil {
+			fail(err)
+		}
+		return
 	}
 	printUsage()
 	os.Exit(2)
