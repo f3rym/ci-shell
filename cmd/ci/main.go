@@ -216,8 +216,14 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 		fmt.Fprintf(os.Stderr, "где хранить код воспроизводимых джоб? Enter — %s: ", defaultDir)
 		line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
 		answer := strings.TrimSpace(line)
-		if readErr != nil && answer == "" {
-			answer = ""
+		// Оборванное чтение (EOF посреди строки, закрытый пайп) с уже
+		// набранным куском ответа — это НЕ ответ пользователя: недочитанный
+		// путь был бы создан MkdirAll и сохранён в settings.yml, и каждый
+		// следующий запуск молча чекаутил бы не туда. Пустой недочитанный
+		// ответ равносилен согласию с каталогом по умолчанию, и здесь ничего
+		// не ломается — только этот случай и проходит дальше.
+		if readErr != nil && answer != "" {
+			return "", false, fmt.Errorf("не удалось прочитать ответ о каталоге чекаутов: %w", readErr)
 		}
 		chosen := defaultDir
 		if answer != "" {
