@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/f3rym/ci-shell/internal/cache"
-	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // Sentinel-ошибки зеркала — в стиле остального пакета: диагностический
@@ -166,12 +166,12 @@ func branchRefspec(ref string, tag bool) string {
 // refs/ci-shell/. Сразу после успеха объект закрепляется собственной
 // ссылкой refs/ci-shell/commits/<sha> — без неё скачанный объект остаётся
 // недостижимым и уедет при первой уборке мусора.
-func fetchCommit(ctx context.Context, dir, host, projectPath, sha, ref string, tag bool, env []string, p render.Progress) error {
+func fetchCommit(ctx context.Context, dir, host, projectPath, sha, ref string, tag bool, env []string, em event.Emitter) error {
 	if hasCommit(ctx, dir, sha) {
 		return nil
 	}
 
-	p.Stage("тяну коммит %s с %s…", shortSHA(sha), host)
+	em.Emit(event.CommitFetching{SHA: sha, Host: host})
 
 	source := mirrorURL(host, projectPath)
 
@@ -206,7 +206,7 @@ func fetchCommit(ctx context.Context, dir, host, projectPath, sha, ref string, t
 		return fmt.Errorf("repo: не удалось закрепить коммит %s ссылкой: %s: %w", shortSHA(sha), firstLine(err.Error()), ErrFetchFailed)
 	}
 
-	p.Stage("коммит %s скачан в зеркало", shortSHA(sha))
+	em.Emit(event.CommitFetched{SHA: sha})
 
 	return nil
 }

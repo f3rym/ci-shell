@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // Sentinel-ошибки пакета — каждая несёт диагностический контекст в тексте
@@ -88,11 +88,12 @@ type Worktree struct {
 }
 
 // Prepare приводит рабочую копию root к коммиту sha в уже вычисленный путь
-// dir и печатает этап через p. С Фазы 5 каталог чекаута выбирает не этот
-// пакет — путь приходит извне (см. repo.Checkout), а в плане 05-02 он
+// dir и сообщает о ходе работы событиями em; решение о том, показывать ли
+// это человеку, принимает подписчик. С Фазы 5 каталог чекаута выбирает не
+// этот пакет — путь приходит извне (см. repo.Checkout), а в плане 05-02 он
 // станет настраиваемым пользователем; git worktree add отказывается писать
 // в существующий каталог, поэтому dir на входе не должен существовать.
-func Prepare(ctx context.Context, root, sha, dir string, p render.Progress) (*Worktree, error) {
+func Prepare(ctx context.Context, root, sha, dir string, em event.Emitter) (*Worktree, error) {
 	if sha == "" {
 		return nil, fmt.Errorf("repo: у джобы нет коммита: %w", ErrCommitNotFound)
 	}
@@ -104,14 +105,14 @@ func Prepare(ctx context.Context, root, sha, dir string, p render.Progress) (*Wo
 		return nil, fmt.Errorf("repo: коммит %s не найден локально: %w", sha, ErrCommitNotFound)
 	}
 
-	p.Stage("готовлю код на коммите %s…", shortSHA(sha))
+	em.Emit(event.CodePreparing{SHA: sha})
 
 	addCmd := exec.CommandContext(ctx, "git", "-C", root, "worktree", "add", "--detach", dir, sha)
 	if _, err := runCmd(addCmd); err != nil {
 		return nil, fmt.Errorf("repo: git worktree add отказал: %s: %w", firstLine(err.Error()), ErrWorktreeFailed)
 	}
 
-	p.Stage("код на коммите %s: %s", shortSHA(sha), dir)
+	em.Emit(event.CodeReady{SHA: sha, Dir: dir})
 
 	return &Worktree{Dir: dir, SHA: sha, root: root}, nil
 }

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/event"
 )
 
 // ErrCheckoutExists — при --here (Persist) путь чекаута уже существует на
@@ -112,7 +112,7 @@ func checkoutPath(base, projectPath, sha string, persist bool) (dir, parent stri
 // worktree. Любое несовпадение на локальной ветке — не аномалия, а штатный
 // переход на сетевую (REPO-01): пользователь вне репозитория, в чужом
 // репозитории или без нужного коммита получает код, а не отказ.
-func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout, error) {
+func Materialize(ctx context.Context, req Request, em event.Emitter) (*Checkout, error) {
 	if req.SHA == "" {
 		return nil, fmt.Errorf("repo: у джобы нет коммита: %w", ErrCommitNotFound)
 	}
@@ -123,7 +123,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 			if err != nil {
 				return nil, err
 			}
-			wt, err := Prepare(ctx, root, req.SHA, dir, p)
+			wt, err := Prepare(ctx, root, req.SHA, dir, em)
 			if err != nil {
 				os.RemoveAll(parent)
 				return nil, err
@@ -151,7 +151,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 	}
 
 	env := AuthEnv(os.Environ(), req.Host, req.ProjectPath, req.Token)
-	if err := fetchCommit(ctx, mirror, req.Host, req.ProjectPath, req.SHA, req.Ref, req.Tag, env, p); err != nil {
+	if err := fetchCommit(ctx, mirror, req.Host, req.ProjectPath, req.SHA, req.Ref, req.Tag, env, em); err != nil {
 		return nil, err
 	}
 
@@ -160,7 +160,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 		return nil, err
 	}
 	originURL := mirrorURL(req.Host, req.ProjectPath)
-	if err := materializeFromMirror(ctx, mirror, dir, req.SHA, originURL, p); err != nil {
+	if err := materializeFromMirror(ctx, mirror, dir, req.SHA, originURL, em); err != nil {
 		os.RemoveAll(parent)
 		return nil, err
 	}
@@ -184,8 +184,8 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 // внутри контейнера запросы истории отвечали бы отказом. Источник —
 // локальный каталог зеркала, поэтому ни сети, ни секрета на этом шаге нет
 // вовсе, и окружение процесса не подменяется.
-func materializeFromMirror(ctx context.Context, mirror, dir, sha, originURL string, p render.Progress) error {
-	p.Stage("готовлю код на коммите %s…", shortSHA(sha))
+func materializeFromMirror(ctx context.Context, mirror, dir, sha, originURL string, em event.Emitter) error {
+	em.Emit(event.CodePreparing{SHA: sha})
 
 	initCmd := exec.CommandContext(ctx, "git", "init", "--quiet", dir)
 	if _, err := runCmd(initCmd); err != nil {
@@ -211,7 +211,7 @@ func materializeFromMirror(ctx context.Context, mirror, dir, sha, originURL stri
 		return fmt.Errorf("repo: не удалось выставить origin: %s: %w", firstLine(err.Error()), ErrFetchFailed)
 	}
 
-	p.Stage("код на коммите %s: %s", shortSHA(sha), dir)
+	em.Emit(event.CodeReady{SHA: sha, Dir: dir})
 
 	return nil
 }
