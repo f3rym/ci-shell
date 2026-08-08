@@ -548,21 +548,34 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 				// контейнер вернёт владельца за собой сам — CleanRun
 				// получает owner тем же значением.
 				restoreOwner()
-				if err := c.Remove(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
-				}
-				cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, owner, os.Stdout, os.Stderr, pr)
-				switch {
-				case err != nil:
-					// Сломался сам инструмент (docker, прерывание) — не
-					// превращает весь запуск в неудачу: шелл пользователь
-					// уже получил, ценность уже доставлена.
-					fmt.Fprintf(os.Stderr, "предупреждение: чистый прогон не завершился: %s\n", explain(err))
-				case cleanOutcome.Failed == nil:
-					fmt.Fprintln(os.Stderr, "✓ джоба воспроизводится зелёной, можно пушить")
-				default:
-					fmt.Fprintf(os.Stderr, "чистый прогон: шаг %d/%d (%s) всё ещё падает с кодом %d — фикс ещё не готов\n",
-						cleanOutcome.FailedIndex, cleanOutcome.Total, cleanOutcome.Failed.Section, cleanOutcome.ExitCode)
+				// Фоновый контекст, как у всей остальной уборки: с уже
+				// отменённым ctx exec.CommandContext убил бы docker rm, и
+				// снятие отказывало бы гарантированно.
+				//
+				// Отказ снятия — не предупреждение, а причина не запускать
+				// чистый прогон вовсе: инвариант «двух живых контейнеров
+				// одной джобы быть не должно» либо соблюдается, либо второй
+				// контейнер поднимается на тот же смонтированный каталог, где
+				// ещё работает первый, и «единственная честная проверка»
+				// проверяет уже не то. Отложенное снятие ниже остаётся
+				// зарегистрированным (removed выставляется только при успехе)
+				// и попробует ещё раз.
+				if err := c.Remove(context.Background()); err != nil {
+					fmt.Fprintf(os.Stderr, "предупреждение: %s\nчистый прогон пропущен: старый контейнер ещё жив\n", err)
+				} else {
+					cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, owner, os.Stdout, os.Stderr, pr)
+					switch {
+					case err != nil:
+						// Сломался сам инструмент (docker, прерывание) — не
+						// превращает весь запуск в неудачу: шелл пользователь
+						// уже получил, ценность уже доставлена.
+						fmt.Fprintf(os.Stderr, "предупреждение: чистый прогон не завершился: %s\n", explain(err))
+					case cleanOutcome.Failed == nil:
+						fmt.Fprintln(os.Stderr, "✓ джоба воспроизводится зелёной, можно пушить")
+					default:
+						fmt.Fprintf(os.Stderr, "чистый прогон: шаг %d/%d (%s) всё ещё падает с кодом %d — фикс ещё не готов\n",
+							cleanOutcome.FailedIndex, cleanOutcome.Total, cleanOutcome.Failed.Section, cleanOutcome.ExitCode)
+					}
 				}
 			}
 		} else {
