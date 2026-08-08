@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/f3rym/ci-shell/internal/config"
 )
 
 // ErrInsecureSecrets означает: файл секретов найден на диске, но его права
@@ -41,22 +43,15 @@ type Secrets struct {
 // существуют, побеждает первый.
 var secretsNames = []string{"secrets.yml", "secrets.yaml"}
 
-// secretsPath возвращает путь к файлу секретов — по образцу
-// token.configPath (internal/token/file.go): каталог из XDG_CONFIG_HOME,
-// иначе $HOME/.config, подкаталог ci-shell. Если ни одно из secretsNames
-// не существует на диске, возвращается путь к первому имени
-// (secrets.yml) без ошибки — отсутствие файла секретов не является
-// ошибкой на этом уровне.
+// secretsPath возвращает путь к файлу секретов — каталог берётся у
+// config.Dir(), той же формулы, что использует token.configPath
+// (internal/token/file.go). Если ни одно из secretsNames не существует на
+// диске, возвращается путь к первому имени (secrets.yml) без ошибки —
+// отсутствие файла секретов не является ошибкой на этом уровне.
 func secretsPath() (string, error) {
-	var dir string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		dir = filepath.Join(xdg, "ci-shell")
-	} else {
-		home := os.Getenv("HOME")
-		if home == "" {
-			return "", fmt.Errorf("env: не удалось определить каталог конфига: не заданы ни XDG_CONFIG_HOME, ни HOME")
-		}
-		dir = filepath.Join(home, ".config", "ci-shell")
+	dir, err := config.Dir()
+	if err != nil {
+		return "", fmt.Errorf("env: %w", err)
 	}
 
 	first := filepath.Join(dir, secretsNames[0])

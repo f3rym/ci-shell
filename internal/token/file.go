@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/f3rym/ci-shell/internal/config"
 )
 
 // fileConfig — верхний уровень конфиг-файла с токенами: карта хостов на
@@ -27,20 +29,14 @@ var configNames = []string{"config.yml", "config.yaml"}
 
 // configPath возвращает путь к конфиг-файлу токенов.
 //
-// Каталог: $XDG_CONFIG_HOME/ci-shell, если XDG_CONFIG_HOME непуст,
-// иначе $HOME/.config/ci-shell. Если ни один из configNames не существует
-// на диске, возвращается путь к первому имени (config.yml) вместе с
-// ошибкой, обёрнутой вокруг os.ErrNotExist.
+// Каталог берётся у config.Dir() — единственной формулы каталога конфига в
+// проекте. Если ни один из configNames не существует на диске,
+// возвращается путь к первому имени (config.yml) вместе с ошибкой,
+// обёрнутой вокруг os.ErrNotExist.
 func configPath() (string, error) {
-	var dir string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		dir = filepath.Join(xdg, "ci-shell")
-	} else {
-		home := os.Getenv("HOME")
-		if home == "" {
-			return "", fmt.Errorf("token: не удалось определить каталог конфига: не заданы ни XDG_CONFIG_HOME, ни HOME")
-		}
-		dir = filepath.Join(home, ".config", "ci-shell")
+	dir, err := config.Dir()
+	if err != nil {
+		return "", fmt.Errorf("token: %w", err)
 	}
 
 	first := filepath.Join(dir, configNames[0])
