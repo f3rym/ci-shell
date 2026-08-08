@@ -109,7 +109,16 @@ func Capture(ctx context.Context, checkoutDir string, jobID int64, sha string) (
 	addCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "add", "--intent-to-add", ".")
 	_, _ = runCmd(addCmd)
 
-	diffCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff")
+	// Разница снимается относительно HEAD, а не индекса: голый git diff
+	// сравнивает рабочее дерево с индексом, поэтому всё, что в этом чекауте
+	// уже застейджено — шагом джобы, вызвавшим git add (автофиксеры
+	// линтеров, генераторы, pre-commit-обвязка), или самим пользователем во
+	// время починки, — в разницу не попадало бы вовсе. Capture при этом
+	// возвращала успех, вызывающий печатал «правки сохранены», а
+	// непереносимый чекаут удалялся сразу после — потерянное было уже не
+	// восстановить. git add --intent-to-add выше по-прежнему нужен: без него
+	// в разницу не попадут ещё не отслеживаемые файлы.
+	diffCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "--binary", "HEAD")
 	diffOut, err := runCmd(diffCmd)
 	if err != nil {
 		return Patch{}, nil, fmt.Errorf("repo: не удалось снять разницу чекаута: %s: %w", firstLine(err.Error()), err)
@@ -118,7 +127,9 @@ func Capture(ctx context.Context, checkoutDir string, jobID int64, sha string) (
 		return Patch{}, nil, fmt.Errorf("repo: %w", ErrNoChanges)
 	}
 
-	namesCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "--name-only")
+	// Та же база сравнения, что у самой разницы выше: список файлов,
+	// названный пользователю, обязан совпадать с содержимым патча.
+	namesCmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "--name-only", "HEAD")
 	namesOut, err := runCmd(namesCmd)
 	if err != nil {
 		return Patch{}, nil, fmt.Errorf("repo: не удалось получить список изменённых файлов: %s: %w", firstLine(err.Error()), err)
