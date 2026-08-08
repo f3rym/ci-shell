@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/f3rym/ci-shell/internal/render"
@@ -158,6 +159,32 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	// лишний носитель секретов на диске.
 	defer os.Remove(envPath)
 
+	// Аргумент монтирования собирается конкатенацией через двоеточие, потому
+	// что такова форма флага -v контейнерного CLI. Значит двоеточие внутри
+	// любой из половин пересобирает аргумент во что-то другое: рабочий
+	// каталог "/builds/p:ro" сделал бы монтирование доступным только для
+	// чтения (и правки пользователя не попали бы на хост вовсе), а каталог
+	// "a:b" на хосте сорвал бы запуск. Пустая половина даёт монтирование в
+	// корень и рабочий каталог "". Оба значения приходят снаружи —
+	// SourceDir из настройки checkout_dir или текущего каталога,
+	// WorkDir из CI_PROJECT_DIR, то есть из переменной проекта по API, —
+	// поэтому проверяются здесь, у самой сборки аргумента, а не только у
+	// источника (см. env.validWorkDir).
+	if err := checkHostPath("каталог кода на хосте", spec.SourceDir); err != nil {
+		return nil, nil, err
+	}
+	if err := checkContainerPath("рабочий каталог в контейнере", spec.WorkDir); err != nil {
+		return nil, nil, err
+	}
+	if spec.FileVarsDir != "" && spec.FileVarsMount != "" {
+		if err := checkHostPath("каталог файловых переменных на хосте", spec.FileVarsDir); err != nil {
+			return nil, nil, err
+		}
+		if err := checkContainerPath("точка монтирования файловых переменных", spec.FileVarsMount); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	mount := spec.SourceDir + ":" + spec.WorkDir
 	label := fmt.Sprintf("ci-shell.job=%d", spec.JobID)
 
@@ -210,6 +237,56 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	d.progress.Stage("контейнер %s готов, рабочий каталог %s", shortID(id), spec.WorkDir)
 
 	return &Container{ID: id, d: d, workDir: spec.WorkDir}, skipped, nil
+}
+
+// checkControl отвергает путь с управляющим символом: такой путь ломает и
+// разбор аргумента, и любое сообщение о нём.
+func checkControl(what, p string) error {
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("runner: %s %q содержит управляющий символ: %w", what, p, ErrContainerFailed)
+		}
+	}
+	return nil
+}
+
+// checkContainerPath отвергает путь внутри контейнера, который нельзя
+// безопасно подставить в аргумент монтирования вида "<источник>:<цель>":
+// пустой, относительный, с двоеточием или с управляющим символом. Файловая
+// система контейнера всегда POSIX, поэтому абсолютность проверяется ведущей
+// косой чертой, а не filepath.IsAbs сборки хоста. what — роль пути в
+// сообщении пользователю.
+func checkContainerPath(what, p string) error {
+	switch {
+	case p == "":
+		return fmt.Errorf("runner: %s не задан: %w", what, ErrContainerFailed)
+	case !strings.HasPrefix(p, "/"):
+		return fmt.Errorf("runner: %s %q не абсолютный: %w", what, p, ErrContainerFailed)
+	case strings.ContainsRune(p, ':'):
+		return fmt.Errorf("runner: %s %q содержит двоеточие — оно разделяет части аргумента монтирования: %w", what, p, ErrContainerFailed)
+	}
+	return checkControl(what, p)
+}
+
+// checkHostPath — то же для пути на хосте, где абсолютность зависит от
+// платформы сборки. Двоеточие буквы диска Windows ("C:\...") допускается
+// как часть формы абсолютного пути и из проверки исключается — любое другое
+// двоеточие пересобрало бы аргумент монтирования.
+func checkHostPath(what, p string) error {
+	if p == "" {
+		return fmt.Errorf("runner: %s не задан: %w", what, ErrContainerFailed)
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("runner: %s %q не абсолютный: %w", what, p, ErrContainerFailed)
+	}
+	rest := p
+	if len(p) > 1 && p[1] == ':' {
+		rest = p[2:]
+	}
+	if strings.ContainsRune(rest, ':') {
+		return fmt.Errorf("runner: %s %q содержит двоеточие — оно разделяет части аргумента монтирования: %w", what, p, ErrContainerFailed)
+	}
+	return checkControl(what, p)
 }
 
 // DetectShell выбирает оболочку контейнера пробой: bash предпочтителен —
