@@ -350,18 +350,35 @@ func (c *Container) Exec(ctx context.Context, command string, out, errOut io.Wri
 	return -1, fmt.Errorf("runner: docker exec отказал: %w", err)
 }
 
-// Shell запускает оболочку, выбранную DetectShell, интерактивно, подключая
-// терминал пользователя напрямую к docker exec -it. Если проба ещё не
-// выполнялась — выполняет её сам. Ненулевой код выхода оболочки не
-// считается ошибкой — пользователь вышел как счёл нужным.
-func (c *Container) Shell(ctx context.Context) error {
+// ShellCommand собирает команду интерактивного шелла контейнера как
+// значение, не запуская её: контейнерный CLI, подкоманда выполнения, флаги
+// интерактивности и рабочего каталога, идентификатор контейнера и найденная
+// оболочка — каждый отдельным элементом среза аргументов, оболочка на хосте
+// не задействована. Если проба оболочки ещё не выполнялась, метод выполняет
+// её сам, как раньше делал Shell.
+//
+// Стандартные потоки метод НЕ назначает намеренно: команду забирает механизм
+// передачи терминала Bubble Tea (tea.ExecProcess, internal/ui), и он сам
+// подключает к ней терминал пользователя — назначенные заранее потоки
+// отняли бы у него это право. Обычный режим (Shell ниже) назначает их сам,
+// сразу после сборки.
+func (c *Container) ShellCommand(ctx context.Context) (*exec.Cmd, error) {
 	if c.shell == "" {
 		if err := c.DetectShell(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
+	return exec.CommandContext(ctx, c.d.bin, "exec", "-it", "-w", c.workDir, c.ID, c.shell), nil
+}
 
-	cmd := exec.CommandContext(ctx, c.d.bin, "exec", "-it", "-w", c.workDir, c.ID, c.shell)
+// Shell запускает оболочку интерактивно, подключая терминал пользователя
+// напрямую к команде, собранной ShellCommand. Ненулевой код выхода оболочки
+// не считается ошибкой — пользователь вышел как счёл нужным.
+func (c *Container) Shell(ctx context.Context) error {
+	cmd, err := c.ShellCommand(ctx)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

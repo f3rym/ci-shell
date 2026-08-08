@@ -26,7 +26,7 @@ func Env(w io.Writer, e env.Environment) error {
 			return err
 		}
 		for _, v := range e.Vars {
-			if _, err := fmt.Fprintf(w, "  %s=%s (%s)\n", v.Key, displayValue(v), v.Source); err != nil {
+			if _, err := fmt.Fprintf(w, "  %s=%s (%s)\n", v.Key, DisplayValue(v), v.Source); err != nil {
 				return err
 			}
 		}
@@ -96,11 +96,18 @@ func projectKey(e env.Environment) string {
 	return e.Host + "/" + e.ProjectPath
 }
 
-// displayValue — единственная точка, где решается, показывать значение
-// переменной пользователю или нет: для Variable.Secret возвращает
+// DisplayValue — единственная точка во всём проекте, где решается, показывать
+// значение переменной пользователю или нет: для Variable.Secret возвращает
 // плейсхолдер вместо значения (T-02-01); для файловых переменных
 // (env.KindFile) — маркер вместо инлайна содержимого (WR-05).
-func displayValue(v env.Variable) string {
+//
+// С Фазы 9 у решения два потребителя — печать обычного режима (Env выше) и
+// панель окружения консольного интерфейса (internal/ui/job.go) — и второй
+// ветки «показывать или нет» в проекте не появляется: интерфейс показывает
+// окружение упавшей джобы целиком, и второе место принятия этого решения
+// означало бы, что однажды они разойдутся и секрет уедет на экран.
+// Экспортирована ровно поэтому — второй потребитель живёт в другом пакете.
+func DisplayValue(v env.Variable) string {
 	if v.Secret {
 		return "<скрыто>"
 	}
