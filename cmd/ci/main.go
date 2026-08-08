@@ -381,18 +381,33 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	// его в строку для sh -c дала бы исполнение произвольной команды под root
 	// в каталоге, смонтированном с хоста. Путь уходит отдельным элементом
 	// argv, как в MkdirAll и Chmod.
+	//
+	// Отложенным вызовом дело не ограничивается: ветка чистого прогона ниже
+	// снимает контейнер явно, и к моменту разворачивания defer выполнять
+	// команду было бы уже негде. Поэтому возврат владельца вынесен в
+	// идемпотентную функцию: ветка чистого прогона зовёт её сама перед
+	// снятием контейнера, а отложенный вызов остаётся страховкой всех
+	// остальных путей выхода и после явного вызова не делает ничего.
 	uid, gid := os.Getuid(), os.Getgid()
+	owner := ""
 	if uid >= 0 && gid >= 0 {
-		defer func() {
-			// Ошибка не фатальна — в образе может не быть chown, и на этот
-			// случай в Checkout.Remove уже есть готовая команда добивки. Но и
-			// не молча: иначе пользователь узнаёт о root-файлах в своём кэше
-			// только когда об них спотыкается уборка.
-			if err := c.Chown(context.Background(), fmt.Sprintf("%d:%d", uid, gid), workDir); err != nil {
-				fmt.Fprintf(os.Stderr, "предупреждение: %s\nфайлы в каталоге кода могли остаться под root\n", err)
-			}
-		}()
+		owner = fmt.Sprintf("%d:%d", uid, gid)
 	}
+	ownerRestored := false
+	restoreOwner := func() {
+		if owner == "" || ownerRestored {
+			return
+		}
+		ownerRestored = true
+		// Ошибка не фатальна — в образе может не быть chown, и на этот
+		// случай в Checkout.Remove уже есть готовая команда добивки. Но и
+		// не молча: иначе пользователь узнаёт о root-файлах в своём кэше
+		// только когда об них спотыкается уборка.
+		if err := c.Chown(context.Background(), owner, workDir); err != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\nфайлы в каталоге кода могли остаться под root\n", err)
+		}
+	}
+	defer restoreOwner()
 
 	if len(skipped) > 0 {
 		fmt.Fprintf(os.Stderr, "предупреждение: переменные не попали в контейнер, имя или значение несовместимы с файлом окружения: %s\n", strings.Join(skipped, ", "))
@@ -518,10 +533,17 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 				// должен драться за смонтированный каталог с первым.
 				// Идемпотентность Remove делает отложенное снятие ниже
 				// безвредным.
+				//
+				// Владелец файлов возвращается ДО снятия: после него
+				// команду выполнять уже негде, а отложенный вызов
+				// разворачивается только в самом конце функции. Второй
+				// контейнер вернёт владельца за собой сам — CleanRun
+				// получает owner тем же значением.
+				restoreOwner()
 				if err := c.Remove(ctx); err != nil {
 					fmt.Fprintf(os.Stderr, "предупреждение: %s\n", err)
 				}
-				cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, os.Stdout, os.Stderr, pr)
+				cleanOutcome, err := runner.CleanRun(ctx, d, spec, steps, owner, os.Stdout, os.Stderr, pr)
 				switch {
 				case err != nil:
 					// Сломался сам инструмент (docker, прерывание) — не
