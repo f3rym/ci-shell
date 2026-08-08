@@ -118,7 +118,7 @@ func Materialize(ctx context.Context, req Request, p render.Progress) (*Checkout
 	}
 
 	if root, err := Root(ctx); err == nil {
-		if _, ok := RemoteMatches(ctx, root, req.ProjectPath); ok && hasCommit(ctx, root, req.SHA) {
+		if _, ok := RemoteMatches(ctx, root, req.Host, req.ProjectPath); ok && hasCommit(ctx, root, req.SHA) {
 			dir, parent, err := checkoutPath(req.Base, req.ProjectPath, req.SHA, req.Persist)
 			if err != nil {
 				return nil, err

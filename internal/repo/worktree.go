@@ -45,23 +45,38 @@ func Root(ctx context.Context) (string, error) {
 }
 
 // RemoteMatches проверяет, указывает ли remote origin рабочей копии root на
-// тот же проект projectPath. Сравнение — без учёта регистра, путь проекта
-// ищется в строке remote после отсечения суффикса ".git". Если remote не
-// настроен или команда отказала — молчим про то, чего не знаем, вместо
-// ложной тревоги: возвращаем пустую строку и true.
-func RemoteMatches(ctx context.Context, root, projectPath string) (string, bool) {
+// тот же проект: хост wantHost и путь проекта projectPath сравниваются
+// целиком и без учёта регистра, а не поиском подстроки.
+//
+// Подстрока здесь была прямой ошибкой выбора репозитория: "group/project"
+// содержится и в "https://gitlab.com/other-group/project-fork", и в
+// "https://evil.example/group/project" — то есть совпадал форк, совпадал
+// чужой хост, а Materialize берёт этот ответ единственным основанием
+// считать локальную рабочую копию тем же проектом и смонтировать в
+// контейнер её содержимое, выдав его пользователю за код джобы. Разбор
+// remote берётся у parseRemote — той же формулы, по которой утилита
+// выводит хост и проект из origin для номера джобы.
+//
+// Несовпадение — не поломка, а штатный переход на сетевую ветку
+// Materialize, поэтому неразобранный, пустой или недоступный origin даёт
+// ложь: «не знаем, что это тот же проект» здесь честнее, чем «поверим на
+// слово».
+func RemoteMatches(ctx context.Context, root, wantHost, projectPath string) (string, bool) {
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "remote", "get-url", "origin")
 	out, err := runCmd(cmd)
 	if err != nil {
-		return "", true
+		return "", false
 	}
 	remote := strings.TrimSpace(out)
 	if remote == "" {
-		return "", true
+		return "", false
 	}
 
-	trimmed := strings.TrimSuffix(remote, ".git")
-	return remote, strings.Contains(strings.ToLower(trimmed), strings.ToLower(projectPath))
+	host, path, ok := parseRemote(remote)
+	if !ok {
+		return remote, false
+	}
+	return remote, strings.EqualFold(host, wantHost) && strings.EqualFold(path, projectPath)
 }
 
 // Worktree — временный worktree, приведённый к коммиту джобы.
