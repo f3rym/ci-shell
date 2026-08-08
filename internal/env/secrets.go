@@ -43,12 +43,14 @@ type Secrets struct {
 // существуют, побеждает первый.
 var secretsNames = []string{"secrets.yml", "secrets.yaml"}
 
-// secretsPath возвращает путь к файлу секретов — каталог берётся у
+// SecretsPath возвращает путь к файлу секретов — каталог берётся у
 // config.Dir(), той же формулы, что использует token.configPath
 // (internal/token/file.go). Если ни одно из secretsNames не существует на
 // диске, возвращается путь к первому имени (secrets.yml) без ошибки —
-// отсутствие файла секретов не является ошибкой на этом уровне.
-func secretsPath() (string, error) {
+// отсутствие файла секретов не является ошибкой на этом уровне. Экспортирована,
+// потому что тот же путь нужен подкоманде ci secrets (cmd/ci/main.go) — вторая
+// формула пути в проекте недопустима.
+func SecretsPath() (string, error) {
 	dir, err := config.Dir()
 	if err != nil {
 		return "", fmt.Errorf("env: %w", err)
@@ -80,7 +82,7 @@ func secretsPath() (string, error) {
 // код (cmd/ci, internal/render) — так значение секрета не может утечь из
 // низкоуровневого кода мимо единой политики вывода.
 func LoadSecrets(host, projectPath string) (Secrets, error) {
-	path, err := secretsPath()
+	path, err := SecretsPath()
 	if err != nil {
 		return Secrets{}, err
 	}
@@ -128,6 +130,99 @@ func LoadSecrets(host, projectPath string) (Secrets, error) {
 	values := f.Projects[host+"/"+projectPath]
 
 	return Secrets{Path: path, Values: values, Found: true}, nil
+}
+
+// EnsureSecretsFile создаёт файл секретов, уже заполненный именами
+// недостающих переменных missing, если файла ещё нет на диске.
+//
+// Существующий файл не читается и не переписывается вовсе: возвращается его
+// путь и ложный признак создания. В этом файле живут комментарии
+// пользователя, значения других проектов и его собственный порядок ключей —
+// переписывание превратило бы удобство в потерю данных, а недостающие ключи
+// и так печатаются готовым к вставке фрагментом (missingReport в
+// internal/render/env.go).
+//
+// Пустой host или пустой projectPath (случай подкоманды ci secrets на
+// чистой машине, где проект ещё не известен) — вместо настоящего ключа
+// проекта пишется закомментированный пример той же формы: файл остаётся
+// валидным YAML, а пользователь видит формат.
+//
+// Содержимое собирается текстом построчно, а не сериализацией структуры —
+// только текстовая сборка позволяет положить в файл шапку с пояснением и
+// оставить её там навсегда. Запись атомарна тем же приёмом, что у токенов и
+// настроек (internal/token/file.go, internal/config/config.go): временный
+// файл через os.CreateTemp в том же каталоге, явный os.Chmod на 0o600
+// (маска процесса иначе оставила бы файл читаемым всей машине), запись,
+// закрытие, os.Rename поверх целевого пути; при любой ошибке до
+// переименования временный файл удаляется.
+//
+// В файл не может попасть ни одно значение: единственный вход, несущий
+// сведения о переменных, — срез Missing, у которого поля под значение нет по
+// устройству типа.
+//
+// Пакет по-прежнему ничего не выводит на экран.
+func EnsureSecretsFile(host, projectPath string, missing []Missing) (path string, created bool, err error) {
+	path, err = SecretsPath()
+	if err != nil {
+		return "", false, err
+	}
+
+	if _, statErr := os.Stat(path); statErr == nil {
+		return path, false, nil
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		return path, false, fmt.Errorf("env: файл секретов %s недоступен: %w", path, statErr)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", false, fmt.Errorf("env: не удалось создать каталог %s: %w", dir, err)
+	}
+
+	var b strings.Builder
+	b.WriteString("# файл секретов ci-shell.\n")
+	b.WriteString("# здесь хранятся значения переменных, которые GitLab никогда не отдаёт\n")
+	b.WriteString("# через API (тип masked_and_hidden — пишутся один раз и не читаются никем).\n")
+	b.WriteString("# права файла обязаны быть 0600 — иначе утилита отказывается его читать.\n")
+	b.WriteString("# открыть файл в редакторе: ci secrets\n")
+	b.WriteString("projects:\n")
+
+	if host == "" || projectPath == "" {
+		b.WriteString("  # <хост>/<путь проекта>:\n")
+		b.WriteString("  #   ПЕРЕМЕННАЯ: \"<значение>\"\n")
+	} else {
+		fmt.Fprintf(&b, "  %s/%s:\n", host, projectPath)
+		for _, m := range missing {
+			fmt.Fprintf(&b, "    %s: \"\"\n", m.Key)
+		}
+	}
+
+	tmp, err := os.CreateTemp(dir, ".secrets-*.yml.tmp")
+	if err != nil {
+		return "", false, fmt.Errorf("env: не удалось создать временный файл секретов: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Право читаться не должно зависеть от umask процесса — Chmod делает
+	// намерение явным в коде (тот же приём, что в token.Save/config.Save).
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", false, fmt.Errorf("env: не удалось выставить права 0600 на временный файл секретов: %w", err)
+	}
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", false, fmt.Errorf("env: не удалось записать временный файл секретов: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", false, fmt.Errorf("env: не удалось закрыть временный файл секретов: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return "", false, fmt.Errorf("env: не удалось сохранить файл секретов %s: %w", path, err)
+	}
+
+	return path, true, nil
 }
 
 // yamlLineRe находит в тексте ошибки yaml.v3 упоминания «line N» — из всей

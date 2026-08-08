@@ -37,6 +37,8 @@ func main() {
 	switch os.Args[1] {
 	case "shell":
 		runShell(os.Args[2:])
+	case "secrets":
+		runSecrets(os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(2)
@@ -48,6 +50,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "номер джобы работает из каталога репозитория проекта — хост и проект берутся из git remote origin")
 	fmt.Fprintln(os.Stderr, "--here кладёт код джобы в текущий каталог и оставляет его там после выхода из шелла")
 	fmt.Fprintln(os.Stderr, "флаги ставятся до позиционного аргумента (разбор аргументов stdlib другого порядка не понимает)")
+	fmt.Fprintln(os.Stderr, "ci secrets — открыть файл секретов в редакторе ($VISUAL/$EDITOR, иначе vi); файл создаётся сам при первом запуске с недостающими значениями")
 }
 
 // defaultConfigPath — путь к конфиг-файлу токенов, зафиксированный в
@@ -589,6 +592,20 @@ func runShell(args []string) {
 		Secrets:     secrets.Values,
 		SecretsPath: secrets.Path,
 	})
+
+	// Первый запуск с недостающими значениями сам создаёт файл секретов,
+	// уже заполненный именами недостающих ключей (ENV-06) — человеку
+	// остаётся вписать значения, а не сочинять формат. Ошибка не фатальна:
+	// missingReport (render.Env ниже) всё равно печатает готовый к вставке
+	// фрагмент, сборка окружения и воспроизведение продолжаются.
+	if len(e.Missing) > 0 {
+		if path, created, err := env.EnsureSecretsFile(ref.Host, ref.ProjectPath, e.Missing); err != nil {
+			fmt.Fprintf(os.Stderr, "предупреждение: файл секретов не создан: %s\n", explain(err))
+		} else if created {
+			fmt.Fprintf(os.Stderr, "файл секретов создан: %s; в нём уже перечислены недостающие переменные, вписать значения — ci secrets\n", path)
+		}
+	}
+
 	if err := render.Env(os.Stdout, e); err != nil {
 		fail(err)
 	}
@@ -606,6 +623,74 @@ func runShell(args []string) {
 	pr := render.Progress{W: os.Stderr}
 	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, base, persist, pr); err != nil {
 		fail(err)
+	}
+}
+
+// runSecrets реализует подкоманду ci secrets: создаёт файл секретов, если
+// его ещё нет (env.EnsureSecretsFile без проекта — здесь ещё неизвестно, о
+// каком проекте речь, поэтому в файл ложится только закомментированный
+// пример формата), и открывает его в редакторе пользователя.
+//
+// Свой FlagSet без флагов — форма разбора аргументов совпадает с подкомандой
+// shell, и лишний аргумент не проходит молча.
+//
+// Запуск редактора защищён проверкой терминала (token.Interactive()), как
+// вопрос о токене (план 04-01): без неё процесс подвис бы в пайпе или в CI.
+// Редактор берётся из VISUAL/EDITOR (иначе vi), бинарь ищется в PATH через
+// exec.LookPath, команда собирается срезом аргументов без оболочки — в
+// аргументы уходит только путь файла, содержимое секретов в аргументах
+// процесса не появляется никогда. После выхода редактора права
+// принудительно возвращаются к 0600: многие редакторы сохраняют файл через
+// временный с последующим переименованием, и права нового файла определяет
+// маска процесса.
+func runSecrets(args []string) {
+	fs := flag.NewFlagSet("secrets", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() > 0 {
+		printUsage()
+		os.Exit(2)
+	}
+
+	path, created, err := env.EnsureSecretsFile("", "", nil)
+	if err != nil {
+		fail(err)
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "файл секретов создан: %s\n", path)
+	}
+
+	if !token.Interactive() {
+		fmt.Fprintf(os.Stderr, "нет терминала — откройте файл сами: %s\n", path)
+		return
+	}
+
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	fields := strings.Fields(editor)
+	bin, err := exec.LookPath(fields[0])
+	if err != nil {
+		fail(fmt.Errorf("редактор %q не найден в PATH: %w", fields[0], err))
+	}
+	cmdArgs := append(append([]string{}, fields[1:]...), path)
+
+	cmd := exec.Command(bin, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: редактор завершился с ошибкой: %s\n", err)
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: не удалось вернуть права 0600 файлу секретов %s: %s\n", path, err)
+	} else {
+		fmt.Fprintf(os.Stderr, "права файла секретов возвращены к 0600: %s\n", path)
 	}
 }
 

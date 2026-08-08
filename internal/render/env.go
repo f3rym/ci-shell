@@ -79,6 +79,9 @@ func missingReport(w io.Writer, e env.Environment) error {
 	if _, err := fmt.Fprintf(w, "\nи ограничьте права файла: chmod 600 %s\n", e.SecretsPath); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(w, "или откройте тот же файл в редакторе командой: ci secrets"); err != nil {
+		return err
+	}
 	return nil
 }
 
