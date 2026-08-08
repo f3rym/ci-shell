@@ -31,15 +31,6 @@ func (p Progress) Stage(format string, args ...any) {
 	fmt.Fprintf(p.W, "  "+format+"\n", args...)
 }
 
-// truncate обрезает s до n символов, добавляя многоточие при обрезке.
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
-}
-
 // Step печатает строку прогресса одного шага джобы: номер шага, всего
 // шагов, секцию (before_script/script) и команду, обрезанную truncate до
 // разумной длины — длинная однострочная команда не должна разъезжаться по
