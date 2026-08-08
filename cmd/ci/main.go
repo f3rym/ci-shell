@@ -297,7 +297,16 @@ func runShell(args []string) {
 
 	tok, err := token.Resolve(ref.Host)
 	if err != nil {
-		fail(err)
+		// Нет токена — это не ошибка с инструкцией, а вопрос, на который
+		// может ответить только человек за терминалом. В неинтерактивном
+		// запуске (пайп, CI) поведение остаётся прежним: explain(err) ниже
+		// печатает исходную подсказку про переменные окружения и конфиг.
+		if errors.Is(err, token.ErrNoToken) && token.Interactive() {
+			tok, err = token.Prompt(ref.Host)
+		}
+		if err != nil {
+			fail(err)
+		}
 	}
 
 	// Конкретный клиент создаётся один раз и присваивается переменной
