@@ -80,11 +80,14 @@ func (m jobsModel) load() tea.Cmd {
 		if p == nil {
 			return jobsFailedMsg{reason: loadErr}
 		}
-		jobs, err := p.PipelineJobs(context.Background(), ref.ProjectPath, pipelineID)
+		// Постраничный обход и кэш для этого экрана — план 10-03; здесь
+		// сигнатура приводится к новой форме первой страницей, чтобы
+		// дерево кода оставалось согласованным на границе плана 10-01.
+		page, err := p.PipelineJobs(context.Background(), ref.ProjectPath, pipelineID, provider.PageRequest{})
 		if err != nil {
 			return jobsFailedMsg{reason: err.Error()}
 		}
-		return jobsLoadedMsg{jobs: jobs}
+		return jobsLoadedMsg{jobs: page.Items}
 	}
 	return tea.Batch(fetch, m.spin.Tick)
 }
