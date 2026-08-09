@@ -657,6 +657,15 @@ func (m jobModel) idle() bool {
 	return !m.swapping && !m.execRunning
 }
 
+// cancelable — идёт ли долгая операция, которую Ctrl-C отменяет вместо
+// выхода из программы. Единственное место, где этот вопрос решается:
+// корневая модель спрашивает его же (internal/ui/app.go, cancelsRun), потому
+// что иначе она либо отняла бы отмену у экрана джобы, либо оставила бы
+// Ctrl-C без выхода везде, где отменять нечего.
+func (m jobModel) cancelable() bool {
+	return m.phase == phasePreparing || m.phase == phaseRunning
+}
+
 // guideActionable — можно ли принять ответ экрана проводника: занятость без
 // фазы подготовки (см. applyGuideDone).
 func (m jobModel) guideActionable() bool {
@@ -763,7 +772,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, m.keys.Cancel):
-		if m.phase == phasePreparing || m.phase == phaseRunning {
+		// До этой ветви Ctrl-C доходит только тогда, когда отменять есть что:
+		// корневая модель пропускает его сюда ровно по этому условию
+		// (cancelsRun), а во всех остальных случаях сама завершает программу.
+		// Проверка оставлена и здесь — она называет условие, по которому
+		// экран забирает клавишу себе, и второго его толкования не заводит.
+		if m.cancelable() {
 			m.session.Cancel()
 			m.canceling = true
 		}

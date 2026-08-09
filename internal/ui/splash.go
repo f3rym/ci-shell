@@ -154,6 +154,27 @@ func newSplashModel() splashModel {
 	}
 }
 
+// quitFromSplash — просьба завершить программу, а НЕ tea.Quit: точка выхода
+// в проекте одна, и она проходит через уборку сессии корневой модели
+// (internal/ui/app.go, quitCmd, CR-01). Заставка своей сессии не держит, но
+// второго способа выйти в проекте быть не должно — на заставку можно
+// вернуться с экрана джобы, у которого сессия есть.
+func quitFromSplash() tea.Cmd {
+	return func() tea.Msg { return quitMsg{} }
+}
+
+// reopen возвращает заставку в состояние вопроса: свежее поле ввода, снятые
+// отметки проверок, снятые причина отказа и подсказка. Зовётся при возврате
+// на заставку с другого экрана (internal/ui/app.go, back): без этого
+// заставка оставалась стоять с тремя пройденными проверками, которые ничего
+// больше не запускают, — экран, на котором нельзя ни продолжить, ни ввести
+// новую ссылку.
+func (m splashModel) reopen() splashModel {
+	fresh := newSplashModel()
+	fresh.width, fresh.height = m.width, m.height
+	return fresh
+}
+
 // init запускает мигание курсора поля ввода и тик спиннера заставки.
 func (m splashModel) init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.spin.Tick)
@@ -170,7 +191,22 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 	case tea.KeyPressMsg:
+		keys := DefaultKeys()
 		if m.asking {
+			// Возврат при открытом поле ввода снимает набранное вместе с
+			// последней причиной отказа; на уже пустом поле снимать нечего, и
+			// он означает выход. Проверка стоит ДО передачи клавиши полю: без
+			// неё esc был бы обычным символом ввода, а выхода с заставки не
+			// было бы ни одного (ни q — его съедает поле, ни esc — его
+			// корневая модель на заставке не перехватывает).
+			if key.Matches(msg, keys.Back) {
+				if m.input.Value() != "" {
+					m.input.SetValue("")
+					m.checks[checkTokenIndex].Reason = ""
+					return m, nil
+				}
+				return m, quitFromSplash()
+			}
 			if msg.String() == "enter" {
 				raw := strings.TrimSpace(m.input.Value())
 				if raw == "" {
@@ -206,8 +242,14 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		if m.fatal != "" && key.Matches(msg, DefaultKeys().Quit) {
-			return m, tea.Quit
+		// Поле ввода не открыто — набирать нечего, и обе привычные клавиши
+		// выхода означают выход. Условие «только при фатальном отказе» отсюда
+		// снято: пока оно стояло, идущие проверки, пройденные проверки и
+		// возврат с дерева оставляли заставку вовсе без выхода — ни q, ни
+		// esc, ни Ctrl-C (последний теперь перехватывает корневая модель до
+		// этого места).
+		if key.Matches(msg, keys.Quit) || key.Matches(msg, keys.Back) {
+			return m, quitFromSplash()
 		}
 		return m, nil
 	case tea.PasteMsg:
@@ -442,6 +484,11 @@ func (m splashModel) view(t Theme) string {
 		b.WriteString(t.Muted.Render("номер работает из каталога репозитория проекта"))
 		b.WriteString("\n")
 		b.WriteString(t.Muted.Render("пустой ввод откроет дерево групп и проектов"))
+		b.WriteString("\n")
+		// Выход с заставки обязан быть не только возможен, но и виден: своей
+		// строки клавиш у этого экрана нет (кадр собирает App.viewInner), и
+		// найти выход человеку было бы неоткуда.
+		b.WriteString(t.Muted.Render(HintSplashExit()))
 		if reason := m.checks[checkTokenIndex].Reason; reason != "" && m.checks[checkTokenIndex].State == checkWaiting {
 			b.WriteString("\n")
 			b.WriteString(t.Danger.Render(reason))
@@ -468,6 +515,12 @@ func (m splashModel) view(t Theme) string {
 		b.WriteString("\n")
 		b.WriteString(t.Danger.Render(m.fatal))
 	}
+
+	// Та же строка, что и под полем ввода: на экране проверок выход тоже
+	// обязан быть виден — именно здесь человек и застревал, когда выхода не
+	// было ни одного.
+	b.WriteString("\n")
+	b.WriteString(t.Muted.Render(HintSplashExit()))
 
 	return b.String()
 }

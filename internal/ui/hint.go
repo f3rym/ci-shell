@@ -261,6 +261,15 @@ func NoteSourceRefused(reason string) string {
 	return fmt.Sprintf("источник ответил отказом: %s", reason)
 }
 
+// HintSplashExit — единственная формулировка выхода с заставки. Своей
+// строки клавиш у заставки нет (кадр собирает App.viewInner, и заставка —
+// единственный экран без неё), поэтому названа она здесь, а не в KeyBar:
+// пока её не было, выход с первого экрана был не только сломан, но и
+// невидим.
+func HintSplashExit() string {
+	return "esc снимет набранное, ещё раз — выход; q и ctrl+c выходят сразу"
+}
+
 // HintTreeNote — курсор стоит на строке-объяснении.
 func HintTreeNote(text string) string {
 	return fmt.Sprintf("%s — g повторит запрос", text)
