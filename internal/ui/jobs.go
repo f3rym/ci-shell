@@ -262,7 +262,9 @@ func (m jobsModel) applyCommand(msg commandMsg) (jobsModel, tea.Cmd) {
 			return m, cmd
 		}
 	case "q":
-		return m, tea.Quit
+		// Выход идёт через корневую модель (internal/ui/app.go, quitCmd):
+		// точка выхода в проекте одна, и она убирает сессию — CR-01.
+		return m, func() tea.Msg { return quitMsg{} }
 	}
 	return m, nil
 }

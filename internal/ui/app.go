@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
@@ -62,6 +64,21 @@ type App struct {
 	jobs   jobsModel
 	job    jobModel
 	tree   treeModel
+	// treeReady — экран дерева собран newTreeModel (browseMsg), и его
+	// компонент списка Bubbles можно трогать. Признак явный, а не выведенный
+	// из browseClient: клиент обхода выставляется и при входе по прямой
+	// ссылке на джобу (jobRefMsg), где newTreeModel не вызывается вовсе, и
+	// вывод из него означал бы SetSize на нулевом list.Model при первом же
+	// изменении размера окна (CR-04 обзора v0.3.0).
+	treeReady bool
+
+	// sessionGen — поколение сессии джобы: растёт на каждое открытие джобы.
+	// Мост событий получает его при создании и проставляет каждому EventMsg,
+	// а экран джобы отбрасывает чужие — старый мост остаётся подключённым к
+	// той же программе, и события прошлой джобы иначе доезжали бы до новой
+	// (WR-05 обзора v0.3.0). Тот же приём поколения, что уже применён в
+	// панелях лога и пайплайнов.
+	sessionGen int
 
 	// guide/guideReturn — экран проводника по типичным поломкам (Фаза 11):
 	// экран проводника всегда знает, откуда пришёл, и esc возвращает ровно
@@ -90,6 +107,27 @@ type App struct {
 
 // backMsg обрабатывается здесь же (см. Update) — экран сам решает, когда
 // его пора послать, объявление типа в internal/ui/tree.go.
+
+// quitMsg — просьба экрана завершить программу. Экраны НЕ зовут tea.Quit
+// сами: выход обязан пройти через уборку сессии, а знает про неё только
+// корневая модель (quitCmd ниже, CR-01 обзора v0.3.0).
+type quitMsg struct{}
+
+// quitCmd — единственная точка выхода из интерфейса: отменяет незавершённую
+// подготовку, убирает сессию (контейнер, каталог файловых переменных с
+// материализованными секретами, чекаут) и только потом завершает программу.
+// Уборка идёт в горутине команды, потому что снятие контейнера ходит к
+// демону Docker и подвесило бы отрисовку.
+func (a App) quitCmd() tea.Cmd {
+	sess := a.job.session
+	if sess == nil {
+		return tea.Quit
+	}
+	return func() tea.Msg {
+		sess.Close()
+		return tea.Quit()
+	}
+}
 
 // programSend — функция отправки сообщения в запущенную программу Bubble
 // Tea; ставится в Run() сразу после tea.NewProgram, потому что раньше самой
@@ -202,11 +240,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.splash.width, a.splash.height = msg.Width, msg.Height
 		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
 		a.job = a.job.setSize(msg.Width, msg.Height)
-		if a.browseClient != nil {
+		if a.treeReady {
 			// Дерево держит настоящий компонент списка Bubbles (list.Model)
 			// — до первого browseMsg он ещё не собран newTreeModel, и
 			// SetSize на нулевом значении небезопасен, в отличие от
-			// jobsModel/jobModel, которые обходятся простыми полями.
+			// jobsModel/jobModel, которые обходятся простыми полями. Условие
+			// проверяет ровно тот факт, который декларирует: собран ли экран
+			// дерева, а не собран ли клиент обхода (CR-04).
 			a.tree = a.tree.setSize(msg.Width, msg.Height)
 		}
 		if a.current == screenHelp {
@@ -233,16 +273,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if key.Matches(msg, a.keys.Quit) && a.current != screenSplash {
-			if a.current == screenJob && a.job.session != nil {
-				// Уборка сессии (контейнер, файловые переменные, чекаут)
-				// обязана произойти и при выходе прямо с экрана джобы, а не
-				// только после явного возврата к списку — иначе выход из
-				// интерфейса клавишей q оставлял бы контейнер и чекаут на
-				// диске (T-09-18).
-				sess := a.job.session
-				return a, func() tea.Msg { sess.Close(); return tea.Quit() }
-			}
-			return a, tea.Quit
+			// Выход идёт единственной точкой на ЛЮБОМ экране, а не только
+			// когда текущий экран — джоба: `q` с экрана помощи, открытого с
+			// экрана джобы, тоже обязан убрать сессию (CR-01).
+			return a, a.quitCmd()
 		}
 		if key.Matches(msg, a.keys.Back) && a.current != screenSplash {
 			switch a.current {
@@ -314,6 +348,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.user = msg.User
 		a.browseClient = browse.New(msg.Provider, msg.Host)
 		a.tree = newTreeModel(a.browseClient, a.host, a.user, a.theme, a.keys)
+		a.treeReady = true
 		a.tree = a.tree.setSize(a.width, a.height)
 		a = a.push(screenTree)
 		return a, a.tree.loadRoot(false)
@@ -327,6 +362,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a = a.push(screenJobs)
 		return a, a.jobs.load()
 
+	case quitMsg:
+		// Команда `:q` любого экрана приходит сюда, а не зовёт tea.Quit сама:
+		// экран не знает про уборку сессии, а точка выхода в проекте одна
+		// (CR-01).
+		return a, a.quitCmd()
+
 	case backMsg:
 		a = a.back()
 		return a, nil
@@ -336,10 +377,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bubble Tea уже существует (programSend поставлен в Run), а
 		// экран джобы ещё нет — создание сессии, моста и подготовка идут
 		// одним переходом, чтобы второе место подключения не появилось.
-		bridge := NewBridge()
+		// Сессия предыдущей джобы (если человек уже открывал одну и вернулся)
+		// убирается здесь же: Close идемпотентен, поэтому повторный вызов
+		// после esc ничего не делает, а забытая сессия перестаёт существовать.
+		if a.job.session != nil {
+			a.job.session.Close()
+		}
+		a.sessionGen++
+		bridge := NewBridge(a.sessionGen)
 		bridge.Attach(programSend)
 		sess := NewSession(a.jobs.ref, a.provider, msg.job, event.Emitter{Sink: bridge})
-		a.job = newJobModel(sess, a.theme, a.keys)
+		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
 		a.job = a.job.setSize(a.width, a.height)
 		a = a.push(screenJob)
 		return a, a.job.init()
@@ -497,6 +545,15 @@ func (a App) viewInner() string {
 // значение целиком, и вся работа по сокрытию значения (internal/ui/recover.go,
 // panicRecord) обнулилась бы.
 func Run(ctx context.Context) error {
+	// Ctrl-C и SIGTERM отменяют контекст программы — тот же приём и по той
+	// же причине, что и в обычном режиме (cmd/ci/main.go, reproduce): без
+	// него сигнал завершал бы программу Bubble Tea мимо любой уборки, и
+	// контейнер, чекаут и каталог файловых переменных с материализованными
+	// секретами оставались бы на машине (CR-01 обзора v0.3.0). Уборка после
+	// возврата из p.Run() ниже — вторая половина того же решения.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Возможности терминала определяются ровно один раз здесь, при
 	// создании модели (Фаза 12, POL-01) — второе место сборки Caps в
 	// проекте не появляется; уточнение фона идёт через отдельное
@@ -515,7 +572,18 @@ func Run(ctx context.Context) error {
 	programSend = p.Send
 
 	var runErr error
-	_ = guard(func() { _, runErr = p.Run() })
+	var final tea.Model
+	_ = guard(func() { final, runErr = p.Run() })
+
+	// Последняя уборка: сюда программа приходит и штатным выходом, и по
+	// отменённому контексту (сигнал, отмена снаружи), и после паники,
+	// пойманной встроенной сетью Bubble Tea. Close идемпотентен, поэтому
+	// повторение уже сделанной уборки (quitCmd, esc с экрана джобы) ничего не
+	// стоит, а пропущенная — стоила бы живого контейнера и каталога с
+	// секретами на диске.
+	if last, ok := final.(App); ok && last.job.session != nil {
+		last.job.session.Close()
+	}
 
 	if rec := renderPanic.Load(); rec != nil {
 		// Последовательности восстановления идут туда же, куда bubbletea

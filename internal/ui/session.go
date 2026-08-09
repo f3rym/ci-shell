@@ -43,11 +43,18 @@ type Session struct {
 	// пары нужны ему уже к первой строке вывода.
 	log *logBuffer
 
+	// mu защищает ВСЁ состояние подготовки, а не только cancel: поля ниже
+	// пишет горутина команды (PrepareCmd и остальные), а Close/Cancel/Ready
+	// читают их из горутины Bubble Tea по нажатию клавиши — happens-before
+	// доставки сообщения Bubble Tea на этот путь не распространяется, потому
+	// что клавиша приходит не по sessionReadyMsg (CR-02 обзора v0.3.0).
 	mu sync.Mutex
-	// cancel отменяет контекст текущей долгой операции. Доступ — под mu:
-	// поле пишет горутина команды, а Cancel() читает его из основной
-	// горутины Bubble Tea.
+	// cancel отменяет контекст текущей долгой операции.
 	cancel context.CancelFunc
+	// closed — сессия уже убрана (Close). Подготовка, добравшаяся до конца
+	// после закрытия, снимает созданное сама, а не сохраняет его в полях:
+	// убирать их было бы уже некому.
+	closed bool
 
 	jobCfg      provider.JobConfig
 	img         runner.ImageChoice
@@ -66,6 +73,11 @@ type Session struct {
 
 	steps   []runner.Step
 	outcome runner.Outcome
+	// last — абсолютный номер последнего исполненного шага. Хранится
+	// отдельно от «упавшего», потому что после успешного перезапуска шага
+	// упавшего шага уже нет, а :rest всё равно обязан знать, откуда
+	// продолжать (WR-07 обзора v0.3.0).
+	last int
 
 	// owner — форма "<uid>:<gid>" для возврата владельца файлам рабочего
 	// каталога; пусто, когда uid/gid хоста недоступны.
@@ -218,7 +230,8 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		// которая пойдёт в него ниже. buildSecretMask — единственный
 		// маскировщик проекта (internal/ui/mask.go, Фаза 10), общий с
 		// панелью лога настоящего прогона (internal/ui/joblog.go).
-		s.log = newLogBuffer(logBufferLines, buildSecretMask(e))
+		logBuf := newLogBuffer(logBufferLines, buildSecretMask(e))
+		s.setLog(logBuf)
 
 		// Каталог чекаута — та же неинтерактивная функция, что раскрывает
 		// настроенный каталог обычному режиму (cache.CheckoutBase): вопрос в
@@ -237,7 +250,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 
 		// --- Участок второй: воспроизведение (то, что обычный режим делает
 		// внутри reproduce). Порядок вызовов — дословно тот же.
-		d, err := runner.New(s.em, s.log)
+		d, err := runner.New(s.em, logBuf)
 		if err != nil {
 			return fail(err)
 		}
@@ -302,7 +315,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		steps := runner.Steps(jobCfg)
 		var outcome runner.Outcome
 		if len(steps) > 0 {
-			o, err := runner.RunSteps(cctx, c, steps, s.log, s.log, s.em)
+			o, err := runner.RunSteps(cctx, c, steps, logBuf, logBuf, s.em)
 			if err != nil {
 				return fail(err)
 			}
@@ -314,7 +327,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		// уже внутри — тот же порядок, что и в обычном режиме. Неудача не
 		// прерывает подготовку, только уходит строкой в лог.
 		if err := runner.InstallRetry(cctx, c, steps, outcome.FailedIndex); err != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна, упавший шаг придётся перезапускать через s", err))
+			logBuf.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна, упавший шаг придётся перезапускать через s", err))
 		}
 
 		uid, gid := os.Getuid(), os.Getgid()
@@ -323,6 +336,25 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 			owner = fmt.Sprintf("%d:%d", uid, gid)
 		}
 
+		// Итоговые поля присваиваются одним блоком под тем же мьютексом,
+		// которым их читают Close/Ready/остальные команды. Если сессию уже
+		// закрыли, пока шла подготовка, сохранять их нельзя — убирать их было
+		// бы некому: созданное снимается прямо здесь (CR-02).
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			bg := context.Background()
+			if err := c.Remove(bg); err != nil {
+				logBuf.note(fmt.Sprintf("предупреждение: %s", err))
+			}
+			if err := fv.Remove(); err != nil {
+				logBuf.note(fmt.Sprintf("предупреждение: %s", err))
+			}
+			if err := code.Remove(bg); err != nil {
+				logBuf.note(fmt.Sprintf("предупреждение: %s", err))
+			}
+			return sessionFailedMsg{reason: "прервано пользователем", canceled: true}
+		}
 		s.jobCfg = jobCfg
 		s.img = img
 		s.environment = e
@@ -334,7 +366,10 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		s.c = c
 		s.steps = steps
 		s.outcome = outcome
+		s.last = lastExecuted(outcome, 0)
 		s.owner = owner
+		s.ownerRestored = false
+		s.mu.Unlock()
 
 		return sessionReadyMsg{outcome: outcome, skipped: skipped}
 	}
@@ -375,6 +410,17 @@ func adjustOutcome(o runner.Outcome, offset int) runner.Outcome {
 	return o
 }
 
+// lastExecuted — абсолютный номер последнего исполненного шага среза,
+// начинающегося со смещения offset: упавший шаг тоже исполнен, поэтому при
+// отказе это его номер, а при успехе — конец среза. Считается по
+// НЕсдвинутому результату (до adjustOutcome).
+func lastExecuted(o runner.Outcome, offset int) int {
+	if o.Failed != nil {
+		return offset + o.FailedIndex
+	}
+	return offset + o.Total
+}
+
 // RetryStepCmd перезапускает ровно упавший шаг (FIXUI-01): прогон шагов по
 // срезу из одного элемента, начинающемуся с упавшего — тем же прогоном
 // шагов, что и первый проход, с маркерами и точным номером. Команда retry
@@ -386,6 +432,10 @@ func adjustOutcome(o runner.Outcome, offset int) runner.Outcome {
 // исполняются против того же грязного состояния, что оставили предыдущие.
 func (s *Session) RetryStepCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		c := s.container()
+		if c == nil {
+			return runFinishedMsg{kind: runRetry, err: errNotReady}
+		}
 		if s.outcome.Failed == nil {
 			return runFinishedMsg{kind: runRetry, err: errNothingFailed}
 		}
@@ -396,26 +446,35 @@ func (s *Session) RetryStepCmd(ctx context.Context) tea.Cmd {
 		s.setCancel(cancel)
 		defer s.clearCancel()
 
-		outcome, err := runner.RunSteps(cctx, s.c, slice, s.log, s.log, s.em)
+		lb := s.logBuf()
+		outcome, err := runner.RunSteps(cctx, c, slice, lb, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runRetry, err: context.Canceled}
 			}
 			return runFinishedMsg{kind: runRetry, err: err}
 		}
+		s.mu.Lock()
+		s.last = lastExecuted(outcome, offset)
+		s.mu.Unlock()
 		s.outcome = adjustOutcome(outcome, offset)
 		return runFinishedMsg{kind: runRetry, outcome: s.outcome, offset: offset}
 	}
 }
 
-// RestCmd прогоняет шаги, идущие после упавшего, до конца (FIXUI-02) — тем
-// же прогоном шагов, что и RetryStepCmd, срезом сразу за упавшим шагом.
+// RestCmd прогоняет шаги, идущие после последнего исполненного, до конца
+// (FIXUI-02) — тем же прогоном шагов, что и RetryStepCmd. Смещение берётся
+// у номера последнего исполненного шага (LastStep), а НЕ у упавшего: после
+// успешного перезапуска упавшего шага уже нет, а продолжать с него всё ещё
+// надо — иначе петля фикса рвётся ровно там, где подсказка велит нажать
+// :rest (WR-07 обзора v0.3.0).
 func (s *Session) RestCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		if s.outcome.Failed == nil {
-			return runFinishedMsg{kind: runRest, err: errNothingFailed}
+		c := s.container()
+		if c == nil {
+			return runFinishedMsg{kind: runRest, err: errNotReady}
 		}
-		offset := s.outcome.FailedIndex
+		offset := s.LastStep()
 		if offset >= len(s.steps) {
 			return runFinishedMsg{kind: runRest, err: errNoStepsAfter}
 		}
@@ -425,13 +484,17 @@ func (s *Session) RestCmd(ctx context.Context) tea.Cmd {
 		s.setCancel(cancel)
 		defer s.clearCancel()
 
-		outcome, err := runner.RunSteps(cctx, s.c, slice, s.log, s.log, s.em)
+		lb := s.logBuf()
+		outcome, err := runner.RunSteps(cctx, c, slice, lb, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runRest, err: context.Canceled}
 			}
 			return runFinishedMsg{kind: runRest, err: err}
 		}
+		s.mu.Lock()
+		s.last = lastExecuted(outcome, offset)
+		s.mu.Unlock()
 		s.outcome = adjustOutcome(outcome, offset)
 		return runFinishedMsg{kind: runRest, outcome: s.outcome, offset: offset}
 	}
@@ -442,7 +505,12 @@ func (s *Session) RestCmd(ctx context.Context) tea.Cmd {
 // когда перезапускать нечего.
 var (
 	errNothingFailed = errors.New("перезапускать нечего: ни один шаг не упал")
-	errNoStepsAfter  = errors.New("после упавшего шагов нет")
+	errNoStepsAfter  = errors.New("после последнего исполненного шагов нет")
+	// errNotReady — команда пришла в сессию, у которой контейнера ещё (или
+	// уже) нет: подготовка сорвалась и экран стоит в phaseBlocked. Экран
+	// такие команды не пускает (jobModel.canRun), но экран не единственный
+	// вход в сессию, и разыменование nil тут стоило бы всей уборки (CR-03).
+	errNotReady = errors.New("контейнер джобы не поднят")
 )
 
 // CleanCmd — чистый прогон всех шагов в свежем контейнере (FIXUI-02): сначала
@@ -457,21 +525,20 @@ var (
 // продолжить чинить.
 func (s *Session) CleanCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if s.container() == nil {
+			return runFinishedMsg{kind: runClean, err: errNotReady}
+		}
 		cctx, cancel := context.WithCancel(ctx)
 		s.setCancel(cancel)
 		defer s.clearCancel()
 
-		if s.owner != "" && !s.ownerRestored {
-			s.ownerRestored = true
-			if err := s.c.Chown(context.Background(), s.owner, s.spec.WorkDir); err != nil {
-				s.log.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
-			}
-		}
-		if err := s.c.Remove(context.Background()); err != nil {
+		s.restoreOwner(context.Background())
+		if err := s.removeContainer(context.Background()); err != nil {
 			return runFinishedMsg{kind: runClean, err: fmt.Errorf("чистый прогон пропущен: старый контейнер ещё жив: %w", err)}
 		}
 
-		outcome, err := runner.CleanRun(cctx, s.d, s.spec, s.steps, s.owner, s.log, s.log, s.em)
+		lb := s.logBuf()
+		outcome, err := runner.CleanRun(cctx, s.d, s.spec, s.steps, s.owner, lb, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runClean, err: context.Canceled}
@@ -487,11 +554,13 @@ func (s *Session) CleanCmd(ctx context.Context) tea.Cmd {
 			return runFinishedMsg{kind: runClean, outcome: outcome, err: err}
 		}
 		if err := runner.InstallRetry(context.Background(), c, s.steps, outcome.FailedIndex); err != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
+			lb.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
 		}
 
-		s.ownerRestored = false
-		s.c = c
+		s.setContainer(c)
+		s.mu.Lock()
+		s.last = lastExecuted(outcome, 0)
+		s.mu.Unlock()
 		s.outcome = outcome
 
 		return runFinishedMsg{kind: runClean, outcome: outcome}
@@ -540,13 +609,17 @@ type captureFailedMsg struct {
 // чтение, отменять их нечем и незачем.
 func (s *Session) CaptureCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		patch, notes, err := repo.Capture(context.Background(), s.code.Dir, s.ref.Host, s.ref.ProjectPath, s.job.ID, s.job.CommitSHA)
+		codeDir := s.checkoutDir()
+		if codeDir == "" {
+			return captureFailedMsg{reason: errNotReady.Error(), err: errNotReady}
+		}
+		patch, notes, err := repo.Capture(context.Background(), codeDir, s.ref.Host, s.ref.ProjectPath, s.job.ID, s.job.CommitSHA)
 		// Печатается в лог независимо от исхода ниже, тем же порядком, что и
 		// в обычном режиме (cmd/ci/main.go): отказ регистрации новых файлов
 		// значит, что созданные человеком файлы в патч не попали — и когда
 		// патч всё равно сохранён, и когда разницы не нашлось вовсе.
 		if notes.UntrackedErr != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s — созданные вами файлы (ещё не отслеживаемые git) в патч не попали", notes.UntrackedErr))
+			s.note(fmt.Sprintf("предупреждение: %s — созданные вами файлы (ещё не отслеживаемые git) в патч не попали", notes.UntrackedErr))
 		}
 		if err != nil {
 			if errors.Is(err, repo.ErrNoChanges) {
@@ -655,7 +728,11 @@ func (s *Session) CommitCmd(ctx context.Context, message string) tea.Cmd {
 // поднялся (контейнер уже снят, демон перезапустился); различение сделано в
 // доменном пакете (Container.ShellCommand/Shell) и здесь не переоткрывается.
 func (s *Session) ShellCmd(ctx context.Context) tea.Cmd {
-	cmd, err := s.c.ShellCommand(ctx)
+	c := s.container()
+	if c == nil {
+		return func() tea.Msg { return shellFinishedMsg{err: errNotReady} }
+	}
+	cmd, err := c.ShellCommand(ctx)
 	if err != nil {
 		return func() tea.Msg { return shellFinishedMsg{err: err} }
 	}
@@ -701,17 +778,22 @@ func (s *Session) EditSecretsCmd(ctx context.Context) tea.Cmd {
 	})
 }
 
-// RestartCmd возвращает владельца файлов, снимает текущий контейнер и
-// повторяет подготовку тем же вызовом, что и первый раз: переменные
-// попадают в контейнер только при его создании, поэтому отредактированные
-// секреты доезжают только через новый контейнер. Обслуживает все действия
-// повтора проводника — второго места перезапуска подготовки не появляется.
+// RestartCmd отменяет идущую операцию, возвращает владельца файлов, снимает
+// текущий контейнер и повторяет подготовку тем же вызовом, что и первый раз:
+// переменные попадают в контейнер только при его создании, поэтому
+// отредактированные секреты доезжают только через новый контейнер.
+// Обслуживает все действия повтора проводника — второго места перезапуска
+// подготовки не появляется.
+//
+// Отмена идёт ПЕРВОЙ строкой (WR-12 обзора v0.3.0): без неё повтор, нажатый
+// поверх идущей подготовки или прогона шагов, сносил бы контейнер из-под
+// работающего docker exec и запускал бы вторую подготовку поверх первой —
+// обе писали бы одни и те же поля сессии.
 func (s *Session) RestartCmd(ctx context.Context) tea.Cmd {
+	s.Cancel()
 	s.restoreOwner(context.Background())
-	if s.c != nil {
-		if err := s.c.Remove(context.Background()); err != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s", err))
-		}
+	if err := s.removeContainer(context.Background()); err != nil {
+		s.note(fmt.Sprintf("предупреждение: %s", err))
 	}
 	return s.PrepareCmd(ctx)
 }
@@ -737,13 +819,20 @@ type execDoneMsg struct {
 // сохраняется.
 func (s *Session) ExecCmd(ctx context.Context, command string) tea.Cmd {
 	return func() tea.Msg {
+		c := s.container()
+		if c == nil {
+			s.note("предупреждение: " + errNotReady.Error())
+			return execDoneMsg{code: -1}
+		}
+
 		ctx, cancel := context.WithCancel(ctx)
 		s.setCancel(cancel)
 		defer s.clearCancel()
 
-		code, err := s.c.Exec(ctx, command, s.log, s.log)
+		lb := s.logBuf()
+		code, err := c.Exec(ctx, command, lb, lb)
 		if err != nil && ctx.Err() == nil {
-			s.log.note("предупреждение: " + err.Error())
+			lb.note("предупреждение: " + err.Error())
 		}
 		return execDoneMsg{code: code}
 	}
@@ -801,7 +890,7 @@ type imageSwapFailedMsg struct {
 //  5. проба оболочки и установка команды перезапуска в новый контейнер —
 //     иначе человек, вошедший в него, потеряет знание об упавшем шаге.
 func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
-	if s.c == nil {
+	if s.container() == nil {
 		// Контейнера ещё нет — подготовка сорвалась на выборе образа
 		// (конфиг с extends, Фаза 11, GUIDE-05): второй точки выбора образа
 		// в интерфейсе не появляется, образ только запоминается, и
@@ -810,6 +899,9 @@ func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
 		return s.PrepareCmd(ctx)
 	}
 	return func() tea.Msg {
+		if s.container() == nil {
+			return imageSwapFailedMsg{reason: errNotReady.Error()}
+		}
 		cctx, cancel := context.WithCancel(ctx)
 		s.setCancel(cancel)
 		defer s.clearCancel()
@@ -820,13 +912,8 @@ func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
 			return imageSwapFailedMsg{reason: err.Error()}
 		}
 
-		if s.owner != "" && !s.ownerRestored {
-			s.ownerRestored = true
-			if err := s.c.Chown(context.Background(), s.owner, s.spec.WorkDir); err != nil {
-				s.log.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
-			}
-		}
-		if err := s.c.Remove(context.Background()); err != nil {
+		s.restoreOwner(context.Background())
+		if err := s.removeContainer(context.Background()); err != nil {
 			return imageSwapFailedMsg{reason: fmt.Sprintf("подмена образа отменена: старый контейнер ещё жив: %s", err)}
 		}
 
@@ -839,12 +926,11 @@ func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
 			return imageSwapFailedMsg{reason: err.Error()}
 		}
 		if err := runner.InstallRetry(context.Background(), c, s.steps, s.outcome.FailedIndex); err != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
+			s.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
 		}
 
-		s.ownerRestored = false
+		s.setContainer(c)
 		s.img = choice
-		s.c = c
 
 		return imageSwappedMsg{image: choice.Ref}
 	}
@@ -855,36 +941,63 @@ func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
 // ничего не делает. Вызывается и из Close, и из CleanCmd (задача 3) перед
 // снятием первого контейнера.
 func (s *Session) restoreOwner(ctx context.Context) {
+	s.mu.Lock()
 	if s.owner == "" || s.ownerRestored || s.c == nil {
+		s.mu.Unlock()
 		return
 	}
 	s.ownerRestored = true
-	if err := s.c.Chown(ctx, s.owner, s.spec.WorkDir); err != nil {
-		s.log.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
+	c, owner, workDir := s.c, s.owner, s.spec.WorkDir
+	s.mu.Unlock()
+
+	if err := c.Chown(ctx, owner, workDir); err != nil {
+		s.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
 	}
 }
 
 // Close — уборка в том же порядке, что и разворачивание отложенных вызовов
-// обычного режима: возврат владельца файлов, снятие контейнера, снятие
-// материализованных файловых переменных, снятие подготовленного кода. Всё —
-// фоновым контекстом: отменённый основной контекст не должен помешать
-// уборке.
+// обычного режима: отмена идущей операции, возврат владельца файлов, снятие
+// контейнера, снятие материализованных файловых переменных, снятие
+// подготовленного кода. Всё — фоновым контекстом: отменённый основной
+// контекст не должен помешать уборке.
+//
+// Отмена идёт ПЕРВОЙ (CR-02 обзора v0.3.0): без неё выход во время
+// подготовки не останавливал бы её, и она досоздавала бы контейнер, чекаут и
+// каталог файловых переменных уже после того, как убирать их стало некому.
+// Повторный вызов ничего не делает (флаг closed) — Close зовётся и с экрана,
+// и после завершения программы (internal/ui/app.go, Run).
 func (s *Session) Close() {
+	s.Cancel()
+
 	ctx := context.Background()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.mu.Unlock()
+
 	s.restoreOwner(ctx)
-	if s.c != nil {
-		if err := s.c.Remove(ctx); err != nil && s.log != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s", err))
+
+	s.mu.Lock()
+	c, fv, code := s.c, s.fv, s.code
+	s.c, s.fv, s.code = nil, nil, nil
+	s.mu.Unlock()
+
+	if c != nil {
+		if err := c.Remove(ctx); err != nil {
+			s.note(fmt.Sprintf("предупреждение: %s", err))
 		}
 	}
-	if s.fv != nil {
-		if err := s.fv.Remove(); err != nil && s.log != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s", err))
+	if fv != nil {
+		if err := fv.Remove(); err != nil {
+			s.note(fmt.Sprintf("предупреждение: %s", err))
 		}
 	}
-	if s.code != nil {
-		if err := s.code.Remove(ctx); err != nil && s.log != nil {
-			s.log.note(fmt.Sprintf("предупреждение: %s", err))
+	if code != nil {
+		if err := code.Remove(ctx); err != nil {
+			s.note(fmt.Sprintf("предупреждение: %s", err))
 		}
 	}
 }
@@ -898,6 +1011,93 @@ func (s *Session) Cancel() {
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+// Ready — единственный предикат готовности сессии в проекте: контейнер
+// поднят и код материализован. Экран джобы требует его в canRun, а команды
+// сессии проверяют своё же условие сами (errNotReady) — экран не
+// единственный вход в сессию (CR-03 обзора v0.3.0).
+func (s *Session) Ready() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.c != nil && s.code != nil
+}
+
+// LastStep — абсолютный номер последнего исполненного шага (0, пока не
+// исполнялось ничего).
+func (s *Session) LastStep() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+// container отдаёт текущий контейнер под мьютексом; nil означает «подготовка
+// сорвалась или контейнер только что снят».
+func (s *Session) container() *runner.Container {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.c
+}
+
+// setContainer заменяет контейнер сессии и сбрасывает признак возврата
+// владельца: у нового контейнера файлы ещё не возвращались, а снятому
+// контейнеру возвращать уже нечем.
+func (s *Session) setContainer(c *runner.Container) {
+	s.mu.Lock()
+	s.c = c
+	s.ownerRestored = false
+	s.mu.Unlock()
+}
+
+// removeContainer снимает контейнер и обнуляет поле СРАЗУ после успешного
+// снятия — состояние сессии обязано быть честным и на пути отказа, иначе
+// следующие команды работают против уже снятого контейнера (WR-01 обзора
+// v0.3.0). Отсутствие контейнера — не ошибка.
+func (s *Session) removeContainer(ctx context.Context) error {
+	c := s.container()
+	if c == nil {
+		return nil
+	}
+	if err := c.Remove(ctx); err != nil {
+		return err
+	}
+	s.setContainer(nil)
+	return nil
+}
+
+// checkoutDir — каталог материализованного кода джобы; пусто, пока
+// подготовка его не создала.
+func (s *Session) checkoutDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.code == nil {
+		return ""
+	}
+	return s.code.Dir
+}
+
+// logBuf отдаёт буфер лога под мьютексом; nil, пока PrepareCmd не собрал
+// окружение.
+func (s *Session) logBuf() *logBuffer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.log
+}
+
+// setLog ставит буфер лога — пишет его горутина подготовки, читает горутина
+// Bubble Tea (Log ниже).
+func (s *Session) setLog(l *logBuffer) {
+	s.mu.Lock()
+	s.log = l
+	s.mu.Unlock()
+}
+
+// note — служебная строка в буфер лога, безопасная до того, как буфер
+// собран: до сборки окружения писать некуда, и это не повод падать.
+func (s *Session) note(line string) {
+	if l := s.logBuf(); l != nil {
+		l.note(line)
 	}
 }
 
@@ -923,10 +1123,11 @@ func (s *Session) patchPath() string {
 // PrepareCmd ещё не собрал окружение (маскирующие пары нужны буферу с
 // первой строки).
 func (s *Session) Log() []string {
-	if s.log == nil {
+	l := s.logBuf()
+	if l == nil {
 		return nil
 	}
-	return s.log.Lines()
+	return l.Lines()
 }
 
 // logBufferLines — предел ограниченного буфера лога джобы: сколько

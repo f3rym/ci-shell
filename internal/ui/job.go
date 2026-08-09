@@ -80,8 +80,12 @@ const logPanelLines = 14
 // фикса.
 type jobModel struct {
 	session *Session
-	theme   Theme
-	keys    KeyMap
+	// sessionGen — поколение сессии этого экрана: события чужих поколений
+	// (мост предыдущей джобы остаётся подключённым к программе)
+	// отбрасываются в update (WR-05 обзора v0.3.0).
+	sessionGen int
+	theme      Theme
+	keys       KeyMap
 
 	stepRows []stepRow
 	envRows  []envRow
@@ -166,16 +170,17 @@ type jobModel struct {
 }
 
 // newJobModel строит модель экрана джобы поверх уже собранной сессии.
-func newJobModel(session *Session, theme Theme, keys KeyMap) jobModel {
+func newJobModel(session *Session, gen int, theme Theme, keys KeyMap) jobModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return jobModel{
-		session: session,
-		theme:   theme,
-		keys:    keys,
-		cursor:  -1,
-		phase:   phasePreparing,
-		spin:    sp,
+		session:    session,
+		sessionGen: gen,
+		theme:      theme,
+		keys:       keys,
+		cursor:     -1,
+		phase:      phasePreparing,
+		spin:       sp,
 	}
 }
 
@@ -243,6 +248,12 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		return m, nil
 
 	case EventMsg:
+		// Событие чужого поколения — от сессии предыдущей джобы, чей мост
+		// всё ещё подключён к программе: применять его к этому экрану значит
+		// мигать «тяну образ» и двигать статусы шагов чужой джобы (WR-05).
+		if msg.Gen != m.sessionGen {
+			return m, nil
+		}
 		return m.applyEvent(msg.Event), nil
 
 	case shellHandoffMsg:
@@ -401,7 +412,11 @@ func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
 			return m.startRun(runRetry)
 		}
 	case "rest":
-		if m.canRun() && m.session.outcome.Failed != nil {
+		// Условия «упал хоть один шаг» здесь больше нет: после успешного
+		// перезапуска упавшего шага нет, а прогнать оставшиеся всё ещё надо —
+		// ровно это в этот момент и советует HintStepFixed (WR-07). Есть ли
+		// что прогонять, решает сама сессия (RestCmd, errNoStepsAfter).
+		if m.canRun() {
 			return m.startRun(runRest)
 		}
 	case "clean":
@@ -420,13 +435,21 @@ func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
 		// Тот же обработчик, что и подтверждение экрана недостающих
 		// значений (guideDoneMsg{Action: actionEditSecrets}, Фаза 11,
 		// GUIDE-03) — второго места запуска редактора не появляется.
-		return m, m.session.EditSecretsCmd(context.Background())
+		// Занятость проверяется как и у соседних веток (WR-12): редактор
+		// забирает терминал, а фоновая операция продолжала бы писать в лог.
+		if m.idle() {
+			return m, m.session.EditSecretsCmd(context.Background())
+		}
 	case "pull":
-		return m, m.session.PullCmd(context.Background())
+		if m.idle() {
+			return m, m.session.PullCmd(context.Background())
+		}
 	case "env":
 		return m.startEnvScreen()
 	case "q":
-		return m, tea.Quit
+		// Выход идёт через корневую модель: только она знает про уборку
+		// сессии (internal/ui/app.go, quitCmd) — CR-01.
+		return m, func() tea.Msg { return quitMsg{} }
 	}
 	return m, nil
 }
@@ -454,6 +477,17 @@ func (m jobModel) startEnvScreen() (jobModel, tea.Cmd) {
 // 11): каждое действие ведёт к той же функции сессии, что и первый её
 // запуск — второго места не появляется ни для одной из них.
 func (m jobModel) applyGuideDone(msg guideDoneMsg) (jobModel, tea.Cmd) {
+	// Ответ проводника не принимается, пока экран занят операцией, которую
+	// повтор подготовки снёс бы из-под ног (WR-12): RestartCmd снимает
+	// контейнер и запускает подготовку заново — поверх идущего прогона это
+	// два PrepareCmd одновременно и снос контейнера из-под работающего
+	// docker exec. Фаза подготовки в список занятости здесь НЕ входит
+	// намеренно: проводник и открывается из сорвавшейся подготовки, и его
+	// ответ обязан дойти.
+	if !m.guideActionable() {
+		return m, nil
+	}
+
 	switch msg.Action {
 	case actionSaveToken:
 		host := m.session.ref.Host
@@ -465,12 +499,20 @@ func (m jobModel) applyGuideDone(msg guideDoneMsg) (jobModel, tea.Cmd) {
 		m.blockedCanceled = true
 		m.phase = phasePreparing
 		return m, m.session.RestartCmd(context.Background())
-	case actionSaveDataDir, actionRetryPrepare:
+	case actionSaveDataDir:
+		// Сохранённый каталог данных подтверждается человеку баннером, а не
+		// молчанием: контракт фазы 11 требует сообщить о смене (WR-10).
+		m.banner = HintDataDirSaved(msg.Value)
+		m.blockedCanceled = true
+		m.phase = phasePreparing
+		return m, m.session.RestartCmd(context.Background())
+	case actionRetryPrepare:
 		m.phase = phasePreparing
 		return m, m.session.RestartCmd(context.Background())
 	case actionSetImage:
 		m.swapping = true
-		m.banner = ""
+		m.banner = HintImageSet(msg.Value)
+		m.blockedCanceled = true
 		return m, m.session.SwapImageCmd(context.Background(), msg.Value)
 	case actionEditSecrets:
 		return m, m.session.EditSecretsCmd(context.Background())
@@ -525,7 +567,10 @@ func (m jobModel) startExec(command string) (jobModel, tea.Cmd) {
 // командой (Copywriting Contract контракта), поэтому startSwapImage
 // запускается сразу, без промежуточной стадии согласия.
 func (m jobModel) startSwapImage(image string) (jobModel, tea.Cmd) {
-	if !m.canRun() {
+	// Проверяется незанятость, а не готовность: подмена образа осмысленна и
+	// до первого контейнера — сорвавшуюся на образе подготовку она повторяет
+	// с новым образом (SwapImageCmd, Фаза 11, GUIDE-05).
+	if !m.idle() {
 		return m, nil
 	}
 	m.swapping = true
@@ -584,16 +629,37 @@ func (m jobModel) applyRunFinished(msg runFinishedMsg) jobModel {
 	return m
 }
 
-// canRun истинно, когда экран не занят другой долгой операцией (подготовка,
-// передача терминала, уже идущий прогон, подмена образа, выполнение
-// произвольной команды) — только тогда петля фикса может принять новую
-// команду.
-func (m jobModel) canRun() bool {
+// idle истинно, когда экран не занят долгой операцией (подготовка, передача
+// терминала, уже идущий прогон, подмена образа, выполнение произвольной
+// команды). Про готовность сессии idle ничего не утверждает — это делает
+// canRun ниже.
+func (m jobModel) idle() bool {
 	switch m.phase {
 	case phasePreparing, phaseHandingTerminal, phaseRunning:
 		return false
 	}
 	return !m.swapping && !m.execRunning
+}
+
+// guideActionable — можно ли принять ответ экрана проводника: занятость без
+// фазы подготовки (см. applyGuideDone).
+func (m jobModel) guideActionable() bool {
+	switch m.phase {
+	case phaseHandingTerminal, phaseRunning:
+		return false
+	}
+	return !m.swapping && !m.execRunning
+}
+
+// canRun истинно, когда экран не занят другой долгой операцией И сессия
+// действительно готова — контейнер поднят, код материализован. Одной
+// незанятости мало: после сорвавшейся подготовки экран уходит в
+// phaseBlocked, где занятости нет, а контейнера и чекаута ещё нет тоже, и
+// команды вроде :clean, :!<команда> и A разыменовывали бы nil прямо в
+// горутине команды — то есть вне единственного перехвата проекта (CR-03
+// обзора v0.3.0).
+func (m jobModel) canRun() bool {
+	return m.idle() && m.session.Ready()
 }
 
 // startRun запускает один из трёх прогонов задачи 3 по виду kind — единый
@@ -612,7 +678,10 @@ func (m jobModel) startRun(kind runKind) (jobModel, tea.Cmd) {
 		return m, m.session.RetryStepCmd(context.Background())
 	case runRest:
 		m.runLabel = RunLabelRest
-		m.runOffset = m.session.outcome.FailedIndex
+		// Смещение — номер последнего исполненного шага, то же, что возьмёт
+		// сама RestCmd: после успешного перезапуска упавшего шага уже нет
+		// (WR-07).
+		m.runOffset = m.session.LastStep()
 		return m, m.session.RestCmd(context.Background())
 	case runClean:
 		m.runLabel = RunLabelClean
@@ -698,7 +767,11 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		m.cmd.active = true
 		return m, textinput.Blink
 
-	case key.Matches(msg, m.keys.Shell) && m.phase == phaseImageReady:
+	// Вход в шелл висит на готовности сессии, а не на одной фазе (WR-08
+	// обзора v0.3.0): после первого выхода фаза становится phaseLeftShell,
+	// после R — phaseStepFixed/phaseStepStillFails, и подсказки этих самых
+	// фаз прямо велят «вернитесь в контейнер (s)».
+	case key.Matches(msg, m.keys.Shell) && m.canRun():
 		// Нажатие НЕ возвращает механизм передачи терминала сразу: сначала
 		// фаза переводится в phaseHandingTerminal, и возвращается команда,
 		// немедленно шлющая shellHandoffMsg — она гарантирует, что кадр с

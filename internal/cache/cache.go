@@ -30,14 +30,20 @@ var ErrUnavailable = errors.New("не удалось определить кат
 // ErrInvalidDir — введённый или сохранённый каталог данных не годится.
 var ErrInvalidDir = errors.New("каталог данных не годится")
 
-// baseOnce/baseVal/baseErr — однократно вычисленная база каталога данных
-// (Base ниже). Reload сбрасывает вычисление — им пользуется ровно один
-// вызывающий: экран проводника, только что записавший новый каталог в
+// baseMu/baseSet/baseVal/baseErr — однократно вычисленная база каталога
+// данных (Base ниже). Reload сбрасывает вычисление — им пользуется ровно
+// один вызывающий: экран проводника, только что записавший новый каталог в
 // настройки и обязанный повторить подготовку уже с ним.
+//
+// Состояние закрыто мьютексом, а не sync.Once: сброс пересозданием Once
+// (baseOnce = sync.Once{}) — гонка сам по себе, а Base зовётся из горутины
+// подготовки сессии в тот же момент, когда экран проводника сбрасывает
+// вычисление из горутины Bubble Tea (WR-04 обзора v0.3.0).
 var (
-	baseOnce sync.Once
-	baseVal  string
-	baseErr  error
+	baseMu  sync.Mutex
+	baseSet bool
+	baseVal string
+	baseErr error
 )
 
 // ValidDir — единственная проверка пути каталога данных в проекте.
@@ -71,11 +77,12 @@ func ValidDir(p string) error {
 	return nil
 }
 
-// computeBase вычисляет базу каталога данных ровно один раз (см. Base):
-// сохранённая настройка, если она непуста и прошла ValidDir, иначе
+// computeBaseLocked вычисляет базу каталога данных ровно один раз (см.
+// Base): сохранённая настройка, если она непуста и прошла ValidDir, иначе
 // XDG_CACHE_HOME, иначе HOME с подкаталогом .cache — в обоих последних
-// случаях к базе дописывается подкаталог ci-shell (Base ниже).
-func computeBase() {
+// случаях к базе дописывается подкаталог ci-shell (Base ниже). Вызывающий
+// обязан держать baseMu.
+func computeBaseLocked() {
 	settings, _, err := config.Load()
 	if err != nil {
 		baseErr = err
@@ -109,7 +116,12 @@ func computeBase() {
 // когда она вычислена формулой по умолчанию, подкаталог ci-shell
 // добавляется, как и раньше.
 func Base() (string, error) {
-	baseOnce.Do(computeBase)
+	baseMu.Lock()
+	defer baseMu.Unlock()
+	if !baseSet {
+		computeBaseLocked()
+		baseSet = true
+	}
 	return baseVal, baseErr
 }
 
@@ -117,9 +129,9 @@ func Base() (string, error) {
 // вызывающему: экрану проводника, только что записавшему новый каталог
 // данных в настройки.
 func Reload() {
-	baseOnce = sync.Once{}
-	baseVal = ""
-	baseErr = nil
+	baseMu.Lock()
+	defer baseMu.Unlock()
+	baseSet, baseVal, baseErr = false, "", nil
 }
 
 // Suggested — предлагаемый нескрытый каталог данных: HOME с подкаталогом
