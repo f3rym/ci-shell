@@ -15,7 +15,10 @@
 package ui
 
 import (
+	"os"
+
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/f3rym/ci-shell/internal/term"
 )
@@ -61,14 +64,19 @@ func DetectCaps() Caps {
 	if term.ColorDisabled() {
 		return Caps{Profile: ProfileMono, Dark: true}
 	}
-	switch lipgloss.ColorProfile() {
-	case lipgloss.TrueColor:
+	// В v2 определение профиля живёт в отдельном пакете colorprofile, а не
+	// в самой библиотеке отрисовки: профиль выводится из потока вывода и
+	// окружения (TERM, COLORTERM, tmux), поэтому оба и передаются.
+	switch colorprofile.Detect(os.Stdout, os.Environ()) {
+	case colorprofile.TrueColor:
 		return Caps{Profile: ProfileTrueColor, Dark: true}
-	case lipgloss.ANSI256:
+	case colorprofile.ANSI256:
 		return Caps{Profile: ProfileANSI256, Dark: true}
-	case lipgloss.ANSI:
+	case colorprofile.ANSI:
 		return Caps{Profile: ProfileANSI, Dark: true}
 	default:
+		// Ascii, NoTTY и Unknown — цвета нет: символ и начертание несут
+		// состояние сами (09-UI-SPEC.md, «символ первичен»).
 		return Caps{Profile: ProfileMono, Dark: true}
 	}
 }

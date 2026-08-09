@@ -449,12 +449,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 // которого что-то дорисовалось — контракт «Вход и выход» (09-UI-SPEC.md)
 // требует полной перерисовки везде, где кадр мог остаться недорисованным,
 // и паника внутри viewInner — ровно такой случай.
+// Полноэкранный режим в Bubble Tea v2 объявляется кадром, а не опцией
+// программы: AltScreen — поле возвращаемого View. Выход из режима
+// библиотека делает сама при завершении программы.
 func (a App) View() tea.View {
 	var out string
 	if err := guard(func() { out = a.viewInner() }); err != nil {
-		return tea.NewView(PanicFrame(a.theme, a.width, a.height))
+		v := tea.NewView(PanicFrame(a.theme, a.width, a.height))
+		v.AltScreen = true
+		return v
 	}
-	return tea.NewView(out)
+	v := tea.NewView(out)
+	v.AltScreen = true
+	return v
 }
 
 // viewInner собирает кадр экрана. Раскладка кадра общая для всех экранов и
@@ -565,7 +572,7 @@ func Run(ctx context.Context) error {
 		keys:   DefaultKeys(),
 		splash: newSplashModel(),
 	}
-	p := tea.NewProgram(app, tea.WithContext(ctx), tea.WithAltScreen())
+	p := tea.NewProgram(app, tea.WithContext(ctx))
 	// Функция отправки существует только теперь — раньше программы не
 	// было. Мост событий экрана джобы (internal/ui/bridge.go) подключается
 	// к ней при первом открытии джобы (App.Update, openJobMsg).
