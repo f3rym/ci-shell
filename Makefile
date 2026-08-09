@@ -6,7 +6,10 @@
 #   make linux            — linux amd64 + arm64
 #   make windows          — windows amd64
 #   make all              — все платформы разом
+#   make deps             — пересобрать go.sum (go mod tidy, ходит в сеть)
 #   make clean            — убрать dist/ и ./ci
+#
+# go.sum создаётся автоматически перед первой сборкой — отдельно звать deps не надо.
 
 BINARY      := ci
 PKG         := ./cmd/ci
