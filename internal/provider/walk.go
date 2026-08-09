@@ -32,7 +32,7 @@ func All[T any](ctx context.Context, size int, fetch func(context.Context, PageR
 	var items []T
 	var cursor Cursor
 
-	for page := 0; page < MaxPages; page++ {
+	for fetched := 0; fetched < MaxPages; fetched++ {
 		if err := ctx.Err(); err != nil {
 			return Walk[T]{}, err
 		}
