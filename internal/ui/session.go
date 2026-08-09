@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 
@@ -17,7 +16,6 @@ import (
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
-	"github.com/f3rym/ci-shell/internal/render"
 	"github.com/f3rym/ci-shell/internal/repo"
 	"github.com/f3rym/ci-shell/internal/runner"
 	"github.com/f3rym/ci-shell/internal/token"
@@ -205,10 +203,11 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		// называет их число и команду ci secrets по e.Missing.
 
 		// Ограниченный буфер лога собирается здесь, сразу после сборки
-		// окружения: маскирующие пары нужны ему уже к первой строке вывода
-		// тяги образа, которая пойдёт в него ниже.
-		maskFrom, maskTo := buildMask(e)
-		s.log = newLogBuffer(logBufferLines, maskFrom, maskTo)
+		// окружения: маска нужна ему уже к первой строке вывода тяги образа,
+		// которая пойдёт в него ниже. buildSecretMask — единственный
+		// маскировщик проекта (internal/ui/mask.go, Фаза 10), общий с
+		// панелью лога настоящего прогона (internal/ui/joblog.go).
+		s.log = newLogBuffer(logBufferLines, buildSecretMask(e))
 
 		// Каталог чекаута — та же неинтерактивная функция, что раскрывает
 		// настроенный каталог обычному режиму (cache.CheckoutBase): вопрос в
@@ -824,11 +823,6 @@ func (s *Session) Log() []string {
 // последних строк вывода шагов и тяги образа он хранит.
 const logBufferLines = 4000
 
-// minMaskLength — порог длины маскируемого значения: короче него значения в
-// список маскирования не попадают — замена односимвольного значения сделала
-// бы весь вывод нечитаемым и ничего бы не защитила.
-const minMaskLength = 4
-
 // logBuffer — io.Writer поверх ограниченного буфера строк в памяти: реализует
 // запись, хранит последние строки до logBufferLines и отдаёт их целиком
 // (Lines). Буфер живёт только в памяти и никогда не сохраняется на диск: вывод
@@ -840,56 +834,15 @@ type logBuffer struct {
 	limit   int
 	lines   []string
 	partial string
-	// replacer маскирует известные значения переменных при записи, до
-	// попадания строки в память — построен один раз в newLogBuffer из пар,
-	// собранных buildMask.
-	replacer *strings.Replacer
+	// mask маскирует известные значения переменных при записи, до попадания
+	// строки в память — единственный маскировщик проекта (internal/ui/mask.go,
+	// Фаза 10), общий с панелью лога настоящего прогона.
+	mask secretMask
 }
 
-// newLogBuffer строит буфер с пределом limit и заменами known[i] -> ...
-// (значение переменной -> её отображение по единственному решению о показе).
-func newLogBuffer(limit int, maskFrom, maskTo []string) *logBuffer {
-	lb := &logBuffer{limit: limit}
-	if len(maskFrom) > 0 {
-		pairs := make([]string, 0, len(maskFrom)*2)
-		for i := range maskFrom {
-			pairs = append(pairs, maskFrom[i], maskTo[i])
-		}
-		lb.replacer = strings.NewReplacer(pairs...)
-	}
-	return lb
-}
-
-// buildMask собирает пары «известное значение -> чем его заменить» из
-// собранного окружения e: для каждой переменной, чьё отображение по
-// render.DisplayValue НЕ совпадает с её значением (то есть решение её
-// прячет), в список идёт пара из значения и этого отображения. Второго
-// правила сокрытия не заводится: замена берётся у той же функции, что рисует
-// панель окружения. Пустые и короче minMaskLength значения не попадают в
-// список; пары упорядочены от длинного значения к короткому, чтобы значение,
-// целиком входящее в другое, не рвало замену на части.
-func buildMask(e env.Environment) (from, to []string) {
-	type pair struct{ value, display string }
-	var pairs []pair
-	for _, v := range e.Vars {
-		if len(v.Value) < minMaskLength {
-			continue
-		}
-		display := render.DisplayValue(v)
-		if display == v.Value {
-			continue
-		}
-		pairs = append(pairs, pair{value: v.Value, display: display})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return len(pairs[i].value) > len(pairs[j].value) })
-
-	from = make([]string, len(pairs))
-	to = make([]string, len(pairs))
-	for i, p := range pairs {
-		from[i] = p.value
-		to[i] = p.display
-	}
-	return from, to
+// newLogBuffer строит буфер с пределом limit и маской mask.
+func newLogBuffer(limit int, mask secretMask) *logBuffer {
+	return &logBuffer{limit: limit, mask: mask}
 }
 
 // Write реализует io.Writer: маскирует известные значения, копит неполные
@@ -898,10 +851,7 @@ func (l *logBuffer) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	s := string(p)
-	if l.replacer != nil {
-		s = l.replacer.Replace(s)
-	}
+	s := l.mask.Replace(string(p))
 	l.partial += s
 	for {
 		i := strings.IndexByte(l.partial, '\n')
