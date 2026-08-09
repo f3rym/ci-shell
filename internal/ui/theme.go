@@ -6,10 +6,11 @@ package ui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // Сетка в целых ячейках терминала (09-UI-SPEC.md, «Сетка и раскладка»).
@@ -110,6 +111,30 @@ const LogPanelLines = 6
 // общей функции.
 const StatusFailed = "failed"
 
+// Пары значений палитры для тёмного и светлого фона — ровно из таблицы
+// «Цвет» контракта (09-UI-SPEC.md, все десять значений дословно). Значение
+// цвета в этом файле не применяется ни разу — константы только передаются в
+// единственную функцию применения цвета ((Caps) style, internal/ui/color.go)
+// ниже, в NewTheme. Это инвариант, а не стилистика: применить цвет в обход
+// той функции значило бы завести вторую точку решения, и монохром перестал
+// бы выключать его разом для всех ролей (T-12-05).
+const (
+	accentLight = "#0087AF"
+	accentDark  = "#5FD7FF"
+
+	mutedLight = "#6C6C6C"
+	mutedDark  = "#808080"
+
+	dangerLight = "#AF0000"
+	dangerDark  = "#FF5F5F"
+
+	warningLight = "#875F00"
+	warningDark  = "#D7AF00"
+
+	borderLight = "#BCBCBC"
+	borderDark  = "#444444"
+)
+
 // Theme — стили по ролям, ровно по таблице «Цвет» контракта.
 type Theme struct {
 	// Text — обычный текст: собственного цвета не задаёт, наследуется от
@@ -140,47 +165,44 @@ type Theme struct {
 	HintText lipgloss.Style
 }
 
-// NewTheme собирает Theme для тёмного (dark=true) или светлого фона
-// терминала.
+// NewTheme собирает Theme для возможностей терминала c (Фаза 12, POL-01):
+// профиль цвета и признак тёмного фона, а не голый bool фона, как раньше —
+// возможности решают ещё и вопрос «применять ли цвет вообще» (см.
+// internal/ui/color.go, DetectCaps).
 //
-// Lip Gloss v2 заменил тип AdaptiveColor v1 функцией-селектором LightDark:
-// контракт «каждая роль задаётся парой значений для светлого и тёмного
-// фона, деградацию профиля цвета библиотека берёт на себя» соблюдается
-// буквально — меняется только механизм выбора (вызов вместо поля
-// структуры), не дизайнерское решение.
-func NewTheme(dark bool) Theme {
-	pick := lipgloss.LightDark(dark)
-
-	accent := pick(lipgloss.Color("#0087AF"), lipgloss.Color("#5FD7FF"))
-	muted := pick(lipgloss.Color("#6C6C6C"), lipgloss.Color("#808080"))
-	danger := pick(lipgloss.Color("#AF0000"), lipgloss.Color("#FF5F5F"))
-	warning := pick(lipgloss.Color("#875F00"), lipgloss.Color("#D7AF00"))
-	border := pick(lipgloss.Color("#BCBCBC"), lipgloss.Color("#444444"))
-
+// Каждая цветная роль — одна строка литерала структуры вида «роль:
+// применение цвета к паре констант, затем начертания» — значение цвета
+// здесь не встречается ни разу, только константа передаётся единственной
+// функции применения ((Caps) style). Обязательные начертания — по
+// монохромной колонке контракта, потому что без цвета остаются только они:
+// роль отказа жирная, роль приглушённого тусклая, роль предупреждения
+// подчёркнутая, роль выделенной строки — инверсия видео. Курсив не
+// применяется ни к одной роли — контракт прямо запрещает его как
+// непредсказуемое в Windows-эмуляторах терминала (09-UI-SPEC.md,
+// «Типографика»).
+func NewTheme(c Caps) Theme {
 	return Theme{
-		Text:  lipgloss.NewStyle(),
-		Muted: lipgloss.NewStyle().Foreground(muted).Faint(true),
+		// Text — обычного цвета не задаёт, наследуется от терминала.
+		Text: lipgloss.NewStyle(),
 		// Роль «успех» собственного цвета не имеет намеренно: GlyphOK
 		// рисуется обычным текстовым стилем (Text) — осознанное отличие от
 		// типичных TUI, где успех зелёный (09-UI-SPEC.md, правило 3
 		// палитры).
-		Accent:  lipgloss.NewStyle().Foreground(accent),
-		Danger:  lipgloss.NewStyle().Bold(true).Foreground(danger),
-		Warning: lipgloss.NewStyle().Underline(true).Foreground(warning),
-		Border:  lipgloss.NewStyle().Foreground(border),
+		Muted:   c.style(mutedLight, mutedDark).Faint(true),
+		Accent:  c.style(accentLight, accentDark),
+		Danger:  c.style(dangerLight, dangerDark).Bold(true),
+		Warning: c.style(warningLight, warningDark).Underline(true),
+		Border:  c.style(borderLight, borderDark),
 		// Selected — инверсия видео, не конкретный цвет: инверсия
 		// использует собственные цвета терминала и потому читается на
-		// любом фоне без нашего выбора конкретного hex.
+		// любом фоне и в монохроме без нашего выбора конкретного hex.
 		Selected:    lipgloss.NewStyle().Reverse(true),
 		ScreenTitle: lipgloss.NewStyle().Bold(true),
-		PanelTitle:  lipgloss.NewStyle().Bold(true).Foreground(muted).Faint(true),
-		KeyCap:      lipgloss.NewStyle().Bold(true).Foreground(accent),
-		KeyDesc:     lipgloss.NewStyle().Foreground(muted).Faint(true),
+		PanelTitle:  c.style(mutedLight, mutedDark).Bold(true).Faint(true),
+		KeyCap:      c.style(accentLight, accentDark).Bold(true),
+		KeyDesc:     c.style(mutedLight, mutedDark).Faint(true),
 		HintText:    lipgloss.NewStyle().Bold(true),
 	}
-	// Начертание «курсив» не применяется ни к одной роли выше — контракт
-	// прямо запрещает его как непредсказуемое в Windows-эмуляторах терминала
-	// (09-UI-SPEC.md, «Типографика»).
 }
 
 // StatusGlyph возвращает символ статуса status ровно по таблице «Символы
@@ -206,7 +228,12 @@ func StatusGlyph(status string) string {
 
 // StatusStyle возвращает стиль символа статуса status. Правило
 // доступности: символ первичен, цвет — усиление, состояние читается без
-// цвета.
+// цвета. Упавший и отменённый несут один и тот же символ (GlyphFail,
+// StatusGlyph выше) — различает их именно начертание: роль отказа жирная,
+// роль приглушённого тусклая, и в монохроме, где цвет не применяется вовсе,
+// различие остаётся (T-12-06). Если бы отменённый получал роль отказа, без
+// цвета оба статуса стали бы неразличимы — проверяемое следствие правила
+// «символ первичен, цвет — усиление».
 func (t Theme) StatusStyle(status string) lipgloss.Style {
 	switch status {
 	case "created", "pending", "manual":
@@ -229,43 +256,23 @@ func (t Theme) StatusStyle(status string) lipgloss.Style {
 }
 
 // Truncate обрезает s до заданной ширины width в ячейках терминала,
-// добавляя многоточие «…» при обрезке. Ширина считается функцией измерения
-// Lip Gloss (lipgloss.Width) на каждом шаге сборки результата — не длиной
-// байтов и не количеством рун: кириллица и «…», посчитанные не в
-// графемах, уже один раз сломали `%-8s` в internal/render (Фаза 1), и
-// здесь тот же класс дефекта недопустим (09-UI-SPEC.md, «Правило измерения
-// ширины»). Приём обрезки по накоплению переносит идею
-// render.Progress.truncate — только измеритель здесь Lip Gloss, а не
-// []rune.
+// добавляя многоточие «…» при обрезке. Реализация в проекте одна —
+// internal/textwidth, единственная мера ширины на весь проект (Фаза 12,
+// POL-02); здесь только имя, привычное пакету интерфейса. Кириллица и «…»,
+// посчитанные не в графемах, уже один раз сломали `%-8s` в internal/render
+// (Фаза 1), и здесь тот же класс дефекта недопустим (09-UI-SPEC.md,
+// «Правило измерения ширины»).
 func Truncate(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= width {
-		return s
-	}
-	if width == 1 {
-		return "…"
-	}
-	var b strings.Builder
-	for _, r := range s {
-		candidate := b.String() + string(r)
-		if lipgloss.Width(candidate)+1 > width {
-			break
-		}
-		b.WriteRune(r)
-	}
-	return b.String() + "…"
+	return textwidth.Truncate(s, width)
 }
 
-// Fit приводит строку s ровно к ширине width: сначала Truncate, затем
-// дополнение до нужной ширины стилем Lip Gloss. Ручной
-// fmt.Sprintf("%-Ns", ...) на пользовательских строках (имена джоб, ветки,
-// сообщения) в этом пакете запрещён — на кириллице он считает байты, а не
-// ячейки; выравнивание только через Lip Gloss.
+// Fit приводит строку s ровно к ширине width: делегат той же единственной
+// меры ширины, что и Truncate выше. Ручной fmt.Sprintf("%-Ns", ...) на
+// пользовательских строках (имена джоб, ветки, сообщения) в этом пакете
+// запрещён — на кириллице он считает байты, а не ячейки; выравнивание
+// только через internal/textwidth.
 func Fit(s string, width int) string {
-	t := Truncate(s, width)
-	return lipgloss.NewStyle().Width(width).Render(t)
+	return textwidth.Fit(s, width)
 }
 
 // TooSmall возвращает единственную строку, которая рисуется вместо

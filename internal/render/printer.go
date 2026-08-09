@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/f3rym/ci-shell/internal/event"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // Printer — единственный печатающий подписчик и единственное место в
@@ -108,15 +109,12 @@ func (p *Printer) Emit(e event.Event) {
 	}
 }
 
-// truncate обрезает s до n символов, добавляя многоточие при обрезке.
-// Переехала сюда из progress.go — единственная вспомогательная функция
-// вывода шага теперь живёт рядом со своим единственным вызывающим.
+// truncate обрезает s до n ячеек терминала, добавляя многоточие при
+// обрезке. Делегат единственной меры ширины проекта (internal/textwidth,
+// Фаза 12, POL-02) — своего обхода по рунам в печатающем подписчике не
+// остаётся.
 func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
+	return textwidth.Truncate(s, n)
 }
 
 // shortID обрезает id контейнера до двенадцати символов для печати — та же

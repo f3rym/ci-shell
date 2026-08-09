@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // ErrRetryInstall — не удалось положить команду retry в контейнер.
@@ -27,15 +29,11 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// shortCommand обрезает s до n рун для описательной строки внутри скрипта —
-// по образцу truncate из internal/render, который экспортирует только
-// Progress и потому недоступен отсюда.
+// shortCommand обрезает s до n ячеек терминала для описательной строки
+// внутри скрипта. Делегат единственной меры ширины проекта (internal/textwidth,
+// Фаза 12, POL-02) — своей копии обрезки здесь больше нет.
 func shortCommand(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
+	return textwidth.Truncate(s, n)
 }
 
 // BuildRetryScript собирает содержимое исполняемого файла retry — чистая

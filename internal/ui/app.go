@@ -37,7 +37,10 @@ const (
 // отрисовки, возвращающими строку, а не собственные реализации tea.Model.
 type App struct {
 	theme Theme
-	dark  bool
+	// caps — возможности терминала, определённые ровно один раз при
+	// создании модели (Run, ниже); тема пересобирается из них по приходу
+	// сообщения о цвете фона (Фаза 12, POL-01).
+	caps Caps
 
 	width  int
 	height int
@@ -147,8 +150,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case tea.BackgroundColorMsg:
-		a.dark = msg.IsDark()
-		a.theme = NewTheme(a.dark)
+		// Фон уточняется этим сообщением, а не запрашивается синхронно
+		// (Init ниже) — тема пересобирается по тем же возможностям с
+		// обновлённым признаком фона; профиль цвета сообщение не трогает.
+		a.caps.Dark = msg.IsDark()
+		a.theme = NewTheme(a.caps)
 		return a, nil
 	case tea.KeyPressMsg:
 		// Пока открыт экран проводника, нажатия клавиш уходят подмодели
@@ -362,8 +368,14 @@ func (a App) View() tea.View {
 // сломанном режиме (idea-0.3.0 §7; формализация требования — POL-04,
 // Фаза 12).
 func Run(ctx context.Context) error {
+	// Возможности терминала определяются ровно один раз здесь, при
+	// создании модели (Фаза 12, POL-01) — второе место сборки Caps в
+	// проекте не появляется; уточнение фона идёт через отдельное
+	// сообщение (см. Update, tea.BackgroundColorMsg).
+	caps := DetectCaps()
 	app := App{
-		theme:  NewTheme(true),
+		caps:   caps,
+		theme:  NewTheme(caps),
 		keys:   DefaultKeys(),
 		splash: newSplashModel(),
 	}

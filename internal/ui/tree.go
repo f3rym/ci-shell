@@ -15,10 +15,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
-	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/provider"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // treeKind различает вид строки дерева: группа, личное пространство
@@ -76,7 +76,7 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	var glyph string
 	switch row.Kind {
 	case treeKindProject:
-		glyph = strings.Repeat(" ", lipgloss.Width(GlyphCollapsed))
+		glyph = strings.Repeat(" ", textwidth.Of(GlyphCollapsed))
 	default:
 		if row.Expanded {
 			glyph = GlyphExpanded
@@ -85,7 +85,7 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		}
 	}
 
-	width := m.Width() - lipgloss.Width(indent) - lipgloss.Width(glyph) - RowIconGap - 2
+	width := m.Width() - textwidth.Of(indent) - textwidth.Of(glyph) - RowIconGap - 2
 	name := Truncate(row.Name, width)
 	line := indent + glyph + strings.Repeat(" ", RowIconGap) + name
 

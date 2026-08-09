@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/f3rym/ci-shell/internal/provider"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // Job печатает метаданные джобы job и разобранную конфигурацию cfg в w:
@@ -33,8 +34,19 @@ func Job(w io.Writer, job provider.Job, cfg provider.JobConfig) error {
 		{"ранер", orDash(job.RunnerDesc)},
 		{"ссылка", orDash(job.WebURL)},
 	}
+	// Ширина левой колонки — максимум графемной меры (internal/textwidth) по
+	// подписям блока, а не байтовая длина форматного глагола: подпись
+	// «проект:» в байтах длиннее восьми, поэтому не дополнялась вовсе, а
+	// «ref:» дополнялась — «блок выровненных полей» из документации функции
+	// блоком не был (01-REVIEW.md IN-01).
+	labelWidth := 0
 	for _, f := range fields {
-		if _, err := fmt.Fprintf(w, "  %-8s %s\n", f.label+":", f.value); err != nil {
+		if lw := textwidth.Of(f.label + ":"); lw > labelWidth {
+			labelWidth = lw
+		}
+	}
+	for _, f := range fields {
+		if _, err := fmt.Fprintf(w, "  %s %s\n", textwidth.Pad(f.label+":", labelWidth), f.value); err != nil {
 			return err
 		}
 	}
@@ -69,7 +81,7 @@ func printSteps(w io.Writer, label string, steps []string) error {
 		_, err := fmt.Fprintf(w, "%s: —\n", label)
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s (%d шагов):\n", label, len(steps)); err != nil {
+	if _, err := fmt.Fprintf(w, "%s (%d %s):\n", label, len(steps), plural(len(steps), "шаг", "шага", "шагов")); err != nil {
 		return err
 	}
 	for i, step := range steps {
@@ -78,6 +90,24 @@ func printSteps(w io.Writer, label string, steps []string) error {
 		}
 	}
 	return nil
+}
+
+// plural выбирает форму русского числительного по числу n: one — «1», few —
+// «2»…«4», many — всё остальное, с исключением для «11»…«14» (те звучат как
+// many, а не few, несмотря на последнюю цифру 1-4). Закрывает 01-REVIEW.md
+// IN-02: единственный шаг печатался «(1 шагов)», а не «(1 шаг)».
+func plural(n int, one, few, many string) string {
+	if n%100 >= 11 && n%100 <= 14 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	default:
+		return many
+	}
 }
 
 func orDash(s string) string {

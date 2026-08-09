@@ -10,7 +10,15 @@
 // перерисовывает экран.
 package term
 
-import "os"
+import (
+	"os"
+)
+
+// dumbTerminal — значение переменной TERM, означающее «терминал не умеет
+// позиционировать курсор». Названо константой затем, что и UIEnabled ниже, и
+// ColorDisabled (Фаза 12, POL-01) проверяют его одной и той же строкой —
+// второго определения «немой терминал» в проекте быть не должно.
+const dumbTerminal = "dumb"
 
 // IsTTY истинна, когда И стандартный ввод, И стандартный вывод являются
 // символьными устройствами. Любая ошибка получения сведений о файле — ложь:
@@ -48,12 +56,28 @@ func UIEnabled() bool {
 	if !IsTTY() {
 		return false
 	}
-	term := os.Getenv("TERM")
-	if term == "" || term == "dumb" {
+	t := os.Getenv("TERM")
+	if t == "" || t == dumbTerminal {
 		return false
 	}
 	if os.Getenv("CI_SHELL_NO_UI") != "" {
 		return false
 	}
 	return true
+}
+
+// ColorDisabled — единственная точка решения о выключенном цвете во всём
+// проекте (Фаза 12, POL-01). Истинна, когда:
+//   - переменная окружения NO_COLOR непуста — соглашение окружения
+//     (https://no-color.org), которое утилита обязана уважать безусловно, а
+//     не наша выдумка;
+//   - либо переменная окружения TERM пуста или равна dumbTerminal — та же
+//     константа и тот же приём, что уже применяет UIEnabled выше; второй
+//     такой проверки в проекте появляться не должно.
+func ColorDisabled() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return true
+	}
+	t := os.Getenv("TERM")
+	return t == "" || t == dumbTerminal
 }
