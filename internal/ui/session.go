@@ -12,6 +12,7 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/config"
+	"github.com/f3rym/ci-shell/internal/editor"
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/joburl"
@@ -86,6 +87,13 @@ type Session struct {
 	patch      repo.Patch
 	patchStats []repo.FileStat
 	patchRoot  string
+
+	// imageOverride — образ, заданный экраном проводника (действие
+	// actionSetImage, конфиг с extends, Фаза 11, GUIDE-05) до того, как
+	// контейнер вообще поднялся. PrepareCmd подставляет его вместо пустой
+	// строки при повторной попытке — второй точки выбора образа в
+	// интерфейсе не появляется.
+	imageOverride string
 }
 
 // NewSession собирает сессию из того, что уже получено заставкой и списком
@@ -108,10 +116,13 @@ type sessionReadyMsg struct {
 // домена, сессия не заводит второго перевода ошибок в текст. canceled
 // истинно, когда причина отказа — отмена контекста самим человеком
 // (Session.Cancel): это осознанное действие, а не поломка, и экран обязан
-// показать её без цвета отказа.
+// показать её без цвета отказа. err — сама ошибка домена (не только текст):
+// распознавание ситуации словарём проводника (Фаза 11) работает по
+// errors.Is, а не по тексту.
 type sessionFailedMsg struct {
 	reason   string
 	canceled bool
+	err      error
 }
 
 // shellFinishedMsg — механизм передачи терминала Bubble Tea вернул
@@ -139,7 +150,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 			if cctx.Err() != nil {
 				return sessionFailedMsg{reason: "прервано пользователем", canceled: true}
 			}
-			return sessionFailedMsg{reason: err.Error()}
+			return sessionFailedMsg{reason: err.Error(), err: err}
 		}
 
 		// --- Участок первый: контекст джобы (то, что обычный режим делает
@@ -169,10 +180,10 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 			}
 		}
 
-		// Флага --image в интерфейсе этого плана нет (подмена образа
-		// командой :image — план 09-03), поэтому override пустой: приоритет
-		// та же функция, что и в обычном режиме.
-		img := runner.ResolveImage(jobCfg.Image, "")
+		// Override — образ, заданный экраном проводника до того, как
+		// контейнер вообще поднялся (Фаза 11, GUIDE-05); пусто в первой
+		// попытке. Приоритет — та же функция, что и в обычном режиме.
+		img := runner.ResolveImage(jobCfg.Image, s.imageOverride)
 
 		var varSet provider.VariableSet
 		if vs, err := s.p.Variables(cctx, s.job); err != nil {
@@ -505,9 +516,12 @@ type captureEmptyMsg struct{}
 
 // captureFailedMsg — снятие патча, поиск корня репозитория человека, разбор
 // отчёта по патчу или проверка путей отказали; reason — причина исходной
-// ошибки домена, второго перевода в текст здесь нет.
+// ошибки домена, второго перевода в текст здесь нет. err — сама ошибка:
+// сорвавшийся перенос правок ищет ситуацию в словаре распознавания с
+// местом «перенос правок» (Фаза 11).
 type captureFailedMsg struct {
 	reason string
+	err    error
 }
 
 // CaptureCmd снимает патч из подготовленного воспроизведённого чекаута,
@@ -538,20 +552,25 @@ func (s *Session) CaptureCmd(ctx context.Context) tea.Cmd {
 			if errors.Is(err, repo.ErrNoChanges) {
 				return captureEmptyMsg{}
 			}
-			return captureFailedMsg{reason: err.Error()}
+			return captureFailedMsg{reason: err.Error(), err: err}
 		}
+		// Патч сохранён на диск уже сейчас — запоминается немедленно, а не
+		// только вместе с остальным состоянием в конце: отказ переноса вне
+		// рабочей копии (ниже) обязан назвать пользователю путь патча,
+		// который уже лежит на диске и не потерян (Фаза 11).
+		s.patch = patch
 
 		root, err := repo.Root(context.Background())
 		if err != nil {
-			return captureFailedMsg{reason: err.Error()}
+			return captureFailedMsg{reason: err.Error(), err: err}
 		}
 
 		stats, err := repo.PatchStat(context.Background(), root, patch.Path)
 		if err != nil {
-			return captureFailedMsg{reason: err.Error()}
+			return captureFailedMsg{reason: err.Error(), err: err}
 		}
 		if err := repo.CheckPaths(stats); err != nil {
-			return captureFailedMsg{reason: err.Error()}
+			return captureFailedMsg{reason: err.Error(), err: err}
 		}
 
 		ahead, aheadKnown := repo.AheadCount(context.Background(), root, patch.SHA)
@@ -645,6 +664,58 @@ func (s *Session) ShellCmd(ctx context.Context) tea.Cmd {
 	})
 }
 
+// secretsEditedMsg — редактор файла секретов вернул терминал. Path — путь
+// файла секретов, Err — НЕ код выхода редактора, а признак того, что сам
+// запуск редактора не поднялся (см. editor.Command) — то же различение, что
+// и у shellFinishedMsg.
+type secretsEditedMsg struct {
+	Path string
+	Err  error
+}
+
+// EditSecretsCmd открывает файл секретов в редакторе пользователя (Фаза 11,
+// GUIDE-03): сначала автосоздание файла секретов с хостом, путём проекта и
+// списком недостающих переменных (существующий файл не читается и не
+// переписывается — механика фазы 6 переиспользуется как есть), затем
+// сборка команды редактора, затем механизм передачи терминала Bubble Tea —
+// команда живёт в этом файле, а не рядом с экраном, потому что передача
+// терминала в проекте собрана в одном файле. Обратный вызов механизма
+// возвращает права файлу к 0600 в первый момент, когда редактор точно
+// завершился, и отдаёт secretsEditedMsg.
+func (s *Session) EditSecretsCmd(ctx context.Context) tea.Cmd {
+	path, _, err := env.EnsureSecretsFile(s.ref.Host, s.ref.ProjectPath, s.environment.Missing)
+	if err != nil {
+		return func() tea.Msg { return secretsEditedMsg{Err: err} }
+	}
+
+	cmd, err := editor.Command(path)
+	if err != nil {
+		return func() tea.Msg { return secretsEditedMsg{Path: path, Err: err} }
+	}
+
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if restoreErr := editor.RestorePerms(path); restoreErr != nil && err == nil {
+			err = restoreErr
+		}
+		return secretsEditedMsg{Path: path, Err: err}
+	})
+}
+
+// RestartCmd возвращает владельца файлов, снимает текущий контейнер и
+// повторяет подготовку тем же вызовом, что и первый раз: переменные
+// попадают в контейнер только при его создании, поэтому отредактированные
+// секреты доезжают только через новый контейнер. Обслуживает все действия
+// повтора проводника — второго места перезапуска подготовки не появляется.
+func (s *Session) RestartCmd(ctx context.Context) tea.Cmd {
+	s.restoreOwner(context.Background())
+	if s.c != nil {
+		if err := s.c.Remove(context.Background()); err != nil {
+			s.log.note(fmt.Sprintf("предупреждение: %s", err))
+		}
+	}
+	return s.PrepareCmd(ctx)
+}
+
 // execDoneMsg — выполнение произвольной команды в контейнере джобы
 // закончилось; code — код выхода команды (T-09-21). Ненулевой код не
 // считается поломкой утилиты — человек мог намеренно запустить то, что
@@ -678,6 +749,31 @@ func (s *Session) ExecCmd(ctx context.Context, command string) tea.Cmd {
 	}
 }
 
+// pullFinishedMsg — обновление рабочей копии (:pull, Фаза 11, GUIDE-04)
+// закончилось; Output — первая строка вывода git, Err — причина отказа.
+type pullFinishedMsg struct {
+	Output string
+	Err    error
+}
+
+// PullCmd находит корень рабочей копии текущего каталога и обновляет её
+// доменной функцией repo.Pull — интерфейс git не запускает сам. Отсутствие
+// рабочей копии здесь не выдумывается заново: оно приходит той же
+// sentinel-ошибкой, что и всегда, и попадает в словарь распознавания.
+func (s *Session) PullCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		root, err := repo.Root(ctx)
+		if err != nil {
+			return pullFinishedMsg{Err: err}
+		}
+		out, err := repo.Pull(ctx, root)
+		if err != nil {
+			return pullFinishedMsg{Err: err}
+		}
+		return pullFinishedMsg{Output: out}
+	}
+}
+
 // imageSwappedMsg — подмена образа прошла: новый контейнер поднят, оболочка
 // нащупана, команда retry положена заново. image — новая ссылка на образ.
 type imageSwappedMsg struct {
@@ -705,6 +801,14 @@ type imageSwapFailedMsg struct {
 //  5. проба оболочки и установка команды перезапуска в новый контейнер —
 //     иначе человек, вошедший в него, потеряет знание об упавшем шаге.
 func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
+	if s.c == nil {
+		// Контейнера ещё нет — подготовка сорвалась на выборе образа
+		// (конфиг с extends, Фаза 11, GUIDE-05): второй точки выбора образа
+		// в интерфейсе не появляется, образ только запоминается, и
+		// подготовка повторяется тем же вызовом, что и первый раз.
+		s.imageOverride = image
+		return s.PrepareCmd(ctx)
+	}
 	return func() tea.Msg {
 		cctx, cancel := context.WithCancel(ctx)
 		s.setCancel(cancel)
@@ -807,6 +911,12 @@ func (s *Session) clearCancel() {
 	s.mu.Lock()
 	s.cancel = nil
 	s.mu.Unlock()
+}
+
+// patchPath отдаёт путь уже сохранённого на диск патча — пусто, пока
+// CaptureCmd ещё не снял его ни разу.
+func (s *Session) patchPath() string {
+	return s.patch.Path
 }
 
 // Log отдаёт содержимое ограниченного буфера лога целиком. Пусто, пока

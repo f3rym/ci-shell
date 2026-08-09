@@ -14,6 +14,7 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/token"
 )
 
 // stepRow — одна строка панели шагов: номер, секция, команда и текущее
@@ -202,17 +203,42 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case sessionReadyMsg:
 		m.phase = phaseImageReady
 		m.pulling = false
+		// SwapImageCmd делегирует PrepareCmd, когда контейнера ещё не было
+		// (Фаза 11, GUIDE-05) — сбрасывается и здесь, чтобы флаг не
+		// залипал, если подготовка была запущена именно так.
+		m.swapping = false
 		m.stepRows = stepRowsFromSession(m.session)
 		m.envRows = envRowsFromSession(m.session)
 		if msg.outcome.Failed != nil {
 			m.cursor = msg.outcome.FailedIndex - 1
 		}
+		// Готовая сессия с непустым списком недостающих переменных больше
+		// не молчит (Фаза 11, GUIDE-03): человек узнаёт о поломке из
+		// экрана сразу, а не из отказа шага через минуту.
+		if missing := m.session.environment.Missing; len(missing) > 0 {
+			g := guideForMissing(missing, m.session.environment.SecretsPath)
+			return m, func() tea.Msg { return guideMsg{Guide: g} }
+		}
 		return m, nil
 
 	case sessionFailedMsg:
 		m.canceling = false
+		m.swapping = false
+		if msg.canceled {
+			m.phase = phaseBlocked
+			m.blockedCanceled = true
+			m.banner = msg.reason
+			return m, nil
+		}
+		// Сорвавшаяся подготовка ищет ситуацию в словаре распознавания с
+		// местом «подготовка» (Фаза 11): найдена — экран открывает
+		// проводник и остаётся в фазе подготовки, чтобы после ответа было
+		// куда вернуться; не найдена — прежнее поведение фазы 9.
+		if g, ok := guideFor(msg.err, whereSession, m.session.ref); ok {
+			return m, func() tea.Msg { return guideMsg{Guide: g} }
+		}
 		m.phase = phaseBlocked
-		m.blockedCanceled = msg.canceled
+		m.blockedCanceled = false
 		m.banner = msg.reason
 		return m, nil
 
@@ -254,6 +280,18 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		return m, nil
 
 	case captureFailedMsg:
+		// Сорвавшийся перенос правок идёт в словарь распознавания с местом
+		// «перенос правок», а не «подготовка» (Фаза 11): одна и та же
+		// ошибка отсутствия рабочей копии означает здесь другое — ровно
+		// ради этого различения место whereApply было заведено планом
+		// 11-01. Найденное описание дополняется путём сохранённого патча.
+		if g, ok := guideFor(msg.err, whereApply, m.session.ref); ok {
+			if path := m.session.patchPath(); path != "" {
+				g.List = append([]string{fmt.Sprintf("патч сохранён: %s", path)}, g.List...)
+				g.Hint = HintApplyOutsideRepo(path)
+			}
+			return m, func() tea.Msg { return guideMsg{Guide: g} }
+		}
 		m.banner = msg.reason
 		m.blockedCanceled = false
 		return m, nil
@@ -313,6 +351,34 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		m.blockedCanceled = false
 		return m, nil
 
+	case secretsEditedMsg:
+		// Возврат из редактора обязан сопровождаться полной перерисовкой —
+		// частичная оставляет мусор на экране (тот же жёсткий контракт, что
+		// и при возврате из шелла).
+		if msg.Err != nil {
+			m.banner = HintSecretsFailed(msg.Err.Error())
+			m.blockedCanceled = false
+			return m, tea.ClearScreen
+		}
+		m.banner = ""
+		return m, tea.Batch(tea.ClearScreen, m.session.RestartCmd(context.Background()))
+
+	case pullFinishedMsg:
+		if msg.Err != nil {
+			if g, ok := guideFor(msg.Err, whereSession, m.session.ref); ok {
+				return m, func() tea.Msg { return guideMsg{Guide: g} }
+			}
+			m.banner = HintPullFailed(msg.Err.Error())
+			m.blockedCanceled = false
+			return m, nil
+		}
+		m.banner = HintPullDone()
+		m.blockedCanceled = true
+		return m, nil
+
+	case guideDoneMsg:
+		return m.applyGuideDone(msg)
+
 	case commandMsg:
 		return m.applyCommand(msg)
 
@@ -350,8 +416,68 @@ func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
 		return m.startSwapImage(msg.Arg)
 	case "!":
 		return m.startExec(msg.Arg)
+	case "secrets":
+		// Тот же обработчик, что и подтверждение экрана недостающих
+		// значений (guideDoneMsg{Action: actionEditSecrets}, Фаза 11,
+		// GUIDE-03) — второго места запуска редактора не появляется.
+		return m, m.session.EditSecretsCmd(context.Background())
+	case "pull":
+		return m, m.session.PullCmd(context.Background())
+	case "env":
+		return m.startEnvScreen()
 	case "q":
 		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// startEnvScreen открывает полноэкранное окружение джобы (:env, Фаза 11,
+// GUIDE-05) — экран проводника формы списка. Строки уже собраны
+// envRowsFromSession через единственную точку решения о показе значения
+// (render.DisplayValue) — собственной ветки показа здесь нет.
+func (m jobModel) startEnvScreen() (jobModel, tea.Cmd) {
+	lines := make([]string, 0, len(m.envRows))
+	for _, r := range m.envRows {
+		lines = append(lines, fmt.Sprintf("%s=%s", r.Key, r.Display))
+	}
+	g := guide{
+		Kind:  guideList,
+		Where: whereSession,
+		Title: fmt.Sprintf("окружение джобы (%d)", len(m.envRows)),
+		List:  lines,
+		Hint:  HintEnvScreen(len(m.envRows)),
+	}
+	return m, func() tea.Msg { return guideMsg{Guide: g} }
+}
+
+// applyGuideDone разбирает ответ экрана проводника на экране джобы (Фаза
+// 11): каждое действие ведёт к той же функции сессии, что и первый её
+// запуск — второго места не появляется ни для одной из них.
+func (m jobModel) applyGuideDone(msg guideDoneMsg) (jobModel, tea.Cmd) {
+	switch msg.Action {
+	case actionSaveToken:
+		host := m.session.ref.Host
+		if path, err := token.Save(host, msg.Value); err != nil {
+			m.banner = HintTokenNotSaved()
+		} else {
+			m.banner = HintTokenSaved(path)
+		}
+		m.blockedCanceled = true
+		m.phase = phasePreparing
+		return m, m.session.RestartCmd(context.Background())
+	case actionSaveDataDir, actionRetryPrepare:
+		m.phase = phasePreparing
+		return m, m.session.RestartCmd(context.Background())
+	case actionSetImage:
+		m.swapping = true
+		m.banner = ""
+		return m, m.session.SwapImageCmd(context.Background(), msg.Value)
+	case actionEditSecrets:
+		return m, m.session.EditSecretsCmd(context.Background())
+	case actionPull:
+		return m, m.session.PullCmd(context.Background())
+	case actionRetryApply:
+		return m.startCapture()
 	}
 	return m, nil
 }

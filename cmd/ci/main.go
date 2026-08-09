@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/config"
+	"github.com/f3rym/ci-shell/internal/editor"
 	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/joburl"
@@ -128,15 +128,31 @@ func explain(err error) string {
 	case errors.Is(err, repo.ErrGitUnavailable):
 		return fmt.Sprintf("%s\nпоставьте git — утилита ходит в него за кодом коммита джобы", err)
 	case errors.Is(err, repo.ErrNotAGitRepo):
-		return fmt.Sprintf("%s\nзапустите ci shell из рабочей копии того же проекта, что и упавшая джоба, либо передайте полную ссылку на джобу", err)
+		// Формулировка честна для обеих подкоманд, которые её показывают
+		// (shell и apply, Фаза 11): полная ссылка заменяет рабочую копию
+		// только воспроизведению, а переносу правок накладывать патч всё
+		// равно некуда без неё.
+		return fmt.Sprintf("%s\nперейдите в рабочую копию того же проекта, что и джоба — из неё работают и воспроизведение, и перенос правок; полная ссылка на джобу заменяет рабочую копию только воспроизведению", err)
 	case errors.Is(err, repo.ErrNoOrigin):
 		return fmt.Sprintf("%s\nнастройте remote origin (git remote add origin <ссылка>), либо передайте полную ссылку на джобу вместо номера", err)
 	case errors.Is(err, repo.ErrRemoteUnparsable):
 		return fmt.Sprintf("%s\nпередайте полную ссылку на джобу вместо номера — эту форму remote origin утилита не распознаёт", err)
+	case errors.Is(err, repo.ErrRepoScope):
+		return fmt.Sprintf("%s\nдопишите область read_repository существующему токену в настройках хоста (страница личных токенов) и вставьте его заново", err)
+	case errors.Is(err, repo.ErrSSHKeyRequired):
+		return fmt.Sprintf("%s\nзаведите ключ: ssh-keygen -t ed25519, добавьте публичный ключ на страницу SSH-ключей своего хоста и повторите git pull", err)
+	case errors.Is(err, repo.ErrPullFailed):
+		return fmt.Sprintf("%s\nпроверьте состояние рабочей копии (git status) и повторите git pull --ff-only", err)
 	case errors.Is(err, cache.ErrUnavailable):
 		return fmt.Sprintf("%s\nзадайте XDG_CACHE_HOME или HOME — утилите нужен постоянный каталог для файла окружения и worktree", err)
+	case errors.Is(err, cache.ErrInvalidDir):
+		return fmt.Sprintf("%s\nкаталог данных обязан быть абсолютным, нормализованным, без двоеточия, управляющих символов и не скрытым (не начинаться с точки) — задайте его ключом cache_dir в файле настроек", err)
+	case errors.Is(err, runner.ErrCacheNotVisible):
+		return fmt.Sprintf("%s\nsnap-сборка Docker не видит каталоги, имя которых начинается с точки: переключите каталог данных ключом cache_dir файла настроек на нескрытый путь", err)
 	case errors.Is(err, config.ErrUnavailable):
 		return fmt.Sprintf("%s\nзадайте XDG_CONFIG_HOME или HOME — утилите нужен каталог для файла настроек места чекаута", err)
+	case errors.Is(err, editor.ErrNoEditor):
+		return fmt.Sprintf("%s\nзадайте VISUAL или EDITOR либо поставьте vi", err)
 	case errors.Is(err, repo.ErrCheckoutExists):
 		return fmt.Sprintf("%s\nуберите каталог руками или запустите без флага --here", err)
 	case errors.Is(err, repo.ErrCommitNotFound):
@@ -259,7 +275,10 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 		if err := os.MkdirAll(chosen, 0o700); err != nil {
 			return "", false, fmt.Errorf("не удалось создать каталог чекаутов %s: %w", chosen, err)
 		}
-		if savedPath, saveErr := config.Save(config.Settings{CheckoutDir: chosen}); saveErr != nil {
+		// Точечное обновление (config.Update), а не полная запись: полная
+		// запись затёрла бы каталог данных (cache_dir), выбранный человеком
+		// на экране проводника (Фаза 11) — это исправление, а не украшение.
+		if savedPath, saveErr := config.Update(func(s *config.Settings) { s.CheckoutDir = chosen }); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "предупреждение: не удалось сохранить место чекаута: %s; используется только в этом прогоне\n", saveErr)
 		} else {
 			fmt.Fprintf(os.Stderr, "место чекаута сохранено в %s\n", savedPath)
@@ -849,15 +868,13 @@ func runShell(args []string) {
 // Свой FlagSet без флагов — форма разбора аргументов совпадает с подкомандой
 // shell, и лишний аргумент не проходит молча.
 //
+// Резолв редактора, поиск исполняемого файла и возврат прав переехали на
+// общий пакет internal/editor (Фаза 11, GUIDE-03) — второй формулы запуска
+// редактора в проекте больше нет; наблюдаемое поведение то же самое: те же
+// сообщения, тот же порядок, тот же поток вывода.
+//
 // Запуск редактора защищён проверкой терминала (token.Interactive()), как
 // вопрос о токене (план 04-01): без неё процесс подвис бы в пайпе или в CI.
-// Редактор берётся из VISUAL/EDITOR (иначе vi), бинарь ищется в PATH через
-// exec.LookPath, команда собирается срезом аргументов без оболочки — в
-// аргументы уходит только путь файла, содержимое секретов в аргументах
-// процесса не появляется никогда. После выхода редактора права
-// принудительно возвращаются к 0600: многие редакторы сохраняют файл через
-// временный с последующим переименованием, и права нового файла определяет
-// маска процесса.
 func runSecrets(args []string) {
 	fs := flag.NewFlagSet("secrets", flag.ExitOnError)
 	fs.Parse(args)
@@ -879,30 +896,10 @@ func runSecrets(args []string) {
 		return
 	}
 
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-
-	// VISUAL или EDITOR из одних пробельных символов (легко приезжает из
-	// подключённого профиля шелла) непусты, поэтому фолбэк на vi выше их не
-	// перехватывает, а strings.Fields возвращает по ним пустой срез — без
-	// этой проверки fields[0] роняет процесс паникой с трассировкой стека
-	// вместо понятного сообщения.
-	fields := strings.Fields(editor)
-	if len(fields) == 0 {
-		fields = []string{"vi"}
-	}
-	bin, err := exec.LookPath(fields[0])
+	cmd, err := editor.Command(path)
 	if err != nil {
-		fail(fmt.Errorf("редактор %q не найден в PATH: %w", fields[0], err))
+		fail(err)
 	}
-	cmdArgs := append(append([]string{}, fields[1:]...), path)
-
-	cmd := exec.Command(bin, cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -910,7 +907,7 @@ func runSecrets(args []string) {
 		fmt.Fprintf(os.Stderr, "предупреждение: редактор завершился с ошибкой: %s\n", err)
 	}
 
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := editor.RestorePerms(path); err != nil {
 		fmt.Fprintf(os.Stderr, "предупреждение: не удалось вернуть права 0600 файлу секретов %s: %s\n", path, err)
 	} else {
 		fmt.Fprintf(os.Stderr, "права файла секретов возвращены к 0600: %s\n", path)
