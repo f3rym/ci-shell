@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/event"
@@ -25,6 +26,9 @@ const (
 	screenJobs
 	screenJob
 	screenTree
+	// screenGuide — экран-проводник по типичным поломкам (Фаза 11,
+	// GUIDE-01…05, internal/ui/guide.go).
+	screenGuide
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
@@ -49,6 +53,13 @@ type App struct {
 	jobs   jobsModel
 	job    jobModel
 	tree   treeModel
+
+	// guide/guideReturn — экран проводника по типичным поломкам (Фаза 11):
+	// экран проводника всегда знает, откуда пришёл, и esc возвращает ровно
+	// туда. Возврат хранится значением, а не вычисляется, потому что одна и
+	// та же ситуация приходит и с заставки, и с экрана джобы.
+	guide       guideModel
+	guideReturn screen
 
 	// browseClient, provider, host, user — состояние обхода (Фаза 10):
 	// browse.New вызывается ровно в двух местах этого файла (browseMsg и
@@ -140,6 +151,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.theme = NewTheme(a.dark)
 		return a, nil
 	case tea.KeyPressMsg:
+		// Пока открыт экран проводника, нажатия клавиш уходят подмодели
+		// целиком, включая привязки выхода и возврата (T-11-10): буква
+		// выхода, набранная в поле ввода токена, не должна завершать
+		// программу, а esc обязан вернуться на нужный экран через
+		// guideDismissMsg проводника, а не через общий стек.
+		if a.current == screenGuide {
+			break
+		}
 		if key.Matches(msg, a.keys.Quit) && a.current != screenSplash {
 			if a.current == screenJob && a.job.session != nil {
 				// Уборка сессии (контейнер, файловые переменные, чекаут)
@@ -229,6 +248,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.job = a.job.setSize(a.width, a.height)
 		a = a.push(screenJob)
 		return a, a.job.init()
+
+	case guideMsg:
+		// Экран проводника (Фаза 11) запоминает текущий экран как экран
+		// возврата и переключается на себя.
+		a.guideReturn = a.current
+		a.guide = newGuideModel(msg.Guide, a.theme, a.keys)
+		a.current = screenGuide
+		if msg.Guide.Kind == guideInput {
+			return a, textinput.Blink
+		}
+		return a, nil
+
+	case guideDismissMsg:
+		a.current = a.guideReturn
+		return a, nil
+
+	case guideDoneMsg:
+		// Обработка guideDoneMsg не выполняется здесь: сообщение уходит
+		// тому экрану, который открыл проводник, — корневая модель только
+		// возвращает экран, а смысл ответа решает уже он (диспетчер ниже).
+		a.current = a.guideReturn
 	}
 
 	switch a.current {
@@ -247,6 +287,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenTree:
 		var cmd tea.Cmd
 		a.tree, cmd = a.tree.update(msg)
+		return a, cmd
+	case screenGuide:
+		var cmd tea.Cmd
+		a.guide, cmd = a.guide.Update(msg)
 		return a, cmd
 	}
 	return a, nil
@@ -283,6 +327,10 @@ func (a App) View() tea.View {
 		body = a.tree.view()
 		keybar = a.tree.keyBar()
 		hint = RenderHint(a.theme, a.tree.hintText())
+	case screenGuide:
+		body = a.guide.View(a.width-2*OuterMargin, a.height)
+		keybar = KeyBar(a.theme, a.keys.Back)
+		hint = RenderHint(a.theme, a.guide.hintText())
 	}
 
 	margin := strings.Repeat(" ", OuterMargin)

@@ -283,3 +283,128 @@ func HintLogFull() string {
 func HintLogUnavailable(reason string) string {
 	return fmt.Sprintf("лог джобы недоступен: %s — g повторит запрос", reason)
 }
+
+// Формулировки проводника по поломкам (Фаза 11, GUIDE-01…05): по одной
+// именованной функции на ситуацию словаря internal/ui/guide.go — тот же
+// приём, что и у остальных строк подсказки этого файла.
+
+// HintTokenNeeded — экран проводника: токена для хоста нет.
+func HintTokenNeeded(host string) string {
+	return fmt.Sprintf("токен для %s не найден — введите его здесь, ⏎ сохранит и повторит проверку", host)
+}
+
+// HintTokenRejected — экран проводника: хост отклонил токен.
+func HintTokenRejected(host string) string {
+	return fmt.Sprintf("%s отклонил токен — вставьте новый, ⏎ сохранит и повторит проверку", host)
+}
+
+// HintTokenSaved — токен сохранён на диск, проверка повторяется.
+func HintTokenSaved(path string) string {
+	return fmt.Sprintf("токен сохранён в %s — повторяю проверку", path)
+}
+
+// HintTokenNotSaved — не удалось сохранить токен на диск, но запуск не
+// прерывается: токен используется только в этом прогоне.
+func HintTokenNotSaved() string {
+	return "токен не сохранён на диск — использую только в этом запуске"
+}
+
+// HintTokenScope — экран проводника: токену не хватает области
+// read_repository.
+func HintTokenScope(host string) string {
+	return fmt.Sprintf("токен не даёт доступ к коду — допишите read_repository в настройках %s и вставьте токен здесь", host)
+}
+
+// HintFixPerms — экран проводника с готовой командой chmod.
+func HintFixPerms() string {
+	return "выполните команду ниже и нажмите ⏎, чтобы повторить"
+}
+
+// HintGuideBack — подсказка возврата с экрана проводника.
+func HintGuideBack() string {
+	return "esc вернёт на предыдущий экран"
+}
+
+// HintDockerMissing — экран проводника: Docker не найден.
+func HintDockerMissing() string {
+	return "Docker не найден — выполните команду ниже, поставьте его и нажмите ⏎"
+}
+
+// HintDaemonDown — экран проводника: демон Docker не отвечает.
+func HintDaemonDown() string {
+	return "демон Docker не отвечает — запустите его и нажмите ⏎"
+}
+
+// HintCacheHidden — экран проводника: демон не видит каталог данных,
+// предлагается переключить его на dir.
+func HintCacheHidden(dir string) string {
+	return fmt.Sprintf("snap-докер не видит скрытые каталоги — переключить данные в %s? (y/n)", dir)
+}
+
+// HintDataDirNeeded — экран проводника: каталог данных не вычислим или
+// негоден, нужен путь руками.
+func HintDataDirNeeded() string {
+	return "введите абсолютный путь к каталогу данных — он сохранится в настройках"
+}
+
+// HintDataDirSaved — каталог данных сохранён, подготовка повторяется.
+func HintDataDirSaved(dir string) string {
+	return fmt.Sprintf("каталог данных теперь %s — повторяю подготовку", dir)
+}
+
+// HintSecretsMissing — экран проводника: не хватает n значений секретов.
+func HintSecretsMissing(n int) string {
+	return fmt.Sprintf("не хватает %d значений — ⏎ откроет файл секретов в редакторе", n)
+}
+
+// HintSecretsEdited — редактор секретов закрыт, права возвращены, подготовка
+// повторяется.
+func HintSecretsEdited(path string) string {
+	return fmt.Sprintf("права файла %s возвращены к 0600 — повторяю подготовку", path)
+}
+
+// HintSecretsFailed — редактор секретов не открылся.
+func HintSecretsFailed(reason string) string {
+	return fmt.Sprintf("редактор не открылся: %s", reason)
+}
+
+// HintSSHKey — экран проводника: git просит ключ доступа.
+func HintSSHKey(host string) string {
+	return fmt.Sprintf("git просит ключ — заведите его командами ниже, добавьте на %s и нажмите ⏎", host)
+}
+
+// HintPullDone — :pull обновил рабочую копию успешно.
+func HintPullDone() string {
+	return "рабочая копия обновлена — продолжайте чинить"
+}
+
+// HintPullFailed — :pull отказал.
+func HintPullFailed(reason string) string {
+	return fmt.Sprintf("обновить рабочую копию не вышло: %s", reason)
+}
+
+// HintUnresolvedConfig — экран проводника: конфиг использует extends,
+// образ не разобран.
+func HintUnresolvedConfig() string {
+	return "конфиг использует extends — образ не разобран, задайте его здесь, шаги останутся неразобранными"
+}
+
+// HintImageSet — образ задан экраном проводника, подготовка повторяется.
+func HintImageSet(image string) string {
+	return fmt.Sprintf("образ %s задан — повторяю подготовку", image)
+}
+
+// HintApplyOutsideRepo — экран проводника: перенос правок вне рабочей копии.
+func HintApplyOutsideRepo(path string) string {
+	return fmt.Sprintf("правки сохранены в %s — перейдите в рабочую копию проекта и повторите перенос", path)
+}
+
+// HintNoPatchYet — экран проводника: сохранённых правок ещё нет.
+func HintNoPatchYet() string {
+	return "правок пока нет — почините шаг в контейнере, потом переносите"
+}
+
+// HintEnvScreen — полноэкранное окружение джобы (:env), n переменных.
+func HintEnvScreen(n int) string {
+	return fmt.Sprintf("окружение джобы, %d переменных — esc вернёт на экран джобы", n)
+}

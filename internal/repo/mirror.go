@@ -22,7 +22,29 @@ var (
 	ErrMirrorFailed = errors.New("не удалось подготовить зеркало репозитория")
 	// ErrFetchFailed — не удалось скачать коммит джобы.
 	ErrFetchFailed = errors.New("не удалось скачать коммит джобы")
+	// ErrRepoScope — токену не хватает области read_repository: API уже
+	// ответил, метаданные джобы получены, токен рабочий — значит дело не в
+	// токене вообще, а ровно в одной области, которой у него нет. Это
+	// отдельная причина от ErrFetchFailed (Фаза 11, GUIDE-01): человеку,
+	// увидевшему сырой отказ сервера на git-протоколе при живом API,
+	// догадаться об этом неоткуда.
+	ErrRepoScope = errors.New("токену не хватает области read_repository")
 )
+
+// scopeRefused распознаёт формы отказа git-протокола по доступному тексту:
+// код 403, отказ в доступе, неудачная аутентификация, отказ в чтении
+// удалённого репозитория. Сравнение — в нижнем регистре, чтобы
+// локализованные и разнорегистровые формы не разъезжались. Разбор текста
+// живёт здесь, в доменном пакете, и наружу отдаёт sentinel-ошибку;
+// интерфейс текстов не разбирает вовсе.
+func scopeRefused(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "403") ||
+		strings.Contains(lower, "access denied") ||
+		strings.Contains(lower, "authentication failed") ||
+		strings.Contains(lower, "could not read from remote repository") ||
+		strings.Contains(lower, "permission denied")
+}
 
 // sanitizeSegment приводит один сегмент пути к безопасному имени каталога:
 // разрешены латинские буквы, цифры, точка, дефис и подчёркивание — любой
@@ -197,6 +219,12 @@ func fetchCommit(ctx context.Context, dir, host, projectPath, sha, ref string, t
 	if !hasCommit(ctx, dir, sha) {
 		if lastErr == nil {
 			lastErr = errors.New("коммит не появился в зеркале после fetch")
+		}
+		// API уже ответил (мы дошли до fetchCommit только с рабочим
+		// токеном) — отказ git-протокола по доступу означает не «токена
+		// нет», а «токену не хватает области read_repository» (Фаза 11).
+		if scopeRefused(lastErr.Error()) {
+			return fmt.Errorf("repo: %s с %s: %s: %w", shortSHA(sha), host, firstLine(lastErr.Error()), ErrRepoScope)
 		}
 		return fmt.Errorf("repo: не удалось скачать коммит %s с %s: %s: %w", shortSHA(sha), host, firstLine(lastErr.Error()), ErrFetchFailed)
 	}

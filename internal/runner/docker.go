@@ -36,6 +36,12 @@ var (
 	ErrNoShell = errors.New("в образе нет интерактивной оболочки")
 	// ErrContainerFailed — контейнер не поднялся.
 	ErrContainerFailed = errors.New("контейнер не поднялся")
+	// ErrCacheNotVisible — демон Docker не видит каталог данных: не оттенок
+	// общей ErrContainerFailed, а отдельный класс со своим ответом — сменить
+	// каталог. Профиль безопасности snap-сборки исключает каталоги на точку,
+	// поэтому файл окружения из такого каталога демон открыть не может
+	// (Фаза 11, GUIDE-02).
+	ErrCacheNotVisible = errors.New("демон Docker не видит каталог данных")
 )
 
 // containerCLI — имя бинаря контейнерного рантайма. По умолчанию docker;
@@ -229,6 +235,13 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 			rm := exec.CommandContext(context.Background(), d.bin, "rm", "-f", id)
 			_, _ = runCaptured(rm)
 		}
+		// Отказ демона видеть один из наших собственных путей — отдельная
+		// причина, а не оттенок общего ErrContainerFailed: у неё есть свой
+		// ответ (сменить каталог данных), и словарь проводника (Фаза 11)
+		// распознаёт её отдельно.
+		if err != nil && daemonCannotSee(err.Error(), envPath, spec.SourceDir, spec.FileVarsDir) {
+			return nil, nil, fmt.Errorf("runner: docker create отказал: %s: %w", err, ErrCacheNotVisible)
+		}
 		return nil, nil, fmt.Errorf("runner: docker create отказал: %s: %w", err, ErrContainerFailed)
 	}
 
@@ -244,6 +257,27 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (*Container, []string, er
 	d.em.Emit(event.ContainerReady{ID: id, WorkDir: spec.WorkDir})
 
 	return &Container{ID: id, d: d, workDir: spec.WorkDir}, skipped, nil
+}
+
+// daemonCannotSee распознаёт отказ демона видеть один из наших собственных
+// путей paths: истина, когда текст отказа несёт одну из двух известных форм
+// (отказ в доступе, отсутствие файла или каталога) И называет хотя бы один
+// из переданных путей. Оба условия обязательны: одна только форма отказа
+// встречается и в отказах, к каталогу данных отношения не имеющих, —
+// превращать их в предложение сменить каталог было бы враньём.
+func daemonCannotSee(msg string, paths ...string) bool {
+	lower := strings.ToLower(msg)
+	formMatches := strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "no such file or directory")
+	if !formMatches {
+		return false
+	}
+	for _, p := range paths {
+		if p != "" && strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkControl отвергает путь с управляющим символом: такой путь ломает и

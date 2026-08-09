@@ -85,6 +85,14 @@ type splashModel struct {
 	prov       provider.Provider
 	hostsCount int
 
+	// failedIndex — индекс провалившейся проверки (Фаза 11): заставка
+	// повторяет ровно её, а не все три заново, после ответа на экране
+	// проводника.
+	failedIndex int
+	// notice — короткое сообщение после ответа проводника (токен сохранён/
+	// не сохранён), показывается под проверками одним кадром до перезапуска.
+	notice string
+
 	width  int
 	height int
 }
@@ -94,6 +102,11 @@ type checkResultMsg struct {
 	index  int
 	ok     bool
 	reason string
+	// err — сама ошибка домена провалившейся проверки (не только её текст):
+	// распознавание ситуации словарём проводника (Фаза 11) работает по
+	// errors.Is, а не по тексту, и без самой ошибки заставка умела бы
+	// только показать текст, а не открыть экран.
+	err error
 	// job — метаданные джобы, полученные проверкой ответа API; поле
 	// заполнено только для checkAPIIndex в обычном режиме, чтобы список
 	// джоб не запрашивал их повторно.
@@ -199,6 +212,8 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 		return m, nil
 	case checkResultMsg:
 		return m.applyCheckResult(msg)
+	case guideDoneMsg:
+		return m.applyGuideDone(msg)
 	}
 	return m, nil
 }
@@ -219,6 +234,21 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 	if !msg.ok {
 		m.checks[msg.index].State = checkFailed
 		m.checks[msg.index].Reason = msg.reason
+		m.failedIndex = msg.index
+
+		// Провалившаяся проверка ищет ситуацию в единственном словаре
+		// распознавания (Фаза 11), а не строит экран на месте.
+		ref := m.ref
+		if m.browsing {
+			ref = joburl.Ref{Host: m.host}
+		}
+		if g, ok := guideFor(msg.err, whereSplash, ref); ok {
+			guideCopy := g
+			return m, func() tea.Msg { return guideMsg{Guide: guideCopy} }
+		}
+
+		// Ситуация не найдена — прежнее поведение фазы 9: словарь не
+		// проглатывает незнакомое, молчаливого «всё хорошо» не появляется.
 		m.fatal = fmt.Sprintf("не удалось продолжить: %s — q для выхода", msg.reason)
 		return m, nil
 	}
@@ -248,6 +278,45 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 	return m, nil
 }
 
+// applyGuideDone разбирает ответ экрана проводника (Фаза 11): сохранение
+// токена идёт функцией фазы 4 (token.Save) — второго места записи токена в
+// проекте нет. Успех — подсказка о сохранении с путём, неудача — подсказка
+// о том, что токен не сохранён и используется только в этом запуске (то же
+// решение, что принял вопрос в терминале). В обоих случаях заставка
+// перезапускает ровно ту проверку, которая провалилась.
+func (m splashModel) applyGuideDone(msg guideDoneMsg) (splashModel, tea.Cmd) {
+	switch msg.Action {
+	case actionSaveToken:
+		host := m.checkHost()
+		if path, err := token.Save(host, msg.Value); err != nil {
+			m.notice = HintTokenNotSaved()
+		} else {
+			m.notice = HintTokenSaved(path)
+		}
+		return m.retryFailedCheck()
+	case actionRetryChecks, actionSaveDataDir:
+		return m.retryFailedCheck()
+	}
+	return m, nil
+}
+
+// retryFailedCheck перезапускает ровно ту проверку, которая провалилась, а
+// не все три заново.
+func (m splashModel) retryFailedCheck() (splashModel, tea.Cmd) {
+	switch m.failedIndex {
+	case checkTokenIndex:
+		m.checks[checkTokenIndex] = splashCheck{State: checkRunning}
+		return m, m.checkToken()
+	case checkAPIIndex:
+		m.checks[checkAPIIndex] = splashCheck{State: checkRunning}
+		return m, m.checkAPI()
+	case checkDockerIndex:
+		m.checks[checkDockerIndex] = splashCheck{State: checkRunning}
+		return m, m.checkDocker()
+	}
+	return m, nil
+}
+
 // checkHost — хост текущей проверки: хост режима обхода или хост
 // разобранной ссылки, в зависимости от того, каким путём заставка пошла.
 func (m splashModel) checkHost() string {
@@ -265,7 +334,7 @@ func (m splashModel) checkToken() tea.Cmd {
 	return func() tea.Msg {
 		tok, err := token.Resolve(host)
 		if err != nil {
-			return checkResultMsg{index: checkTokenIndex, ok: false, reason: err.Error()}
+			return checkResultMsg{index: checkTokenIndex, ok: false, reason: err.Error(), err: err}
 		}
 		return checkResultMsg{index: checkTokenIndex, ok: true, reason: tok.String()}
 	}
@@ -282,13 +351,13 @@ func (m splashModel) checkAPI() tea.Cmd {
 		return func() tea.Msg {
 			tok, err := token.Resolve(host)
 			if err != nil {
-				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error(), err: err}
 			}
 			p := gitlab.New(host, tok)
 			var prov provider.Provider = p
 			user, err := prov.CurrentUser(context.Background())
 			if err != nil {
-				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error(), err: err}
 			}
 			return checkResultMsg{index: checkAPIIndex, ok: true, reason: user.Name, user: user, prov: prov}
 		}
@@ -297,12 +366,12 @@ func (m splashModel) checkAPI() tea.Cmd {
 	return func() tea.Msg {
 		tok, err := token.Resolve(ref.Host)
 		if err != nil {
-			return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+			return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error(), err: err}
 		}
 		var p provider.Provider = gitlab.New(ref.Host, tok)
 		job, err := p.JobByID(context.Background(), ref.ProjectPath, ref.JobID)
 		if err != nil {
-			return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+			return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error(), err: err}
 		}
 		return checkResultMsg{index: checkAPIIndex, ok: true, job: job}
 	}
@@ -313,10 +382,10 @@ func (m splashModel) checkDocker() tea.Cmd {
 	return func() tea.Msg {
 		d, err := runner.New(event.Emitter{}, io.Discard)
 		if err != nil {
-			return checkResultMsg{index: checkDockerIndex, ok: false, reason: err.Error()}
+			return checkResultMsg{index: checkDockerIndex, ok: false, reason: err.Error(), err: err}
 		}
 		if err := d.Ping(context.Background()); err != nil {
-			return checkResultMsg{index: checkDockerIndex, ok: false, reason: err.Error()}
+			return checkResultMsg{index: checkDockerIndex, ok: false, reason: err.Error(), err: err}
 		}
 		return checkResultMsg{index: checkDockerIndex, ok: true}
 	}
@@ -374,6 +443,11 @@ func (m splashModel) view(t Theme) string {
 
 	if m.browsing && m.hostsCount > 1 {
 		b.WriteString(t.Muted.Render(fmt.Sprintf("хост %s — первый из файла токенов; вставьте ссылку, чтобы открыть другой", m.host)))
+		b.WriteString("\n")
+	}
+
+	if m.notice != "" {
+		b.WriteString(t.Muted.Render(m.notice))
 		b.WriteString("\n")
 	}
 
