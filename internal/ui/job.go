@@ -141,6 +141,26 @@ type jobModel struct {
 	// applyIdle, клавиши уходят в неё же приёмом, что и у cmd выше.
 	apply applyState
 
+	// swapping — идёт подмена образа (задача 3, план 09-03, :image):
+	// блокирует canRun ровно как и остальные долгие операции, пока тяга
+	// нового образа и перезапуск контейнера не закончатся.
+	swapping bool
+	// swappedImage — заполняется imageSwappedMsg: новая ссылка на образ,
+	// показанная HintImageReplaced ровно один раз после подмены, пока фаза
+	// не сменится ещё раз.
+	swappedImage string
+
+	// execRunning/execCommand — идёт выполнение произвольной команды в
+	// контейнере (:!, задача 3): подсказка временно замещается строкой о
+	// выполняющейся команде. execView/execCode — панель лога переключена на
+	// вывод команды (заголовок «ВЫВОД КОМАНДЫ»), execCode — её код выхода
+	// для HintExecDone; execView сбрасывается выбором другого шага (↑↓) или
+	// новым прогоном — тогда панель лога возвращается к хвосту шага.
+	execRunning bool
+	execCommand string
+	execView    bool
+	execCode    int
+
 	width, height int
 }
 
@@ -220,6 +240,9 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case captureDoneMsg:
 		m.apply = newApplyState(msg.patch, msg.stats, msg.ahead, msg.aheadKnown)
 		m.phase = phaseApplyConfirm
+		// Список файлов занимает тело целиком (bodyView) — устаревший вывод
+		// последней команды :! не должен маячить в подсказке позади него.
+		m.execView = false
 		return m, nil
 
 	case captureEmptyMsg:
@@ -263,6 +286,33 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		m.blockedCanceled = false
 		return m, nil
 
+	case execDoneMsg:
+		m.execRunning = false
+		m.execCode = msg.code
+		return m, nil
+
+	case imageSwappedMsg:
+		// Новый контейнер ничего не исполнял — отметки шагов сбрасываются в
+		// ожидание (glyph ○), а не остаются со значениями прошлого прогона.
+		m.swapping = false
+		m.swappedImage = msg.image
+		m.execView = false
+		m.banner = ""
+		for i := range m.stepRows {
+			m.stepRows[i].Status = "created"
+		}
+		m.cursor = -1
+		m.phase = phaseImageReady
+		return m, nil
+
+	case imageSwapFailedMsg:
+		// Отказ подмены — однострочный баннер цветом отказа, состояние
+		// экрана не меняется (задача 3, done-критерий плана).
+		m.swapping = false
+		m.banner = msg.reason
+		m.blockedCanceled = false
+		return m, nil
+
 	case commandMsg:
 		return m.applyCommand(msg)
 
@@ -296,6 +346,10 @@ func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
 		return m.startCapture()
 	case "commit":
 		return m.startCommitMessage()
+	case "image":
+		return m.startSwapImage(msg.Arg)
+	case "!":
+		return m.startExec(msg.Arg)
 	case "q":
 		return m, tea.Quit
 	}
@@ -324,6 +378,33 @@ func (m jobModel) startCommitMessage() (jobModel, tea.Cmd) {
 	m.apply.msgInput = newMessageInput()
 	m.apply.err = ""
 	return m, textinput.Blink
+}
+
+// startExec запускает произвольную команду command в контейнере джобы —
+// команда :!<команда> (задача 3, FIXUI-05). Единственное место запуска
+// ExecCmd, ровно как startCapture — единственное место запуска CaptureCmd.
+func (m jobModel) startExec(command string) (jobModel, tea.Cmd) {
+	if !m.canRun() {
+		return m, nil
+	}
+	m.execRunning = true
+	m.execCommand = command
+	m.execView = true
+	m.banner = ""
+	return m, m.session.ExecCmd(context.Background(), command)
+}
+
+// startSwapImage запускает подмену образа джобы — команда :image <образ>
+// (задача 3, FIXUI-05). Блокирующего вопроса нет: замена обратима повторной
+// командой (Copywriting Contract контракта), поэтому startSwapImage
+// запускается сразу, без промежуточной стадии согласия.
+func (m jobModel) startSwapImage(image string) (jobModel, tea.Cmd) {
+	if !m.canRun() {
+		return m, nil
+	}
+	m.swapping = true
+	m.banner = ""
+	return m, m.session.SwapImageCmd(context.Background(), image)
 }
 
 // applyRunFinished разбирает итог одного из трёх прогонов задачи 3
@@ -378,14 +459,15 @@ func (m jobModel) applyRunFinished(msg runFinishedMsg) jobModel {
 }
 
 // canRun истинно, когда экран не занят другой долгой операцией (подготовка,
-// передача терминала, уже идущий прогон) — только тогда петля фикса может
-// принять новую команду.
+// передача терминала, уже идущий прогон, подмена образа, выполнение
+// произвольной команды) — только тогда петля фикса может принять новую
+// команду.
 func (m jobModel) canRun() bool {
 	switch m.phase {
 	case phasePreparing, phaseHandingTerminal, phaseRunning:
 		return false
 	}
-	return true
+	return !m.swapping && !m.execRunning
 }
 
 // startRun запускает один из трёх прогонов задачи 3 по виду kind — единый
@@ -394,6 +476,9 @@ func (m jobModel) canRun() bool {
 // места запуска прогонов.
 func (m jobModel) startRun(kind runKind) (jobModel, tea.Cmd) {
 	m.phase = phaseRunning
+	// Новый прогон — панель лога возвращается к хвосту шага, а не остаётся
+	// на выводе последней команды :! (если она была).
+	m.execView = false
 	switch kind {
 	case runRetry:
 		m.runLabel = "перезапуск шага"
@@ -505,12 +590,16 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		// Выбор другого шага — панель лога возвращается к его хвосту, а не
+		// остаётся на выводе последней команды :! (задача 3).
+		m.execView = false
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
 		if m.cursor < len(m.stepRows)-1 {
 			m.cursor++
 		}
+		m.execView = false
 		return m, nil
 	}
 	return m, nil
@@ -740,13 +829,19 @@ func (m jobModel) envPanel() string {
 // logPanel рисует панель лога: по умолчанию (после готовности сессии, когда
 // упавший шаг известен) открыт хвост упавшего шага; пока шаг не выбран —
 // честная строка ожидания; при обрыве чтения — честная строка отказа вместо
-// содержимого.
+// содержимого. Пока идёт или только что закончилась произвольная команда :!
+// (execView, задача 3), заголовок панели меняется на «ВЫВОД КОМАНДЫ» — тот
+// же буфер лога, что и у шагов, только заголовок называет, что сейчас в нём.
 func (m jobModel) logPanel() string {
 	width := m.width - 2*OuterMargin
 	if width < 1 {
 		width = 1
 	}
-	title := m.theme.PanelTitle.Render(fmt.Sprintf("ЛОГ ШАГА %d", m.cursor+1))
+	titleText := fmt.Sprintf("ЛОГ ШАГА %d", m.cursor+1)
+	if m.execView {
+		titleText = "ВЫВОД КОМАНДЫ"
+	}
+	title := m.theme.PanelTitle.Render(titleText)
 
 	switch {
 	case m.cursor < 0:
@@ -843,14 +938,31 @@ func (m jobModel) hintText() string {
 	switch {
 	case m.canceling:
 		return HintCanceling()
-	case m.phase == phasePreparing && m.pulling:
+	case m.pulling:
+		// Тяга образа идёт и при первой подготовке (phasePreparing), и при
+		// подмене :image (задача 3) — оба случая эмитят одни и те же события
+		// доменного слоя (event.ImagePulling/ImageLocal), поэтому проверка не
+		// привязана к конкретной фазе.
 		return HintPullingImage(m.pullImage)
+	case m.swapping:
+		// Хвост подмены образа после тяги (возврат владельца, снятие
+		// старого контейнера, подъём нового, проба оболочки) — своей
+		// именованной формулировки контракт не даёт (только итог,
+		// HintImageReplaced), но подсказка обязана присутствовать всегда.
+		return "подменяю образ, перезапускаю контейнер…"
+	case m.execRunning:
+		return "выполняю " + m.execCommand + "…"
 	case m.phase == phaseRunning:
 		return HintRunning(m.runLabel, m.runStep, len(m.stepRows))
 	case m.phase == phaseBlocked && m.blockedCanceled:
 		return "прервано пользователем — esc вернёт к списку джоб"
 	case m.phase == phaseBlocked:
 		return HintBlocked(m.banner)
+	case m.execView:
+		// Последняя произвольная команда закончилась — HintExecDone
+		// перекрывает фазу-результат петли фикса, потому что она устарела
+		// относительно только что выполненной команды.
+		return HintExecDone(m.execCode)
 	case m.phase == phaseHandingTerminal:
 		return HintHandingTerminal()
 	case m.phase == phaseLeftShell:
@@ -877,6 +989,11 @@ func (m jobModel) hintText() string {
 		return HintApplied(len(m.apply.stats))
 	case m.phase == phaseCommitted:
 		return HintCommitted()
+	case m.phase == phaseImageReady && m.swappedImage != "":
+		// Сразу после :image — итог замены, а не обычная готовность образа;
+		// поле сбрасывается новой подготовкой сессии (её здесь и не бывает
+		// без новой сессии), так что второй показ не залипает навсегда.
+		return HintImageReplaced(m.swappedImage)
 	case m.phase == phaseImageReady:
 		return HintImageReady(m.session.img.Ref)
 	}

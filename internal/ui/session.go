@@ -646,6 +646,107 @@ func (s *Session) ShellCmd(ctx context.Context) tea.Cmd {
 	})
 }
 
+// execDoneMsg — выполнение произвольной команды в контейнере джобы
+// закончилось; code — код выхода команды (T-09-21). Ненулевой код не
+// считается поломкой утилиты — человек мог намеренно запустить то, что
+// падает.
+type execDoneMsg struct {
+	code int
+}
+
+// ExecCmd выполняет command внутри уже поднятого контейнера ровно тем
+// текстом, который набрал человек (T-09-21): строка идёт выполнению
+// контейнера единственным параметром — доменный пакет (Container.Exec)
+// отправляет её отдельным элементом среза аргументов оболочке внутри
+// контейнера, а здесь она не склеивается ни с чем: ни со значением
+// переменной окружения, ни с рабочим каталогом, ни с чем-либо ещё.
+// Выполнение произвольной команды в контейнере — осознанная возможность
+// продукта (idea-0.3.0 §2), а не дыра; дырой она станет ровно в тот момент,
+// когда команда начнёт собираться конкатенацией. Оба потока выполнения идут
+// в тот же ограниченный буфер лога, что и вывод шагов, — на диск ничего не
+// сохраняется.
+func (s *Session) ExecCmd(ctx context.Context, command string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		code, err := s.c.Exec(ctx, command, s.log, s.log)
+		if err != nil && ctx.Err() == nil {
+			s.log.note("предупреждение: " + err.Error())
+		}
+		return execDoneMsg{code: code}
+	}
+}
+
+// imageSwappedMsg — подмена образа прошла: новый контейнер поднят, оболочка
+// нащупана, команда retry положена заново. image — новая ссылка на образ.
+type imageSwappedMsg struct {
+	image string
+}
+
+// imageSwapFailedMsg — подмена образа отказала; reason — причина.
+type imageSwapFailedMsg struct {
+	reason string
+}
+
+// SwapImageCmd подменяет образ джобы и перезапускает контейнер — в порядке,
+// взятом у обычного режима и у чистого прогона (CleanCmd выше):
+//
+//  1. выбор образа — та же функция, что и у подготовки сессии и у запуска с
+//     флагом переопределения (runner.ResolveImage): решение о том, какой
+//     образ считать образом джобы, остаётся в одном месте;
+//  2. тяга нового образа — ДО того, как тронут старый контейнер: отказ тяги
+//     не должен стоить человеку рабочего контейнера, в котором он сидел;
+//  3. возврат владельца файлов, затем снятие старого контейнера — отказ
+//     снятия отменяет подмену целиком, а не понижается до предупреждения:
+//     двух живых контейнеров одной джобы быть не должно (T-09-27);
+//  4. подмена поля образа в уже собранной спецификации и подъём контейнера
+//     ею же;
+//  5. проба оболочки и установка команды перезапуска в новый контейнер —
+//     иначе человек, вошедший в него, потеряет знание об упавшем шаге.
+func (s *Session) SwapImageCmd(ctx context.Context, image string) tea.Cmd {
+	return func() tea.Msg {
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		choice := runner.ResolveImage(s.jobCfg.Image, image)
+
+		if err := s.d.EnsureImage(cctx, choice.Ref); err != nil {
+			return imageSwapFailedMsg{reason: err.Error()}
+		}
+
+		if s.owner != "" && !s.ownerRestored {
+			s.ownerRestored = true
+			if err := s.c.Chown(context.Background(), s.owner, s.spec.WorkDir); err != nil {
+				s.log.note(fmt.Sprintf("предупреждение: %s — файлы в каталоге кода могли остаться под root", err))
+			}
+		}
+		if err := s.c.Remove(context.Background()); err != nil {
+			return imageSwapFailedMsg{reason: fmt.Sprintf("подмена образа отменена: старый контейнер ещё жив: %s", err)}
+		}
+
+		s.spec.Image = choice.Ref
+		c, _, startErr := s.d.Start(context.Background(), s.spec)
+		if startErr != nil {
+			return imageSwapFailedMsg{reason: startErr.Error()}
+		}
+		if err := c.DetectShell(context.Background()); err != nil {
+			return imageSwapFailedMsg{reason: err.Error()}
+		}
+		if err := runner.InstallRetry(context.Background(), c, s.steps, s.outcome.FailedIndex); err != nil {
+			s.log.note(fmt.Sprintf("предупреждение: %s — команда retry в контейнере недоступна", err))
+		}
+
+		s.ownerRestored = false
+		s.img = choice
+		s.c = c
+
+		return imageSwappedMsg{image: choice.Ref}
+	}
+}
+
 // restoreOwner возвращает владельца файлам рабочего каталога через
 // Container.Chown — идемпотентно: повторный вызов после успешного возврата
 // ничего не делает. Вызывается и из Close, и из CleanCmd (задача 3) перед
