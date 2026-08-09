@@ -210,6 +210,19 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	case tea.PasteMsg:
+		// Скобочная вставка включена в Bubble Tea v2 по умолчанию (кадр не
+		// выставляет View.DisableBracketedPasteMode), и вставленный текст
+		// приходит отдельным сообщением, а НЕ клавишей: без этой ветви
+		// вставленная из буфера ссылка не доезжала до поля ввода вовсе.
+		// Собственной вставки в значение поля здесь нет — textinput.Model
+		// понимает tea.PasteMsg сам (charm.land/bubbles/v2/textinput).
+		if m.asking {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	case checkResultMsg:
 		return m.applyCheckResult(msg)
 	case guideDoneMsg:

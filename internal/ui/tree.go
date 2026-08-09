@@ -329,6 +329,20 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 		m.runs, cmd = m.runs.setProject(msg.project)
 		return m, cmd
 
+	case tea.PasteMsg:
+		// Вставка из буфера приходит отдельным сообщением, а не клавишей
+		// (скобочная вставка Bubble Tea v2) — та же ветвь, что и у поля
+		// ввода заставки. Осмысленна она здесь ровно в одном состоянии: при
+		// открытом фильтре списка. Компонент списка Bubbles передаёт вставку
+		// своему полю фильтра сам (handleFiltering), поэтому вставлять текст
+		// в значение фильтра руками не нужно.
+		if m.focus == focusTree && m.list.FilterState() == list.Filtering {
+			var cmd tea.Cmd
+			m.list, cmd = m.list.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.focus == focusTree && m.list.FilterState() == list.Filtering {
 			var cmd tea.Cmd

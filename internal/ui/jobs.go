@@ -190,6 +190,17 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 	case commandMsg:
 		return m.applyCommand(msg)
 
+	case tea.PasteMsg:
+		// Вставка в открытую строку команды: приходит отдельным сообщением,
+		// а не клавишей (скобочная вставка Bubble Tea v2). Вне открытой
+		// строки команды вставлять на этом экране некуда.
+		if m.cmd.active {
+			var cmd tea.Cmd
+			m.cmd.input, cmd = m.cmd.input.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.cmd.active {
 			return m.updateCommandKey(msg)

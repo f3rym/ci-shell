@@ -391,6 +391,24 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case commandMsg:
 		return m.applyCommand(msg)
 
+	case tea.PasteMsg:
+		// Вставка приходит отдельным сообщением, а не клавишей (скобочная
+		// вставка Bubble Tea v2), поэтому updateKey её не видит вовсе. На
+		// этом экране два поля ввода, и вставка уходит тому, которое сейчас
+		// открыто: строке команды либо сообщению коммита (одновременно они
+		// не активны никогда — applyIdle-проверка в updateKey).
+		if m.cmd.active {
+			var cmd tea.Cmd
+			m.cmd.input, cmd = m.cmd.input.Update(msg)
+			return m, cmd
+		}
+		if m.apply.stage == applyMessage {
+			var cmd tea.Cmd
+			m.apply.msgInput, cmd = m.apply.msgInput.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	}

@@ -449,6 +449,21 @@ type guideDismissMsg struct{}
 // Update — ни одна ветвь этого метода не завершает программу: это и есть
 // требование фазы, а не деталь.
 func (m guideModel) Update(msg tea.Msg) (guideModel, tea.Cmd) {
+	// Вставка из буфера названа отдельной ветвью, хотя ниже она и так дошла
+	// бы до поля через общую ветвь «не клавиша»: скобочная вставка Bubble
+	// Tea v2 приходит своим сообщением, а не клавишей, и на всех остальных
+	// экранах проекта эта ветвь заведена явно (splash.go, jobs.go, job.go,
+	// tree.go). Молчаливая опора на общую ветвь здесь означала бы, что
+	// первая же её правка тихо унесёт вставку в поле токена вместе с собой.
+	if paste, ok := msg.(tea.PasteMsg); ok {
+		if m.Guide.Kind != guideInput {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.Input, cmd = m.Input.Update(paste)
+		return m, cmd
+	}
+
 	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		if m.Guide.Kind == guideInput {
