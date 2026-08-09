@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/event"
@@ -121,6 +122,11 @@ type jobModel struct {
 
 	spin spinner.Model
 
+	// cmd — строка команды (задача 1, план 09-03): двоеточие открывает её и
+	// передаёт ей фокус; пока она активна, клавиши уходят в неё, а не в
+	// экран, и место строки клавиш занимает поле ввода (см. keyBar).
+	cmd commandBar
+
 	width, height int
 }
 
@@ -197,8 +203,37 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case runFinishedMsg:
 		return m.applyRunFinished(msg), nil
 
+	case commandMsg:
+		return m.applyCommand(msg)
+
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
+	}
+	return m, nil
+}
+
+// applyCommand — единственный переключатель, ведущий разобранную команду
+// строки команды к тем же обработчикам, что и горячие клавиши: второго
+// места запуска прогонов не появляется (startRun уже принимает вид прогона
+// параметром, план 09-02). R/rest/clean зовут его же; A, commit, image и !
+// наполняются задачами 2 и 3 этого плана тем же переключателем — второе
+// место разбора команды не заводится.
+func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
+	switch msg.Name {
+	case "R":
+		if m.canRun() && m.session.outcome.Failed != nil {
+			return m.startRun(runRetry)
+		}
+	case "rest":
+		if m.canRun() && m.session.outcome.Failed != nil {
+			return m.startRun(runRest)
+		}
+	case "clean":
+		if m.canRun() {
+			return m.startRun(runClean)
+		}
+	case "q":
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -329,8 +364,16 @@ func (m jobModel) applyEvent(e event.Event) jobModel {
 	return m
 }
 
-// updateKey разбирает нажатие клавиши экрана джобы.
+// updateKey разбирает нажатие клавиши экрана джобы. Пока строка команды
+// активна, клавиши уходят в неё, а не в раскладку экрана — единственное
+// исключение выше самого переключателя, потому что поле ввода обязано
+// увидеть каждый символ, включая те, что совпадают с горячими клавишами
+// экрана (например, "R" внутри набираемой команды).
 func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
+	if m.cmd.active {
+		return m.updateCommandKey(msg)
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Cancel):
 		if m.phase == phasePreparing || m.phase == phaseRunning {
@@ -338,6 +381,15 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 			m.canceling = true
 		}
 		return m, nil
+
+	case key.Matches(msg, m.keys.Command):
+		// Двоеточие открывает строку команды и передаёт ей фокус (задача 1,
+		// план 09-03) — тот же приём поля ввода Bubbles, что и у заставки
+		// (internal/ui/splash.go): Focus() при создании, textinput.Blink
+		// командой, чтобы курсор начал мигать сразу.
+		m.cmd = newCommandBar()
+		m.cmd.active = true
+		return m, textinput.Blink
 
 	case key.Matches(msg, m.keys.Shell) && m.phase == phaseImageReady:
 		// Нажатие НЕ возвращает механизм передачи терминала сразу: сначала
@@ -366,6 +418,35 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// updateCommandKey обрабатывает нажатие клавиши, пока строка команды
+// активна. Подтверждение разбирает набранное и шлёт commandMsg тем же
+// переключателем, что и клавиши (applyCommand); отказ разбора остаётся
+// строкой над подсказкой (keyBar) и НЕ закрывает поле — человек может
+// поправить набранное и подтвердить снова. Отмена по привязке возврата
+// закрывает поле, ничего не выполняя. Любая другая клавиша уходит в поле
+// ввода как обычный ввод текста.
+func (m jobModel) updateCommandKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
+	switch {
+	case msg.String() == "enter":
+		raw := m.cmd.input.Value()
+		parsed, err := parseCommand(raw)
+		if err != nil {
+			m.cmd.err = err.Error()
+			return m, nil
+		}
+		m.cmd = commandBar{}
+		return m, func() tea.Msg { return parsed }
+
+	case key.Matches(msg, m.keys.Back):
+		m.cmd = commandBar{}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.cmd.input, cmd = m.cmd.input.Update(msg)
+	return m, cmd
 }
 
 // stepRowsFromSession строит срез строк шагов из уже готового результата
@@ -558,11 +639,24 @@ func (m jobModel) bodyView() string {
 	return body
 }
 
-// keyBar собирает строку клавиш экрана джобы: шелл, повторить шаг, назад,
-// выход. Перенос правок и командный режим (:rest, :clean, :image) — план
-// 09-03, здесь их нет.
+// keyBar собирает строку клавиш экрана джобы: шелл, повторить шаг, командный
+// режим, назад, выход (перенос правок клавишей A подключает задача 2). Пока
+// строка команды активна, на её месте — само поле ввода, а последняя ошибка
+// разбора (если есть) показывается строкой НАД ним тем же приёмом, что и
+// строка подсказки (RenderHint) — контракт требует, чтобы отказ не закрывал
+// поле, и чтобы настоящая строка подсказки внизу экрана осталась на месте
+// без исключений (она рисуется отдельно, в App.View).
 func (m jobModel) keyBar() string {
-	return KeyBar(m.theme, m.keys.Shell, m.keys.Retry, m.keys.Back, m.keys.Quit)
+	if m.cmd.active {
+		var b strings.Builder
+		if m.cmd.err != "" {
+			b.WriteString(RenderHint(m.theme, m.cmd.err))
+			b.WriteString("\n")
+		}
+		b.WriteString(m.cmd.input.View())
+		return b.String()
+	}
+	return KeyBar(m.theme, m.keys.Shell, m.keys.Retry, m.keys.Command, m.keys.Back, m.keys.Quit)
 }
 
 // hintText — (jobModel) hintText() string, единственная функция отображения
