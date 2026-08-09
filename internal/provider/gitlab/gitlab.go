@@ -330,23 +330,32 @@ func (c *Client) JobByID(ctx context.Context, projectPath string, jobID int64) (
 // через PipelineJobs) в доменный provider.Job — единственное место сборки,
 // чтобы два места сборки из одного и того же ответа не разошлись при
 // первом добавленном поле.
+//
+// Каждая текстовая строка проходит через provider.SafeText — то же правило и
+// то же место, что и у трёх соседних переносов (toGroup/toProject/toPipeline,
+// browse.go): дальше эти строки уходят прямо в терминал, и не всякий путь
+// отрисовки прогоняет их через меру ширины (заголовок панели лога, статус в
+// строке списка, ветка в заголовке панели, строка подсказки). Имя джобы
+// приходит из .gitlab-ci.yml, то есть от любого, кто может пушить в проект, и
+// CSI-последовательность в нём перерисовала бы кадр и подделала бы строку
+// подсказки (T-10-03, CR-06 обзора v0.3.0).
 func toJob(resp jobResponse, projectPath string) provider.Job {
 	job := provider.Job{
 		ID:            resp.ID,
-		Name:          resp.Name,
-		Stage:         resp.Stage,
-		Status:        resp.Status,
-		FailureReason: resp.FailureReason,
-		Ref:           resp.Ref,
+		Name:          provider.SafeText(resp.Name),
+		Stage:         provider.SafeText(resp.Stage),
+		Status:        provider.SafeText(resp.Status),
+		FailureReason: provider.SafeText(resp.FailureReason),
+		Ref:           provider.SafeText(resp.Ref),
 		Tag:           resp.Tag,
 		CommitSHA:     resp.Commit.ID,
-		CommitTitle:   resp.Commit.Title,
+		CommitTitle:   provider.SafeText(resp.Commit.Title),
 		WebURL:        resp.WebURL,
 		ProjectPath:   projectPath,
 		ProjectID:     resp.Project.ID,
 		PipelineID:    resp.Pipeline.ID,
 		PipelineIID:   resp.Pipeline.IID,
-		RunnerDesc:    resp.Runner.Description,
+		RunnerDesc:    provider.SafeText(resp.Runner.Description),
 	}
 	if resp.StartedAt != nil {
 		job.StartedAt = *resp.StartedAt

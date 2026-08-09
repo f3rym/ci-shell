@@ -93,6 +93,15 @@ func Truncate(s string, max int) string {
 	if lipgloss.Width(s) <= max {
 		return s
 	}
+	if max == 1 {
+		// MaxWidth(0) в Lip Gloss означает «ограничения нет»: обрезки не
+		// произошло бы вовсе, и функция вернула бы строку ШИРЕ запрошенного с
+		// приклеенным многоточием. Единица — не теоретический край: строка
+		// шага прижимает ширину команды именно к ней (internal/ui/job.go,
+		// stepLine), и на узкой панели кадр разъезжался целиком (WR-06
+		// обзора v0.3.0).
+		return "…"
+	}
 	return lipgloss.NewStyle().MaxWidth(max-1).Render(s) + "…"
 }
 

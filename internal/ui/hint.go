@@ -19,11 +19,23 @@ func RenderHint(t Theme, text string) string {
 // и подмены образа экрана джобы — принадлежат планам 09-02 и 09-03: таблица
 // контракта разложена по планам целиком, а не урезана здесь.
 
-// HintJobFailed — в пайплайне есть упавшая джоба, ещё не открыта.
+// HintJobFailed — в пайплайне есть упавшая джоба, ещё не открыта, и номер
+// упавшего шага известен.
 func HintJobFailed(name string, step, total int) string {
 	return fmt.Sprintf(
 		"джоба %s упала на шаге %d из %d — нажмите "+GlyphEnter+", чтобы воспроизвести её локально",
-		name, step, total,
+		Plain(name), step, total,
+	)
+}
+
+// HintJobFailedUnknownStep — та же ситуация, но номер упавшего шага
+// неизвестен: конфиг джобы на экране списка не запрашивается. Отдельная
+// формулировка, а не нули в подстановке: «упала на шаге 0 из 0» — такое же
+// враньё числами, только менее заметное (WR-13 обзора v0.3.0).
+func HintJobFailedUnknownStep(name string) string {
+	return fmt.Sprintf(
+		"джоба %s упала — нажмите "+GlyphEnter+", чтобы воспроизвести её локально",
+		Plain(name),
 	)
 }
 
@@ -57,9 +69,11 @@ func HintBlocked(reason string) string {
 // подсказки», раздел «Джоба») — план 09-02. Каждая функция называет ровно
 // одну строку таблицы контракта, чтобы формулировка жила в одном месте.
 
-// HintImageReady — образ готов, шелл ещё не открывали.
+// HintImageReady — образ готов, шелл ещё не открывали. Ссылка на образ
+// приходит из конфига джобы (.gitlab-ci.yml) и чистится здесь: переноса
+// ответа API, который сделал бы это раньше, у неё нет (CR-06).
 func HintImageReady(image string) string {
-	return fmt.Sprintf("образ %s готов — нажмите s, чтобы войти в контейнер", image)
+	return fmt.Sprintf("образ %s готов — нажмите s, чтобы войти в контейнер", Plain(image))
 }
 
 // HintLeftShell — вышли из шелла (после возврата терминала), R ещё не нажимали.
@@ -76,12 +90,7 @@ func HintHandingTerminal() string {
 
 // HintPullingImage — тяга образа началась, число слоёв ещё не известно.
 func HintPullingImage(image string) string {
-	return fmt.Sprintf("тяну образ %s…", image)
-}
-
-// HintPullingLayers — тяга образа идёт, число слоёв уже известно.
-func HintPullingLayers(image string, done, total int) string {
-	return fmt.Sprintf("тяну образ %s… слой %d из %d", image, done, total)
+	return fmt.Sprintf("тяну образ %s…", Plain(image))
 }
 
 // HintCanceling — Ctrl-C во время долгой операции: секунда до возврата на
@@ -177,7 +186,7 @@ func HintNoChanges() string {
 // «Copywriting Contract» контракта — блокирующего вопроса у замены нет,
 // потому что она обратима повторной командой.
 func HintImageReplaced(image string) string {
-	return fmt.Sprintf("образ заменён на %s, контейнер перезапущен", image)
+	return fmt.Sprintf("образ заменён на %s, контейнер перезапущен", Plain(image))
 }
 
 // HintExecDone — :!<команда> завершилась кодом code. Формулировка не задана
@@ -320,11 +329,6 @@ func HintFixPerms() string {
 	return "выполните команду ниже и нажмите ⏎, чтобы повторить"
 }
 
-// HintGuideBack — подсказка возврата с экрана проводника.
-func HintGuideBack() string {
-	return "esc вернёт на предыдущий экран"
-}
-
 // HintDockerMissing — экран проводника: Docker не найден.
 func HintDockerMissing() string {
 	return "Docker не найден — выполните команду ниже, поставьте его и нажмите ⏎"
@@ -391,7 +395,7 @@ func HintUnresolvedConfig() string {
 
 // HintImageSet — образ задан экраном проводника, подготовка повторяется.
 func HintImageSet(image string) string {
-	return fmt.Sprintf("образ %s задан — повторяю подготовку", image)
+	return fmt.Sprintf("образ %s задан — повторяю подготовку", Plain(image))
 }
 
 // HintApplyOutsideRepo — экран проводника: перенос правок вне рабочей копии.

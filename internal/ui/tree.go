@@ -509,7 +509,10 @@ func (m treeModel) bodyView(width int) string {
 	}
 
 	parts := []string{header, body}
-	if !m.complete[""] {
+	// «Не знаем» и «неполон» — разные вещи: до первого treeLoadedMsg карта
+	// пуста, и голое !m.complete[""] печатало под «тяну список…» строку
+	// «показаны первые 0 записей — список длиннее» (WR-09 обзора v0.3.0).
+	if loaded, known := m.complete[""]; known && !loaded {
 		parts = append(parts, m.theme.Muted.Render(fmt.Sprintf("показаны первые %d записей — список длиннее", len(m.roots))))
 	}
 	if m.cached[""] {

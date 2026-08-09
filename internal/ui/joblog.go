@@ -241,19 +241,22 @@ func (p logPanel) currentLog() (provider.Log, bool) {
 	return e.log, ok
 }
 
-// title собирает заголовок панели: с секцией, целиком или без джобы.
+// title собирает заголовок панели: с секцией, целиком или без джобы. Имя
+// джобы и имя секции идут через очистку: заголовок попадает в кадр минуя
+// меру ширины, а имя секции приходит из маркеров лога ранера (CR-06 обзора
+// v0.3.0).
 func (p logPanel) title() string {
 	switch {
 	case !p.hasJob:
 		return "ЛОГ ДЖОБЫ"
 	case p.fullShow:
-		return fmt.Sprintf("ЛОГ ДЖОБЫ %s · целиком", p.job.Name)
+		return fmt.Sprintf("ЛОГ ДЖОБЫ %s · целиком", Plain(p.job.Name))
 	default:
 		section := "?"
 		if l, ok := p.currentLog(); ok && l.Section != "" {
 			section = l.Section
 		}
-		return fmt.Sprintf("ЛОГ ДЖОБЫ %s · %s", p.job.Name, section)
+		return fmt.Sprintf("ЛОГ ДЖОБЫ %s · %s", Plain(p.job.Name), Plain(section))
 	}
 }
 

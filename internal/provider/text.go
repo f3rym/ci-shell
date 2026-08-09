@@ -9,63 +9,24 @@
 // каждом месте показа.
 package provider
 
-import "strings"
+import "github.com/f3rym/ci-shell/internal/textwidth"
 
 // MaxTextRunes — предел длины строки провайдера после очистки, по рунам.
 const MaxTextRunes = 4096
 
 // SafeText убирает из s управляющие последовательности терминала
 // (последовательности, начинающиеся управляющим байтом ESC 0x1b, вместе с их
-// телом до завершающего символа) и все управляющие символы диапазона C0
-// кроме табуляции, а также байт 0x7f (DEL); печатные символы остаются как
-// есть. Длина обрезается до MaxTextRunes по рунам.
+// телом до завершающего символа), все управляющие символы диапазона C0 и
+// байт 0x7f (DEL); перевод строки и табуляция заменяются пробелом, чтобы
+// соседние слова не склеились. Длина обрезается до MaxTextRunes по рунам.
+//
+// Сам разбор ESC/CSI/OSC/C0/DEL живёт в единственном месте проекта —
+// internal/textwidth.Plain, — а здесь остаётся только предел длины. Второго
+// такого разбора быть не должно: два почти одинаковых обхода разъезжались бы
+// на первой же правке (скажем, при добавлении DCS/APC), и дырявым остался бы
+// именно тот, что стоит на пути отрисовки кадра (WR-11 обзора v0.3.0).
 func SafeText(s string) string {
-	runes := []rune(s)
-	var b strings.Builder
-	b.Grow(len(runes))
-
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		switch {
-		case r == 0x1b:
-			i++
-			if i >= len(runes) {
-				break
-			}
-			switch runes[i] {
-			case '[':
-				// CSI: параметры и промежуточные байты до одного финального
-				// байта в диапазоне 0x40-0x7e.
-				i++
-				for i < len(runes) && !(runes[i] >= 0x40 && runes[i] <= 0x7e) {
-					i++
-				}
-			case ']':
-				// OSC: тело до BEL (0x07) или до ST (ESC '\\').
-				i++
-				for i < len(runes) && runes[i] != 0x07 {
-					if runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '\\' {
-						i++
-						break
-					}
-					i++
-				}
-			default:
-				// Прочие двухбайтовые escape-последовательности — тело в
-				// один символ, уже пропущенный выше.
-			}
-		case r == 0x7f:
-			// DEL — управляющий байт, не печатный символ.
-		case r == '\t':
-			b.WriteRune(r)
-		case r < 0x20:
-			// Остальной диапазон C0 — управляющие байты, отбрасываются.
-		default:
-			b.WriteRune(r)
-		}
-	}
-
-	out := []rune(b.String())
+	out := []rune(textwidth.Plain(s))
 	if len(out) > MaxTextRunes {
 		out = out[:MaxTextRunes]
 	}

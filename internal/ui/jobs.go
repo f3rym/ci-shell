@@ -219,8 +219,14 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		case key.Matches(msg, m.keys.Back):
 			return m, func() tea.Msg { return backMsg{} }
 		case key.Matches(msg, m.keys.Command):
-			m.cmd = newCommandBar()
-			return m, nil
+			// Открытие — общим хелпером (internal/ui/command.go), тем же, что
+			// и на экране джобы: без поднятого признака активности строка
+			// команды не получала ввод, не рисовалась и не считалась полем
+			// ввода — двоеточие здесь не делало ничего, а вместе с ним были
+			// недоступны :log и :q (CR-05 обзора v0.3.0).
+			var cmd tea.Cmd
+			m.cmd, cmd = openCommandBar()
+			return m, cmd
 		}
 	}
 	return m, nil
@@ -287,7 +293,7 @@ func (m jobsModel) panelTitle() string {
 	if len(sha) > 8 {
 		sha = sha[:8]
 	}
-	title := fmt.Sprintf("ПАЙПЛАЙН #%d · %s · %s", m.job.PipelineID, m.job.Ref, sha)
+	title := fmt.Sprintf("ПАЙПЛАЙН #%d · %s · %s", m.job.PipelineID, Plain(m.job.Ref), sha)
 	return m.theme.PanelTitle.Render(title)
 }
 
@@ -314,7 +320,7 @@ func (m jobsModel) rowLine(j provider.Job, selected bool) string {
 	ago := m.theme.Muted.Render(Ago(j.FinishedAt))
 
 	line := fmt.Sprintf("%s%s%s  %s%s  %s",
-		glyph, strings.Repeat(" ", RowIconGap), name, j.Status, note, ago)
+		glyph, strings.Repeat(" ", RowIconGap), name, Plain(j.Status), note, ago)
 	if selected {
 		line = m.theme.Selected.Render(line + " " + GlyphCursor)
 	}
@@ -392,11 +398,11 @@ func (m jobsModel) hintText() string {
 	for _, j := range m.jobs {
 		if j.Status == StatusFailed {
 			// Номер упавшего шага и их общее число берутся из конфига
-			// джобы, если он уже разобран — на этом экране он не
-			// запрашивается (запрос конфига принадлежит экрану джобы,
-			// план 09-02), поэтому подстановка держится нулевой: врать
-			// числами в подсказке нельзя.
-			return HintJobFailed(j.Name, 0, 0)
+			// джобы — на этом экране он не запрашивается (запрос конфига
+			// принадлежит экрану джобы, план 09-02). Поэтому берётся
+			// формулировка без чисел, а не нулевая подстановка: «упала на
+			// шаге 0 из 0» — тоже враньё числами (WR-13 обзора v0.3.0).
+			return HintJobFailedUnknownStep(j.Name)
 		}
 	}
 	for _, j := range m.jobs {

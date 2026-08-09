@@ -117,13 +117,6 @@ type jobModel struct {
 	banner          string
 	blockedCanceled bool
 
-	// logErr — обрыв чтения лога. Буфер лога живёт только в памяти и не
-	// читает файлов, поэтому это поле сегодня не заполняется никем — ветка
-	// сохранена, чтобы честное пустое/ошибочное состояние контракта
-	// (09-UI-SPEC.md, «Состояния пустоты и ошибок по экранам») не потерялось
-	// при первом реальном источнике обрыва.
-	logErr string
-
 	// runLabel/runOffset/runStep — состояние идущего прогона задачи 3
 	// (phaseRunning): метка вида прогона для HintRunning, смещение среза
 	// шагов (то же, что получила RetryStepCmd/RestCmd/CleanCmd) и абсолютный
@@ -371,7 +364,12 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 			m.blockedCanceled = false
 			return m, tea.ClearScreen
 		}
-		m.banner = ""
+		// Возврат прав файлу секретов к 0600 и повтор подготовки
+		// подтверждаются человеку баннером, а не молчанием: контракт фазы 11
+		// требует сообщить об этом состоянии (WR-10 обзора v0.3.0).
+		m.banner = HintSecretsEdited(msg.Path)
+		m.blockedCanceled = true
+		m.phase = phasePreparing
 		return m, tea.Batch(tea.ClearScreen, m.session.RestartCmd(context.Background()))
 
 	case pullFinishedMsg:
@@ -760,12 +758,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Command):
 		// Двоеточие открывает строку команды и передаёт ей фокус (задача 1,
-		// план 09-03) — тот же приём поля ввода Bubbles, что и у заставки
-		// (internal/ui/splash.go): Focus() при создании, textinput.Blink
-		// командой, чтобы курсор начал мигать сразу.
-		m.cmd = newCommandBar()
-		m.cmd.active = true
-		return m, textinput.Blink
+		// план 09-03) — общим хелпером openCommandBar (internal/ui/command.go),
+		// тем же, что и на экране списка джоб: второго места открытия строки
+		// команды в проекте нет.
+		var cmd tea.Cmd
+		m.cmd, cmd = openCommandBar()
+		return m, cmd
 
 	// Вход в шелл висит на готовности сессии, а не на одной фазе (WR-08
 	// обзора v0.3.0): после первого выхода фаза становится phaseLeftShell,
@@ -1027,8 +1025,10 @@ func (m jobModel) envPanel() string {
 
 // logPanel рисует панель лога: по умолчанию (после готовности сессии, когда
 // упавший шаг известен) открыт хвост упавшего шага; пока шаг не выбран —
-// честная строка ожидания; при обрыве чтения — честная строка отказа вместо
-// содержимого. Пока идёт или только что закончилась произвольная команда :!
+// честная строка ожидания. Отдельного состояния обрыва чтения у панели нет:
+// буфер лога живёт только в памяти и не читает файлов, обрываться нечему —
+// поле под него не заводится, пока не появится реальный источник обрыва.
+// Пока идёт или только что закончилась произвольная команда :!
 // (execView, задача 3), заголовок панели меняется на «ВЫВОД КОМАНДЫ» — тот
 // же буфер лога, что и у шагов, только заголовок называет, что сейчас в нём.
 func (m jobModel) logPanel() string {
@@ -1042,11 +1042,8 @@ func (m jobModel) logPanel() string {
 	}
 	title := m.theme.PanelTitle.Render(titleText)
 
-	switch {
-	case m.cursor < 0:
+	if m.cursor < 0 {
 		return title + "\n" + m.theme.Muted.Render("лог появится, когда вы выберете шаг")
-	case m.logErr != "":
-		return title + "\n" + fmt.Sprintf("лог недоступен: %s", m.logErr)
 	}
 
 	lines := lastLines(m.session.Log(), logPanelLines)
@@ -1068,7 +1065,9 @@ func lastLines(lines []string, n int) []string {
 func (m jobModel) preparingView() string {
 	label := "готовлю джобу…"
 	if m.pulling {
-		label = fmt.Sprintf("тяну образ %s…", m.pullImage)
+		// Та же формулировка, что и в строке подсказки, — и та же очистка
+		// ссылки на образ: она приходит из конфига джобы (CR-06).
+		label = HintPullingImage(m.pullImage)
 	}
 	return m.spin.View() + " " + m.theme.Text.Render(label)
 }
