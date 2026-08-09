@@ -9,23 +9,30 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 
+	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
-	"github.com/f3rym/ci-shell/internal/provider/gitlab"
-	"github.com/f3rym/ci-shell/internal/token"
 )
 
 // jobsModel — экран списка джоб пайплайна (TUI-03): одна полноширинная
 // панель без дерева слева (09-UI-SPEC.md, «Границы этой фазы»).
 type jobsModel struct {
 	ref joburl.Ref
-	p   provider.Provider
-	// job — метаданные открывающей джобы, пришедшие с заставки: второй
-	// запрос за ними список джоб не делает.
+	// b — клиент пакета обхода (Фаза 10, BROW-02): список джоб приходит
+	// обойденным постранично и из кэша, пока он свеж — второго пути к
+	// списку джоб в экране не заводится.
+	b *browse.Client
+	// job — метаданные открывающей джобы (вход по ссылке) либо синтетическая
+	// запись с полями пайплайна (вход из дерева, newJobsModelFromPipeline):
+	// в обоих случаях panelTitle и load() читают только PipelineID/Ref/
+	// CommitSHA — второй ветки для этих двух полей не заводится.
 	job provider.Job
 
-	jobs   []provider.Job
-	cursor int
+	jobs     []provider.Job
+	cursor   int
+	complete bool
+	cached   bool
+	fetched  string
 
 	loading bool
 	loadErr string
@@ -39,26 +46,44 @@ type jobsModel struct {
 }
 
 // Сообщения экрана списка джоб.
-type jobsLoadedMsg struct{ jobs []provider.Job }
+type jobsLoadedMsg struct {
+	jobs     []provider.Job
+	complete bool
+	cached   bool
+	fetched  string
+}
 type jobsFailedMsg struct{ reason string }
 type openJobMsg struct{ job provider.Job }
 
-// newJobsModel строит модель списка джоб. Значение интерфейса провайдера
-// собирается здесь же: сообщение jobRefMsg несёт только ref и job, поэтому
-// резолв токена и клиент GitLab — забота этой модели, а не заставки.
-func newJobsModel(ref joburl.Ref, job provider.Job, theme Theme, keys KeyMap) jobsModel {
+// newJobsModel строит модель списка джоб для входа по ссылке с заставки.
+// Клиент обхода b собирается вызывающим (internal/ui/app.go) — единственное
+// место в пакете, конструирующее browse.Client (то же самое, что уже
+// собрало экран дерева); loadErr, если токен для хоста ссылки не резолвится,
+// приходит уже готовой строкой, потому что до этого места клиента обхода
+// собрать было не из чего.
+func newJobsModel(ref joburl.Ref, job provider.Job, b *browse.Client, loadErr string, theme Theme, keys KeyMap) jobsModel {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	return jobsModel{ref: ref, job: job, b: b, loadErr: loadErr, theme: theme, keys: keys, spin: sp}
+}
+
+// newJobsModelFromPipeline строит модель списка джоб для входа из дерева
+// групп и проектов (Фаза 10, BROW-03): пайплайн уже известен, метаданных
+// открывающей джобы нет вовсе. Клиент обхода — тот же, что уже собрал
+// экран дерева; второго клиента в интерфейсе не появляется.
+func newJobsModelFromPipeline(b *browse.Client, host string, project provider.Project, pipeline provider.Pipeline, theme Theme, keys KeyMap) jobsModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
-	m := jobsModel{ref: ref, job: job, theme: theme, keys: keys, spin: sp}
-
-	tok, err := token.Resolve(ref.Host)
-	if err != nil {
-		m.loadErr = err.Error()
-		return m
+	ref := joburl.Ref{Host: host, ProjectPath: project.FullPath}
+	job := provider.Job{
+		PipelineID:  pipeline.ID,
+		PipelineIID: pipeline.IID,
+		Ref:         pipeline.Ref,
+		CommitSHA:   pipeline.SHA,
+		ProjectPath: project.FullPath,
 	}
-	m.p = gitlab.New(ref.Host, tok)
-	return m
+	return jobsModel{ref: ref, job: job, b: b, theme: theme, keys: keys, spin: sp}
 }
 
 func (m jobsModel) setSize(width, height int) jobsModel {
@@ -68,26 +93,32 @@ func (m jobsModel) setSize(width, height int) jobsModel {
 }
 
 // load запускает загрузку джоб пайплайна командой в отдельной горутине —
-// контракт запрещает подвешивать интерфейс любой операцией, ходящей в
-// сеть.
+// контракт запрещает подвешивать интерфейс любой операцией, ходящей в сеть.
+// Список приходит через пакет обхода: обойден постранично целиком и взят из
+// кэша, пока он свеж (BROW-02).
 func (m jobsModel) load() tea.Cmd {
+	return m.fetch(false)
+}
+
+func (m jobsModel) fetch(refresh bool) tea.Cmd {
 	loadErr := m.loadErr
-	p := m.p
+	b := m.b
 	ref := m.ref
 	pipelineID := m.job.PipelineID
 
 	fetch := func() tea.Msg {
-		if p == nil {
+		if b == nil {
 			return jobsFailedMsg{reason: loadErr}
 		}
-		// Постраничный обход и кэш для этого экрана — план 10-03; здесь
-		// сигнатура приводится к новой форме первой страницей, чтобы
-		// дерево кода оставалось согласованным на границе плана 10-01.
-		page, err := p.PipelineJobs(context.Background(), ref.ProjectPath, pipelineID, provider.PageRequest{})
+		res, err := b.Jobs(context.Background(), ref.ProjectPath, pipelineID, refresh)
 		if err != nil {
 			return jobsFailedMsg{reason: err.Error()}
 		}
-		return jobsLoadedMsg{jobs: page.Items}
+		fetched := ""
+		if res.Cached {
+			fetched = Ago(res.FetchedAt)
+		}
+		return jobsLoadedMsg{jobs: res.Items, complete: res.Complete, cached: res.Cached, fetched: fetched}
 	}
 	return tea.Batch(fetch, m.spin.Tick)
 }
@@ -102,6 +133,9 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		m.loading = false
 		m.loadErr = ""
 		m.jobs = msg.jobs
+		m.complete = msg.complete
+		m.cached = msg.cached
+		m.fetched = msg.fetched
 		if m.cursor >= len(m.jobs) {
 			m.cursor = 0
 		}
@@ -130,17 +164,18 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Refresh):
 			m.loading = true
-			return m, m.load()
+			return m, m.fetch(true)
+		case key.Matches(msg, m.keys.Back):
+			return m, func() tea.Msg { return backMsg{} }
 		}
 	}
 	return m, nil
 }
 
-// keyBar собирает строку клавиш экрана: перемещение, открытие, обновление,
-// выход. Фильтра и помощи в ней нет — их клавиши принадлежат Фазам 10 и
-// 12, и их отсутствие здесь осознанное.
+// keyBar собирает строку клавиш экрана: перемещение, открытие, назад,
+// обновление, выход.
 func (m jobsModel) keyBar() string {
-	return KeyBar(m.theme, m.keys.Up, m.keys.Open, m.keys.Refresh, m.keys.Quit)
+	return KeyBar(m.theme, m.keys.Up, m.keys.Open, m.keys.Back, m.keys.Refresh, m.keys.Quit)
 }
 
 // panelTitle собирает заголовок панели: идентификатор пайплайна, ветку и
@@ -186,7 +221,9 @@ func (m jobsModel) rowLine(j provider.Job, selected bool) string {
 }
 
 // bodyView собирает тело панели: заголовок остаётся всегда, тело
-// заменяется одной честной строкой при пустом списке или ошибке загрузки.
+// заменяется одной честной строкой при пустом списке или ошибке загрузки;
+// неполный список и список из кэша называются отдельными приглушёнными
+// строками под таблицей, а не выдаются за свежие и полные (BROW-02).
 func (m jobsModel) bodyView() string {
 	header := m.panelTitle()
 
@@ -204,8 +241,12 @@ func (m jobsModel) bodyView() string {
 		b.WriteString(m.rowLine(j, i == m.cursor))
 		b.WriteString("\n")
 	}
-	if len(m.jobs) == 100 {
-		b.WriteString(m.theme.Muted.Render("показаны первые 100 джоб — постраничный обход появится позже"))
+	if !m.complete {
+		b.WriteString(m.theme.Muted.Render(fmt.Sprintf("показаны первые %d записей — список длиннее", len(m.jobs))))
+		b.WriteString("\n")
+	}
+	if m.cached {
+		b.WriteString(m.theme.Muted.Render(fmt.Sprintf("из кэша, %s назад", m.fetched)))
 	}
 	return b.String()
 }
@@ -220,7 +261,7 @@ func (m jobsModel) hintText() string {
 	}
 
 	for _, j := range m.jobs {
-		if j.Status == "failed" {
+		if j.Status == StatusFailed {
 			// Номер упавшего шага и их общее число берутся из конфига
 			// джобы, если он уже разобран — на этом экране он не
 			// запрашивается (запрос конфига принадлежит экрану джобы,

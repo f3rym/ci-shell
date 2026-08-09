@@ -187,3 +187,99 @@ func HintImageReplaced(image string) string {
 func HintExecDone(code int) string {
 	return fmt.Sprintf("команда завершилась с кодом %d — вывод в панели лога", code)
 }
+
+// Формулировки экрана дерева групп и проектов (Фаза 10, BROW-01,
+// 09-UI-SPEC.md «Строка подсказки»): по одной именованной функции на строку
+// таблицы, чтобы каждая формулировка жила ровно в одном месте.
+
+// HintTreeLoading — идёт первая загрузка корня дерева.
+func HintTreeLoading() string {
+	return "тяну список групп и проектов…"
+}
+
+// HintTreeExpand — курсор на свёрнутой группе.
+func HintTreeExpand(name string) string {
+	return fmt.Sprintf("группа %s свёрнута — ⏎ раскроет её", name)
+}
+
+// HintTreeCollapse — курсор на раскрытой группе.
+func HintTreeCollapse(name string) string {
+	return fmt.Sprintf("⏎ свернёт группу %s", name)
+}
+
+// HintTreeOpenProject — курсор на проекте.
+func HintTreeOpenProject(name string) string {
+	return fmt.Sprintf("⏎ покажет пайплайны проекта %s", name)
+}
+
+// HintTreeEmpty — токену не видно ни одной группы и ни одного проекта.
+func HintTreeEmpty() string {
+	return "токену не видно ни одной группы и ни одного проекта"
+}
+
+// HintTreeFailed — загрузка дерева провалилась.
+func HintTreeFailed(reason string) string {
+	return fmt.Sprintf("не удалось получить список: %s — g повторит запрос", reason)
+}
+
+// HintTreeFiltered — включён фильтр по дереву.
+func HintTreeFiltered(n int) string {
+	return fmt.Sprintf("подходит записей: %d — esc снимет фильтр", n)
+}
+
+// HintTreeStale — показанный список дерева взят из кэша.
+func HintTreeStale(age string) string {
+	return fmt.Sprintf("список из кэша, %s назад — g обновит", age)
+}
+
+// Формулировки правой панели пайплайнов экрана дерева (Фаза 10, BROW-03).
+
+// HintPipelinesPick — проект ещё не выбран.
+func HintPipelinesPick() string {
+	return "выберите проект слева, чтобы увидеть его пайплайны"
+}
+
+// HintPipelinesLoading — идёт загрузка пайплайнов проекта project.
+func HintPipelinesLoading(project string) string {
+	return fmt.Sprintf("тяну пайплайны проекта %s…", project)
+}
+
+// HintPipelinesEmpty — в проекте project ещё не было пайплайнов.
+func HintPipelinesEmpty(project string) string {
+	return fmt.Sprintf("в проекте %s ещё не было пайплайнов", project)
+}
+
+// HintPipelinesFailed — загрузка пайплайнов провалилась.
+func HintPipelinesFailed(reason string) string {
+	return fmt.Sprintf("не удалось получить пайплайны: %s — g повторит запрос", reason)
+}
+
+// HintPipelineOpen — курсор на строке пайплайна iid.
+func HintPipelineOpen(iid int64) string {
+	return fmt.Sprintf("⏎ покажет джобы пайплайна #%d", iid)
+}
+
+// Формулировки панели лога джобы настоящего прогона (Фаза 10, BROW-04).
+// Панель показывает лог, полученный от API через клиент обхода — не то же
+// самое, что панель лога локального воспроизведения (internal/ui/job.go),
+// и общих формулировок у них нет.
+
+// HintLogLoading — идёт запрос лога.
+func HintLogLoading() string {
+	return "тяну лог упавшего шага…"
+}
+
+// HintLogTail — показан хвост лога секции section.
+func HintLogTail(section string) string {
+	return fmt.Sprintf("показан хвост секции %s — :log вытянет лог целиком", section)
+}
+
+// HintLogFull — показан полный лог.
+func HintLogFull() string {
+	return "лог целиком — ↑↓ прокрутит его, esc вернёт к списку"
+}
+
+// HintLogUnavailable — запрос лога провалился.
+func HintLogUnavailable(reason string) string {
+	return fmt.Sprintf("лог джобы недоступен: %s — g повторит запрос", reason)
+}

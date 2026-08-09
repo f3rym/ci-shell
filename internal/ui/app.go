@@ -7,25 +7,30 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 
+	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/event"
+	"github.com/f3rym/ci-shell/internal/provider"
+	"github.com/f3rym/ci-shell/internal/provider/gitlab"
+	"github.com/f3rym/ci-shell/internal/token"
 )
 
-// screen — экран интерфейса. screenJobs и screenJob объявлены здесь же,
-// хотя наполняют их задача 3 этого плана и план 09-02 соответственно:
-// переключение экранов должно жить в одном месте, а не расползаться
-// правкой перечисления.
+// screen — экран интерфейса. screenJobs и screenJob объявлены с самого
+// начала (план 09-01/09-02); screenTree наполняет Фаза 10 (BROW-01) —
+// переключение экранов должно жить в одном месте, а не расползаться правкой
+// перечисления.
 type screen int
 
 const (
 	screenSplash screen = iota
 	screenJobs
 	screenJob
+	screenTree
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
 // реализующая интерфейс модели Bubble Tea. Подмодели экранов (splashModel,
-// далее jobsModel) — обычные структуры с методами обновления и отрисовки,
-// возвращающими строку, а не собственные реализации tea.Model.
+// jobsModel, treeModel, ...) — обычные структуры с методами обновления и
+// отрисовки, возвращающими строку, а не собственные реализации tea.Model.
 type App struct {
 	theme Theme
 	dark  bool
@@ -34,12 +39,31 @@ type App struct {
 	height int
 
 	current screen
-	splash  splashModel
-	jobs    jobsModel
-	job     jobModel
+	// stack — ранее открытые экраны (Фаза 10): путь по интерфейсу перестал
+	// быть линейным (заставка → дерево → джобы → джоба, но и заставка →
+	// джобы → джоба), и «назад» без стека расходится с тем, откуда человек
+	// пришёл.
+	stack []screen
+
+	splash splashModel
+	jobs   jobsModel
+	job    jobModel
+	tree   treeModel
+
+	// browseClient, provider, host, user — состояние обхода (Фаза 10):
+	// browse.New вызывается ровно в двух местах этого файла (browseMsg и
+	// jobRefMsg) и нигде больше в пакете — единственное место, знающее, как
+	// собрать клиент обхода поверх значения интерфейса провайдера.
+	browseClient *browse.Client
+	provider     provider.Provider
+	host         string
+	user         provider.User
 
 	keys KeyMap
 }
+
+// backMsg обрабатывается здесь же (см. Update) — экран сам решает, когда
+// его пора послать, объявление типа в internal/ui/tree.go.
 
 // programSend — функция отправки сообщения в запущенную программу Bubble
 // Tea; ставится в Run() сразу после tea.NewProgram, потому что раньше самой
@@ -60,6 +84,38 @@ func (a App) Init() tea.Cmd {
 	)
 }
 
+// push кладёт текущий экран в стек и переключается на next — единственное
+// место, меняющее a.current при переходе вперёд по дереву экранов.
+func (a App) push(next screen) App {
+	a.stack = append(a.stack, a.current)
+	a.current = next
+	return a
+}
+
+// back снимает экран со стека и возвращает его; пустой стек равнозначен
+// нынешнему поведению — уходит на заставку.
+func (a App) back() App {
+	if len(a.stack) == 0 {
+		a.current = screenSplash
+		return a
+	}
+	a.current = a.stack[len(a.stack)-1]
+	a.stack = a.stack[:len(a.stack)-1]
+	return a
+}
+
+// resolveBrowse резолвит токен хоста и собирает и значение интерфейса
+// провайдера, и клиент обхода поверх него — browse.New вызывается ровно
+// здесь и в обработке browseMsg ниже, больше нигде в пакете.
+func resolveBrowse(host string) (provider.Provider, *browse.Client, error) {
+	tok, err := token.Resolve(host)
+	if err != nil {
+		return nil, nil, err
+	}
+	p := gitlab.New(host, tok)
+	return p, browse.New(p, host), nil
+}
+
 // Update обрабатывает сообщения программы. Общие для всех экранов случаи
 // (размер окна, цвет фона, выход, возврат) разбираются здесь один раз;
 // остальное уходит подмодели текущего экрана.
@@ -71,6 +127,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.splash.width, a.splash.height = msg.Width, msg.Height
 		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
 		a.job = a.job.setSize(msg.Width, msg.Height)
+		if a.browseClient != nil {
+			// Дерево держит настоящий компонент списка Bubbles (list.Model)
+			// — до первого browseMsg он ещё не собран newTreeModel, и
+			// SetSize на нулевом значении небезопасен, в отличие от
+			// jobsModel/jobModel, которые обходятся простыми полями.
+			a.tree = a.tree.setSize(msg.Width, msg.Height)
+		}
 		return a, nil
 	case tea.BackgroundColorMsg:
 		a.dark = msg.IsDark()
@@ -90,22 +153,70 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 		if key.Matches(msg, a.keys.Back) && a.current != screenSplash {
-			if a.current == screenJob && a.job.session != nil {
-				sess := a.job.session
-				a.current = screenJobs
-				return a, func() tea.Msg { sess.Close(); return nil }
+			switch a.current {
+			case screenJob:
+				if a.job.session != nil {
+					sess := a.job.session
+					a = a.back()
+					return a, func() tea.Msg { sess.Close(); return nil }
+				}
+				a = a.back()
+				return a, nil
+			case screenTree, screenJobs:
+				// Экран сам решает: снять внутренний фокус/строку команды
+				// или попросить о переходе назад сообщением backMsg (case
+				// ниже) — Back здесь не перехватывается, а доходит до
+				// подмодели обычным путём (диспетчер в конце функции).
+			default:
+				a = a.back()
+				return a, nil
 			}
-			a.current = screenSplash
-			return a, nil
 		}
+
 	case jobRefMsg:
-		// Переключение на список джоб и передача выбранной джобы
-		// объявляются здесь: экран джобы ещё пуст (наполняет план 09-02),
-		// но перечисление экранов и место переключения не должны
-		// расползаться правкой второго плана.
-		a.jobs = newJobsModel(msg.ref, msg.job, a.theme, a.keys)
-		a.current = screenJobs
+		// Переключение на список джоб и передача выбранной джобы —
+		// splashModel уже разобрал ссылку и получил метаданные джобы; клиент
+		// обхода собирается здесь же (входа с прямой ссылки без обхода не
+		// было в Фазе 9, и второго места сборки клиента заводить незачем).
+		loadErr := ""
+		var b *browse.Client
+		if p, bc, err := resolveBrowse(msg.ref.Host); err != nil {
+			loadErr = err.Error()
+		} else {
+			a.provider, a.browseClient, a.host = p, bc, msg.ref.Host
+			b = bc
+		}
+		a.jobs = newJobsModel(msg.ref, msg.job, b, loadErr, a.theme, a.keys)
+		a.jobs = a.jobs.setSize(a.width, a.height)
+		a = a.push(screenJobs)
 		return a, a.jobs.load()
+
+	case browseMsg:
+		// Вход в браузер без ссылки (Фаза 10, BROW-01): значение интерфейса
+		// провайдера уже создано заставкой (CurrentUser), клиент обхода
+		// собирается здесь же поверх него.
+		a.provider = msg.Provider
+		a.host = msg.Host
+		a.user = msg.User
+		a.browseClient = browse.New(msg.Provider, msg.Host)
+		a.tree = newTreeModel(a.browseClient, a.host, a.user, a.theme, a.keys)
+		a.tree = a.tree.setSize(a.width, a.height)
+		a = a.push(screenTree)
+		return a, a.tree.loadRoot(false)
+
+	case openPipelineMsg:
+		// Открытие пайплайна с правой панели экрана дерева (BROW-03):
+		// экрана джоб второго в проекте не появляется — тот же jobsModel,
+		// второй конструктор.
+		a.jobs = newJobsModelFromPipeline(a.browseClient, a.host, msg.project, msg.pipeline, a.theme, a.keys)
+		a.jobs = a.jobs.setSize(a.width, a.height)
+		a = a.push(screenJobs)
+		return a, a.jobs.load()
+
+	case backMsg:
+		a = a.back()
+		return a, nil
+
 	case openJobMsg:
 		// Мост подключается к программе ровно здесь и один раз: программа
 		// Bubble Tea уже существует (programSend поставлен в Run), а
@@ -113,10 +224,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// одним переходом, чтобы второе место подключения не появилось.
 		bridge := NewBridge()
 		bridge.Attach(programSend)
-		sess := NewSession(a.jobs.ref, a.jobs.p, msg.job, event.Emitter{Sink: bridge})
+		sess := NewSession(a.jobs.ref, a.provider, msg.job, event.Emitter{Sink: bridge})
 		a.job = newJobModel(sess, a.theme, a.keys)
 		a.job = a.job.setSize(a.width, a.height)
-		a.current = screenJob
+		a = a.push(screenJob)
 		return a, a.job.init()
 	}
 
@@ -132,6 +243,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenJob:
 		var cmd tea.Cmd
 		a.job, cmd = a.job.update(msg)
+		return a, cmd
+	case screenTree:
+		var cmd tea.Cmd
+		a.tree, cmd = a.tree.update(msg)
 		return a, cmd
 	}
 	return a, nil
@@ -163,6 +278,11 @@ func (a App) View() tea.View {
 		body = a.job.bodyView()
 		keybar = a.job.keyBar()
 		hint = RenderHint(a.theme, a.job.hintText())
+	case screenTree:
+		title = title + "  " + a.theme.Muted.Render(a.host+" · "+a.user.Name)
+		body = a.tree.view()
+		keybar = a.tree.keyBar()
+		hint = RenderHint(a.theme, a.tree.hintText())
 	}
 
 	margin := strings.Repeat(" ", OuterMargin)

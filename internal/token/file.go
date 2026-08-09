@@ -49,28 +49,32 @@ func configPath() (string, error) {
 	return first, fmt.Errorf("token: конфиг-файл не найден: %w", os.ErrNotExist)
 }
 
-// fromFile ищет токен для host в конфиг-файле пользователя.
+// readConfig читает и разбирает конфиг-файл токенов, возвращая разобранный
+// конфиг, путь, из которого он прочитан, и ошибку. Все пять веток отказа
+// прежней fromFile сохранены дословно: отсутствующий путь и неудачный опрос
+// файла остаются «токена нет» для вызывающего; файл есть, но не обычный;
+// права шире 0600 (ErrInsecurePermissions); неудачное чтение; неудачный
+// разбор. Вынесена, чтобы Hosts (internal/token/hosts.go) могла опросить те
+// же записи, не читая значение токена.
 //
 // Права файла проверяются до чтения содержимого: файл, доступный группе
 // или остальным (Perm()&0o077 != 0), не читается вовсе — только
 // ErrInsecurePermissions с путём и подсказкой chmod (T-01-08).
-// Поиск хоста — точное совпадение ключа, без перебора и значений
-// «по умолчанию» (T-01-11).
-func fromFile(host string) (Token, error) {
+func readConfig() (fileConfig, string, error) {
 	path, err := configPath()
 	if err != nil {
-		return Token{}, ErrNoToken
+		return fileConfig{}, "", ErrNoToken
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return Token{}, ErrNoToken
+		return fileConfig{}, "", ErrNoToken
 	}
 	if !info.Mode().IsRegular() {
-		return Token{}, fmt.Errorf("token: %s не является обычным файлом", path)
+		return fileConfig{}, "", fmt.Errorf("token: %s не является обычным файлом", path)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return Token{}, fmt.Errorf(
+		return fileConfig{}, "", fmt.Errorf(
 			"token: %s имеет слишком широкие права (%s), почините: chmod 600 %s: %w",
 			path, info.Mode().Perm(), path, ErrInsecurePermissions,
 		)
@@ -78,12 +82,28 @@ func fromFile(host string) (Token, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Token{}, fmt.Errorf("token: чтение %s: %w", path, err)
+		return fileConfig{}, "", fmt.Errorf("token: чтение %s: %w", path, err)
 	}
 
 	var cfg fileConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Token{}, fmt.Errorf("token: разбор %s: %w", path, err)
+		return fileConfig{}, "", fmt.Errorf("token: разбор %s: %w", path, err)
+	}
+
+	return cfg, path, nil
+}
+
+// fromFile ищет токен для host в конфиг-файле пользователя. Поиск хоста —
+// точное совпадение ключа, без перебора и значений «по умолчанию» (T-01-11).
+func fromFile(host string) (Token, error) {
+	cfg, path, err := readConfig()
+	if err != nil {
+		// ErrInsecurePermissions — не «токена нет», а «читать небезопасно»:
+		// эта ветка обязана дойти до пользователя как есть (T-01-08).
+		if errors.Is(err, ErrInsecurePermissions) {
+			return Token{}, err
+		}
+		return Token{}, ErrNoToken
 	}
 
 	// Пользователи иногда записывают ключ хоста со схемой

@@ -74,6 +74,17 @@ type splashModel struct {
 
 	job provider.Job
 
+	// browsing, host, user, prov, hostsCount — режим обхода (Фаза 10,
+	// BROW-01): пустой ввод на подтверждении включает browsing, host берётся
+	// из token.Hosts(), а проверка ответа API вместо метаданных джобы
+	// спрашивает CurrentUser и несёт готовое значение интерфейса провайдера
+	// дальше в browseMsg — второй раз токен не резолвится.
+	browsing   bool
+	host       string
+	user       provider.User
+	prov       provider.Provider
+	hostsCount int
+
 	width  int
 	height int
 }
@@ -84,16 +95,32 @@ type checkResultMsg struct {
 	ok     bool
 	reason string
 	// job — метаданные джобы, полученные проверкой ответа API; поле
-	// заполнено только для checkAPIIndex, чтобы список джоб не запрашивал
-	// их повторно.
+	// заполнено только для checkAPIIndex в обычном режиме, чтобы список
+	// джоб не запрашивал их повторно.
 	job provider.Job
+	// user, prov — то же самое для режима обхода: CurrentUser и уже
+	// созданное значение интерфейса провайдера.
+	user provider.User
+	prov provider.Provider
 }
 
-// jobRefMsg — заставка успешно прошла все три проверки: разобранная ссылка
-// и метаданные открывающей джобы уходят экрану списка джоб.
+// jobRefMsg — заставка успешно прошла все три проверки в обычном режиме:
+// разобранная ссылка и метаданные открывающей джобы уходят экрану списка
+// джоб.
 type jobRefMsg struct {
 	ref joburl.Ref
 	job provider.Job
+}
+
+// browseMsg — заставка успешно прошла все три проверки в режиме обхода
+// (пустой ввод, Фаза 10, BROW-01): хост, полученный пользователь и уже
+// созданное значение интерфейса провайдера уходят экрану дерева групп и
+// проектов. Второй раз токен здесь не резолвится и в сообщение не попадает —
+// дальше по интерфейсу едет значение, умеющее ходить в API, а не секрет.
+type browseMsg struct {
+	Host     string
+	User     provider.User
+	Provider provider.Provider
 }
 
 func newSplashModel() splashModel {
@@ -133,6 +160,23 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 		if m.asking {
 			if msg.String() == "enter" {
 				raw := strings.TrimSpace(m.input.Value())
+				if raw == "" {
+					// Пустой ввод — режим обхода (BROW-01): ссылку
+					// вставлять не обязательно. Хост берётся перечислением
+					// из пакета токена; пустой список — тот же честный
+					// отказ, что и провалившаяся проверка.
+					hosts := token.Hosts()
+					if len(hosts) == 0 {
+						m.checks[checkTokenIndex].Reason = "токен не найден ни для одного хоста"
+						return m, nil
+					}
+					m.browsing = true
+					m.host = hosts[0]
+					m.hostsCount = len(hosts)
+					m.asking = false
+					m.checks[checkTokenIndex].State = checkRunning
+					return m, m.checkToken()
+				}
 				ref, err := parseRef(context.Background(), raw)
 				if err != nil {
 					// Неудача разбора — не фатальный отказ, а сообщение
@@ -167,6 +211,10 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 	if msg.job.ID != 0 {
 		m.job = msg.job
 	}
+	if msg.prov != nil {
+		m.user = msg.user
+		m.prov = msg.prov
+	}
 
 	if !msg.ok {
 		m.checks[msg.index].State = checkFailed
@@ -186,6 +234,12 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 		m.checks[checkDockerIndex].State = checkRunning
 		return m, m.checkDocker()
 	case checkDockerIndex:
+		if m.browsing {
+			host, user, prov := m.host, m.user, m.prov
+			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+				return browseMsg{Host: host, User: user, Provider: prov}
+			})
+		}
 		ref, job := m.ref, m.job
 		return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
 			return jobRefMsg{ref: ref, job: job}
@@ -194,11 +248,20 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 	return m, nil
 }
 
-// checkToken резолвит токен для хоста ссылки. Успех несёт редактированную
+// checkHost — хост текущей проверки: хост режима обхода или хост
+// разобранной ссылки, в зависимости от того, каким путём заставка пошла.
+func (m splashModel) checkHost() string {
+	if m.browsing {
+		return m.host
+	}
+	return m.ref.Host
+}
+
+// checkToken резолвит токен для хоста. Успех несёт редактированную
 // строковую форму токена (Token.String) — само значение токена в интерфейс
 // не попадает никогда (T-09-01).
 func (m splashModel) checkToken() tea.Cmd {
-	host := m.ref.Host
+	host := m.checkHost()
 	return func() tea.Msg {
 		tok, err := token.Resolve(host)
 		if err != nil {
@@ -208,9 +271,28 @@ func (m splashModel) checkToken() tea.Cmd {
 	}
 }
 
-// checkAPI запрашивает метаданные джобы по ссылке — успех кладёт их в
-// результат, чтобы список джоб не запрашивал их повторно.
+// checkAPI спрашивает у API, кто мы такие. В обычном режиме — метаданные
+// джобы по ссылке (успех кладёт их в результат, чтобы список джоб не
+// запрашивал их повторно); в режиме обхода (BROW-01) — CurrentUser, а
+// справа от отметки успеха показывается имя пользователя (idea-0.3.0 §1,
+// «хост · имя»).
 func (m splashModel) checkAPI() tea.Cmd {
+	if m.browsing {
+		host := m.host
+		return func() tea.Msg {
+			tok, err := token.Resolve(host)
+			if err != nil {
+				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+			}
+			p := gitlab.New(host, tok)
+			var prov provider.Provider = p
+			user, err := prov.CurrentUser(context.Background())
+			if err != nil {
+				return checkResultMsg{index: checkAPIIndex, ok: false, reason: err.Error()}
+			}
+			return checkResultMsg{index: checkAPIIndex, ok: true, reason: user.Name, user: user, prov: prov}
+		}
+	}
 	ref := m.ref
 	return func() tea.Msg {
 		tok, err := token.Resolve(ref.Host)
@@ -276,6 +358,8 @@ func (m splashModel) view(t Theme) string {
 		b.WriteString(m.input.View())
 		b.WriteString("\n")
 		b.WriteString(t.Muted.Render("номер работает из каталога репозитория проекта"))
+		b.WriteString("\n")
+		b.WriteString(t.Muted.Render("пустой ввод откроет дерево групп и проектов"))
 		if reason := m.checks[checkTokenIndex].Reason; reason != "" && m.checks[checkTokenIndex].State == checkWaiting {
 			b.WriteString("\n")
 			b.WriteString(t.Danger.Render(reason))
@@ -285,6 +369,11 @@ func (m splashModel) view(t Theme) string {
 
 	for i, c := range m.checks {
 		b.WriteString(m.renderCheck(t, i, c))
+		b.WriteString("\n")
+	}
+
+	if m.browsing && m.hostsCount > 1 {
+		b.WriteString(t.Muted.Render(fmt.Sprintf("хост %s — первый из файла токенов; вставьте ссылку, чтобы открыть другой", m.host)))
 		b.WriteString("\n")
 	}
 
@@ -304,7 +393,7 @@ func (m splashModel) renderCheck(t Theme, i int, c splashCheck) string {
 	var label string
 	switch i {
 	case checkTokenIndex:
-		label = fmt.Sprintf("проверяю токен %s…", m.ref.Host)
+		label = fmt.Sprintf("проверяю токен %s…", m.checkHost())
 	case checkAPIIndex:
 		label = "проверяю ответ API…"
 	case checkDockerIndex:

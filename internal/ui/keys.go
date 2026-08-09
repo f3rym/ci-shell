@@ -22,6 +22,7 @@ type KeyMap struct {
 	Apply   key.Binding
 	Refresh key.Binding
 	Command key.Binding
+	Filter  key.Binding
 	Quit    key.Binding
 	Cancel  key.Binding
 }
@@ -67,6 +68,14 @@ func DefaultKeys() KeyMap {
 		Command: key.NewBinding(
 			key.WithKeys(":"),
 			key.WithHelp(":", "команда"),
+		),
+		// Filter — сам фильтр выполняет компонент списка Bubbles своей
+		// внутренней раскладкой (internal/ui/tree.go, Фаза 10); привязка
+		// существует затем, чтобы строка клавиш внизу называла клавишу из
+		// того же единственного места, что и все остальные.
+		Filter: key.NewBinding(
+			key.WithKeys("/"),
+			key.WithHelp("/", "фильтр"),
 		),
 		Quit: key.NewBinding(
 			key.WithKeys("q"),
