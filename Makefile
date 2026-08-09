@@ -19,29 +19,39 @@ LDFLAGS       := -s -w
 # подменяем имя CLI, зашитое в internal/runner.
 CONTAINER_LDFLAGS := $(LDFLAGS) -X $(MODULE)/internal/runner.containerCLI=container
 
-.PHONY: build all macos macos-container linux windows clean
+.PHONY: build all deps macos macos-container linux windows clean
 
-build:
+# go.sum появляется из go.mod одним вызовом go mod tidy — он ходит в сеть за
+# модулями и дописывает косвенные зависимости. Цель-файл, а не .PHONY: пока
+# go.sum на месте и не старше go.mod, сеть не дёргается.
+go.sum: go.mod
+	go mod tidy
+
+# deps — ручной вызов того же самого, когда go.sum надо пересобрать намеренно.
+deps:
+	go mod tidy
+
+build: go.sum
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
 
 all: macos macos-container linux windows
 
-macos:
+macos: go.sum
 	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64 $(PKG)
 	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64 $(PKG)
 
 # macOS-бинарь, который зовёт Apple `container` вместо docker.
 # CLI обязан быть docker-совместимым по подкомандам: version / image inspect /
 # pull / create / start / exec / rm.
-macos-container:
+macos-container: go.sum
 	GOOS=darwin GOARCH=arm64 go build -ldflags "$(CONTAINER_LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64-container $(PKG)
 	GOOS=darwin GOARCH=amd64 go build -ldflags "$(CONTAINER_LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64-container $(PKG)
 
-linux:
+linux: go.sum
 	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64 $(PKG)
 	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64 $(PKG)
 
-windows:
+windows: go.sum
 	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(PKG)
 
 clean:
