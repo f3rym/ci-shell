@@ -241,6 +241,31 @@ func HintTreeStale(age string) string {
 	return fmt.Sprintf("список из кэша, %s назад — g обновит", age)
 }
 
+// NoteSourceEmpty и NoteSourceRefused — две формулировки, ради которых
+// строка-объяснение и заведена (internal/ui/tree.go, treeKindNote). Пустой
+// ответ и отказ источника — РАЗНЫЕ события, и на экране они обязаны
+// выглядеть по-разному: пока обе ситуации показывались одинаковой пустотой,
+// разбираться с пустым списком проектов приходилось гаданием, а не чтением
+// экрана. Адрес запроса в отказ подставлять здесь не нужно — он уже внутри
+// reason: каждая ошибка провайдера списков несёт путь, который спрашивался
+// (internal/provider/gitlab/browse.go).
+
+// NoteSourceEmpty — источник ответил успешно и не отдал ни одной записи.
+func NoteSourceEmpty() string {
+	return "источник вернул ноль записей"
+}
+
+// NoteSourceRefused — источник ответил отказом; reason несёт причину вместе
+// с адресом, который запрашивался.
+func NoteSourceRefused(reason string) string {
+	return fmt.Sprintf("источник ответил отказом: %s", reason)
+}
+
+// HintTreeNote — курсор стоит на строке-объяснении.
+func HintTreeNote(text string) string {
+	return fmt.Sprintf("%s — g повторит запрос", text)
+}
+
 // Формулировки правой панели пайплайнов экрана дерева (Фаза 10, BROW-03).
 
 // HintPipelinesPick — проект ещё не выбран.

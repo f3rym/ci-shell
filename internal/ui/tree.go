@@ -32,6 +32,14 @@ const (
 	treeKindGroup treeKind = iota
 	treeKindUser
 	treeKindProject
+	// treeKindNote — не узел дерева, а строка-объяснение под раскрытым
+	// узлом: «источник вернул ноль записей» либо «источник ответил отказом»
+	// с причиной и адресом запроса. До неё обе ситуации выглядели на экране
+	// одинаково — раскрытый узел, под которым пусто, — и отличить пустое
+	// пространство имён от отказа API было нечем. Строка не открывается (⏎
+	// на ней не делает ничего) и не участвует в фильтре; обновление (g) на
+	// ней повторяет запрос узла, под которым она стоит.
+	treeKindNote
 )
 
 // treeRow — одна строка дерева: вид, глубина вложенности, отображаемое имя,
@@ -53,8 +61,22 @@ type treeRow struct {
 }
 
 // FilterValue отдаёт полный путь: человек ищет по пути, а не по одному
-// сегменту.
-func (r treeRow) FilterValue() string { return r.FullPath }
+// сегменту. У строки-объяснения пути нет вовсе — она отдаёт пустое значение
+// и потому не всплывает в отфильтрованном списке как «найденный проект».
+func (r treeRow) FilterValue() string {
+	if r.Kind == treeKindNote {
+		return ""
+	}
+	return r.FullPath
+}
+
+// noteRow собирает строку-объяснение под узлом owner — единственное место
+// сборки такой строки в экране. Путь узла строка носит с собой не для показа
+// (рисуется только Name), а чтобы обновление на ней (g) повторяло запрос
+// ТОГО узла, про который она говорит, а не корня дерева.
+func noteRow(owner treeRow, text string) treeRow {
+	return treeRow{Kind: treeKindNote, Depth: owner.Depth + 1, Name: text, FullPath: owner.FullPath}
+}
 
 // treeDelegate — отрисовщик строки дерева для компонента списка Bubbles:
 // одна высота, без разделителя между строками, обновление ничего не делает.
@@ -73,6 +95,22 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 
 	indent := strings.Repeat(" ", row.Depth*TreeIndent)
+
+	// Строка-объяснение рисуется без символа раскрытия и приглушённым: она
+	// ничего не открывает, и выглядеть как узел дерева не должна. Курсор на
+	// ней остаётся видимым (инверсия строки), но символа курсора она не
+	// получает — открывать здесь нечего.
+	if row.Kind == treeKindNote {
+		width := m.Width() - textwidth.Of(indent) - 2
+		line := indent + Truncate(row.Name, width)
+		if index == m.Index() {
+			fmt.Fprint(w, d.theme.Selected.Render(line))
+			return
+		}
+		fmt.Fprint(w, d.theme.Muted.Render(line))
+		return
+	}
+
 	var glyph string
 	switch row.Kind {
 	case treeKindProject:
@@ -114,7 +152,15 @@ type treeModel struct {
 	cached    map[string]bool
 	fetchedAt map[string]time.Time
 
+	// loadErr — отказ загрузки КОРНЯ: только он способен оставить экран без
+	// дерева вовсе, и только он замещает тело панели.
 	loadErr string
+	// nodeErr — отказ загрузки конкретного узла по его ключу: причина вместе
+	// с адресом запроса, пришедшая от провайдера. Отказ узла больше не
+	// стирает дерево с экрана — он показывается строкой под самим узлом
+	// (rebuild ниже), потому что «этот узел не открылся» и «списка нет» —
+	// разные события, и одинаково выглядеть они не должны.
+	nodeErr map[string]string
 	loading bool
 	// pending — ключ узла (пустая строка — корень), для которого сейчас
 	// идёт загрузка; повторное обновление того же узла, пока она не
@@ -145,6 +191,11 @@ type treeLoadedMsg struct {
 	cached   bool
 	fetched  time.Time
 }
+// treeFailedMsg — узел parent не загрузился. reason приходит уже очищенным
+// (provider.SafeText): текст ошибки провайдера несёт кусок тела ответа
+// чужого сервера, а отсюда он уходит и в строку дерева, и в строку
+// подсказки — управляющая последовательность в нём перерисовала бы кадр
+// (T-10-03).
 type treeFailedMsg struct {
 	parent string
 	reason string
@@ -181,6 +232,7 @@ func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme
 		cached:    map[string]bool{},
 		fetchedAt: map[string]time.Time{},
 		pending:   map[string]bool{},
+		nodeErr:   map[string]string{},
 		runs:      newPipelinePanel(b, theme),
 		theme:     theme,
 		keys:      keys,
@@ -233,7 +285,7 @@ func (m treeModel) loadRoot(refresh bool) tea.Cmd {
 
 		groups, err := b.Groups(ctx, "", refresh)
 		if err != nil {
-			return treeFailedMsg{parent: "", reason: err.Error()}
+			return treeFailedMsg{parent: "", reason: provider.SafeText(err.Error())}
 		}
 		for _, g := range groups.Items {
 			rows = append(rows, treeRow{
@@ -265,7 +317,7 @@ func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
 		if row.Kind == treeKindGroup {
 			sub, err := b.Groups(ctx, row.FullPath, refresh)
 			if err != nil {
-				return treeFailedMsg{parent: parent, reason: err.Error()}
+				return treeFailedMsg{parent: parent, reason: provider.SafeText(err.Error())}
 			}
 			for _, g := range sub.Items {
 				rows = append(rows, treeRow{
@@ -280,7 +332,7 @@ func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
 
 		pr, err := b.Projects(ctx, row.NS, refresh)
 		if err != nil {
-			return treeFailedMsg{parent: parent, reason: err.Error()}
+			return treeFailedMsg{parent: parent, reason: provider.SafeText(err.Error())}
 		}
 		for _, p := range pr.Items {
 			rows = append(rows, treeRow{Kind: treeKindProject, Depth: depth, Name: p.Name, FullPath: p.FullPath, Project: p})
@@ -299,14 +351,18 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case treeLoadedMsg:
 		m.loading = false
-		m.loadErr = ""
 		delete(m.pending, msg.parent)
+		delete(m.nodeErr, msg.parent)
 		m.complete[msg.parent] = msg.complete
 		m.cached[msg.parent] = msg.cached
 		m.fetchedAt[msg.parent] = msg.fetched
 		if msg.parent == "" {
+			m.loadErr = ""
 			m.roots = msg.rows
 		} else {
+			// Запись заводится и для пустого ответа: «узел загружен, детей
+			// ноль» и «узел ещё не загружен» — разные состояния, и различает
+			// их именно наличие записи (rebuild ниже читает его же).
 			m.children[msg.parent] = msg.rows
 			m.setExpanded(msg.parent, true)
 		}
@@ -316,7 +372,19 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 	case treeFailedMsg:
 		m.loading = false
 		delete(m.pending, msg.parent)
-		m.loadErr = msg.reason
+		m.nodeErr[msg.parent] = msg.reason
+		if msg.parent == "" {
+			// Отказ корня — дерева нет вовсе, показывать причину больше негде,
+			// кроме тела панели.
+			m.loadErr = msg.reason
+		} else {
+			// Отказ узла раскрывает узел, чтобы причина встала строкой прямо
+			// под ним. Дети при этом НЕ появляются (ChildrenSet остаётся
+			// ложным, пока в children нет записи), поэтому повторное ⏎ на узле
+			// пробует загрузку заново, а не «сворачивает пустоту».
+			m.setExpanded(msg.parent, true)
+		}
+		m.rebuild()
 		return m, nil
 
 	case pipelineDebounceMsg, pipelinesLoadedMsg, pipelinesFailedMsg:
@@ -397,6 +465,12 @@ func (m treeModel) openCursor() (treeModel, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	// Строка-объяснение ничего не открывает. Без этой проверки ⏎ на ней
+	// уходил бы загружать узел с пустым путём — то есть корень — и стирал бы
+	// дерево отказом разбора пустого пространства имён.
+	if row.Kind == treeKindNote {
+		return m, nil
+	}
 	if row.Kind == treeKindProject {
 		m.focus = focusRuns
 		m.runs = m.runs.focus()
@@ -422,6 +496,13 @@ func (m treeModel) openCursor() (treeModel, tea.Cmd) {
 // не превращается в очередь запросов.
 func (m treeModel) refreshCursor() (treeModel, tea.Cmd) {
 	row, ok := m.selected()
+	// Строка-объяснение узлом не является: обновление на ней повторяет
+	// запрос того узла, под которым она стоит (путь узла она носит с собой).
+	// Не найден — обновляется корень; узлом с пустым путём строка-объяснение
+	// не притворяется никогда.
+	if ok && row.Kind == treeKindNote {
+		row, ok = m.findRow(row.FullPath)
+	}
 	nodeKey := ""
 	if ok {
 		nodeKey = row.FullPath
@@ -435,6 +516,29 @@ func (m treeModel) refreshCursor() (treeModel, tea.Cmd) {
 		return m, m.loadRoot(true)
 	}
 	return m, m.loadChildren(row, true)
+}
+
+// findRow ищет узел дерева по полному пути среди корней и уже загруженных
+// детей. Строки-объяснения из поиска исключены намеренно: они носят путь
+// СВОЕГО узла, и без исключения поиск нашёл бы саму строку-объяснение вместо
+// узла, про который она говорит.
+func (m treeModel) findRow(path string) (treeRow, bool) {
+	if path == "" {
+		return treeRow{}, false
+	}
+	for _, r := range m.roots {
+		if r.Kind != treeKindNote && r.FullPath == path {
+			return r, true
+		}
+	}
+	for _, rows := range m.children {
+		for _, r := range rows {
+			if r.Kind != treeKindNote && r.FullPath == path {
+				return r, true
+			}
+		}
+	}
+	return treeRow{}, false
 }
 
 func (m treeModel) selected() (treeRow, bool) {
@@ -489,10 +593,23 @@ func (m *treeModel) rebuild() {
 	walk = func(rows []treeRow) {
 		for _, r := range rows {
 			flat = append(flat, r)
-			if r.Kind != treeKindProject && r.Expanded {
-				if kids, ok := m.children[r.FullPath]; ok {
-					walk(kids)
-				}
+			if r.Kind == treeKindProject || r.Kind == treeKindNote || !r.Expanded {
+				continue
+			}
+
+			kids, loaded := m.children[r.FullPath]
+			walk(kids)
+
+			// Раскрытый узел, под которым ничего нет, обязан сказать, почему
+			// его пусто: отказ источника и честный ноль записей — разные
+			// события, и раньше оба выглядели как пустое место (это и была
+			// половина поломки «список репозиториев пуст»).
+			if reason := m.nodeErr[r.FullPath]; reason != "" {
+				flat = append(flat, noteRow(r, NoteSourceRefused(reason)))
+				continue
+			}
+			if loaded && len(kids) == 0 {
+				flat = append(flat, noteRow(r, NoteSourceEmpty()))
 			}
 		}
 	}
@@ -510,14 +627,24 @@ func (m *treeModel) rebuild() {
 func (m treeModel) bodyView(width int) string {
 	header := m.theme.PanelTitle.Render("ГРУППЫ И ПРОЕКТЫ")
 
+	// «Корень ещё не отвечал» — это факт наличия записи о полноте, а не
+	// поднятый где-то признак загрузки: сама загрузка корня запускается
+	// корневой моделью (app.go, browseMsg), и m.loading там не поднимается —
+	// первый кадр из-за этого утверждал «ни одной группы и ни одного
+	// проекта» ещё до первого ответа API.
+	_, rootAnswered := m.complete[""]
+
 	var body string
 	switch {
-	case m.loading && len(m.roots) == 0:
+	case !rootAnswered && m.loadErr == "":
 		body = "тяну список…"
-	case m.loadErr != "":
-		body = fmt.Sprintf("не удалось получить список: %s", m.loadErr)
+	case m.loadErr != "" && len(m.roots) == 0:
+		// Причина замещает тело панели ТОЛЬКО когда дерева нет вовсе. Раньше
+		// любой отказ любого узла стирал уже показанное дерево с экрана —
+		// человек терял и то, что успело загрузиться, и место, где сломалось.
+		body = NoteSourceRefused(m.loadErr)
 	case len(m.roots) == 0:
-		body = "ни одной группы и ни одного проекта"
+		body = NoteSourceEmpty()
 	default:
 		body = m.list.View()
 	}
@@ -595,6 +722,10 @@ func (m treeModel) hintText() string {
 
 	if row, ok := m.selected(); ok {
 		switch row.Kind {
+		case treeKindNote:
+			// Курсор стоит на строке-объяснении: подсказка называет то же
+			// самое, что видит человек, и следующий шаг — повтор запроса.
+			return HintTreeNote(row.Name)
 		case treeKindProject:
 			return HintTreeOpenProject(row.Name)
 		default:

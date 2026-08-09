@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/f3rym/ci-shell/internal/joburl"
@@ -29,7 +30,10 @@ type groupResponse struct {
 }
 
 // projectResponse — элемент ответа GET /groups/:id/projects и
-// GET /users/:id/projects (форма simple=true).
+// GET /projects?membership=true (форма simple=true). Namespace.FullPath —
+// не украшение: по нему идёт отбор проектов личного пространства (Projects
+// ниже), поэтому поле обязано читаться из ответа, а не выводиться из
+// path_with_namespace обрезкой.
 type projectResponse struct {
 	ID                int64      `json:"id"`
 	Name              string     `json:"name"`
@@ -135,39 +139,34 @@ func (c *Client) CurrentUser(ctx context.Context) (provider.User, error) {
 // joburl.ValidProjectPath и экранируется тем же способом, что уже применён
 // к пути проекта (T-10-10).
 func (c *Client) Groups(ctx context.Context, parent string, req provider.PageRequest) (provider.Page[provider.Group], error) {
-	var (
-		body   []byte
-		cursor provider.Cursor
-		err    error
-	)
-
-	if parent == "" {
-		path, perr := pagePath("/groups?top_level_only=true", req)
-		if perr != nil {
-			return provider.Page[provider.Group]{}, perr
-		}
-		body, cursor, err = c.doPaged(ctx, path)
-	} else {
+	base := "/groups?top_level_only=true"
+	if parent != "" {
 		if !joburl.ValidProjectPath(parent) {
 			return provider.Page[provider.Group]{}, fmt.Errorf("gitlab: путь группы %q недопустим: %w", parent, provider.ErrGroupNotFound)
 		}
-		path, perr := pagePath(fmt.Sprintf("/groups/%s/subgroups", url.PathEscape(parent)), req)
-		if perr != nil {
-			return provider.Page[provider.Group]{}, perr
-		}
-		body, cursor, err = c.doPaged(ctx, path)
+		base = fmt.Sprintf("/groups/%s/subgroups", url.PathEscape(parent))
 	}
 
+	// Адрес запроса собирается один раз и живёт до конца метода: он нужен не
+	// только запросу, но и каждой ошибке — экран обязан показать человеку, что
+	// именно спрашивалось, а не только чем ответили (та же причина, что и в
+	// Projects ниже).
+	path, err := pagePath(base, req)
+	if err != nil {
+		return provider.Page[provider.Group]{}, err
+	}
+
+	body, cursor, err := c.doPaged(ctx, path)
 	if err != nil {
 		if errors.Is(err, errStatusNotFound) {
-			return provider.Page[provider.Group]{}, fmt.Errorf("gitlab: группа %q на хосте %s не найдена: %w", parent, c.host, provider.ErrGroupNotFound)
+			return provider.Page[provider.Group]{}, fmt.Errorf("gitlab: %s: группа %q на хосте %s не найдена: %w", path, parent, c.host, provider.ErrGroupNotFound)
 		}
 		return provider.Page[provider.Group]{}, err
 	}
 
 	var raw []groupResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return provider.Page[provider.Group]{}, fmt.Errorf("gitlab: разбор списка групп: %w", err)
+		return provider.Page[provider.Group]{}, fmt.Errorf("gitlab: %s: разбор списка групп: %w", path, err)
 	}
 
 	items := make([]provider.Group, 0, len(raw))
@@ -177,57 +176,82 @@ func (c *Client) Groups(ctx context.Context, parent string, req provider.PageReq
 	return provider.Page[provider.Group]{Items: items, Next: cursor}, nil
 }
 
+// membershipProjectsBase — адрес списка проектов личного пространства.
+//
+// Здесь НЕ используется очевидный GET /users/:id/projects, и это осознанный
+// размен. Документация GitLab («List all personal projects for a user»)
+// перечисляет у этого эндпоинта ограничение, которое обойти нечем: «If the
+// user profile is private, returns an empty list» — при включённой в профиле
+// приватности он отдаёт 200 и пустой массив даже владельцу токена, на его
+// собственные проекты. Ни числовой id вместо username (эндпоинт принимает и
+// то, и другое — «The ID or username of the user»), ни область токена этого
+// не меняют: ограничение стоит на самом эндпоинте. Ровно так и выглядела
+// поломка: токен принят, проверки зелёные, список пуст.
+//
+// GET /projects?membership=true отдаёт проекты, к которым у токена есть
+// доступ по членству, и приватностью профиля не ограничен. Отбор по
+// пространству имён делается на нашей стороне (по namespace.full_path), а не
+// параметром запроса: серверного фильтра по пространству имён у этого
+// эндпоинта нет, а собирать выборку «на глаз» поиском по подстроке
+// (search_namespaces) значило бы показать чужие проекты с похожим путём.
+//
+// Постраничный обход и пределы (internal/provider/walk.go) от этого не
+// меняются: отбор идёт внутри страницы, а обход по-прежнему ведёт
+// provider.All по курсору из заголовка связей.
+const membershipProjectsBase = "/projects?membership=true&simple=true"
+
 // Projects возвращает страницу проектов пространства имён ns. Адрес зависит
 // от вида пространства имён: для группы — проекты группы без включения
 // подгрупп (подгруппы в дереве отдельные узлы, включать их сюда значило бы
-// показать один проект дважды), для человека — проекты этого пользователя.
-// Путь пространства имён проверяется и экранируется так же, как путь
-// группы. Запрашивается упрощённая форма проекта (simple=true) — полный
-// проект несёт десятки полей, которые экрану не нужны, и это лишний трафик
-// на каждой из сотен страниц.
+// показать один проект дважды), для человека — проекты по членству с отбором
+// по пути пространства имён (см. membershipProjectsBase выше). Путь
+// пространства имён проверяется и экранируется так же, как путь группы.
+// Запрашивается упрощённая форма проекта (simple=true) — полный проект несёт
+// десятки полей, которые экрану не нужны, и это лишний трафик на каждой из
+// сотен страниц; namespace.full_path, по которому идёт отбор, в упрощённую
+// форму входит.
+//
+// Каждая ошибка этого метода несёт адрес, который запрашивался: без него
+// отказ на экране неотличим от честного «записей нет», и разбираться
+// приходится гаданием (это и была вторая половина поломки).
 func (c *Client) Projects(ctx context.Context, ns provider.Namespace, req provider.PageRequest) (provider.Page[provider.Project], error) {
 	if !joburl.ValidProjectPath(ns.Path) {
 		return provider.Page[provider.Project]{}, fmt.Errorf("gitlab: путь пространства имён %q недопустим: %w", ns.Path, provider.ErrProjectNotFound)
 	}
 
-	var (
-		body   []byte
-		cursor provider.Cursor
-		err    error
-	)
-
-	switch ns.Kind {
-	case provider.NamespaceGroup:
-		base := fmt.Sprintf("/groups/%s/projects?include_subgroups=false&simple=true", url.PathEscape(ns.Path))
-		path, perr := pagePath(base, req)
-		if perr != nil {
-			return provider.Page[provider.Project]{}, perr
-		}
-		body, cursor, err = c.doPaged(ctx, path)
-	default:
-		// provider.NamespaceUser — проекты личного пространства человека.
-		base := fmt.Sprintf("/users/%s/projects?simple=true", url.PathEscape(ns.Path))
-		path, perr := pagePath(base, req)
-		if perr != nil {
-			return provider.Page[provider.Project]{}, perr
-		}
-		body, cursor, err = c.doPaged(ctx, path)
+	base := membershipProjectsBase
+	if ns.Kind == provider.NamespaceGroup {
+		base = fmt.Sprintf("/groups/%s/projects?include_subgroups=false&simple=true", url.PathEscape(ns.Path))
 	}
 
+	path, err := pagePath(base, req)
+	if err != nil {
+		return provider.Page[provider.Project]{}, err
+	}
+
+	body, cursor, err := c.doPaged(ctx, path)
 	if err != nil {
 		if errors.Is(err, errStatusNotFound) {
-			return provider.Page[provider.Project]{}, fmt.Errorf("gitlab: пространство имён %s %s на хосте %s не найдено: %w", ns.Kind, ns.Path, c.host, provider.ErrProjectNotFound)
+			return provider.Page[provider.Project]{}, fmt.Errorf("gitlab: %s: пространство имён %s %s на хосте %s не найдено: %w", path, ns.Kind, ns.Path, c.host, provider.ErrProjectNotFound)
 		}
 		return provider.Page[provider.Project]{}, err
 	}
 
 	var raw []projectResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return provider.Page[provider.Project]{}, fmt.Errorf("gitlab: разбор списка проектов %s: %w", ns.Path, err)
+		return provider.Page[provider.Project]{}, fmt.Errorf("gitlab: %s: разбор списка проектов %s: %w", path, ns.Path, err)
 	}
 
 	items := make([]provider.Project, 0, len(raw))
 	for _, r := range raw {
+		// Отбор — только для личного пространства: адрес группы уже вернул
+		// ровно её проекты, и второй проверки там не нужно. Сравнение идёт по
+		// сырому ответу, а не по прошедшему SafeText значению: отбор — это
+		// логика, и строить её на строке, подготовленной для терминала,
+		// значит завязать выборку на правила отрисовки.
+		if ns.Kind != provider.NamespaceGroup && !strings.EqualFold(r.Namespace.FullPath, ns.Path) {
+			continue
+		}
 		items = append(items, toProject(r))
 	}
 	return provider.Page[provider.Project]{Items: items, Next: cursor}, nil
