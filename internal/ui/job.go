@@ -55,6 +55,14 @@ const (
 	// phaseCleanGreen/phaseCleanFails — итог :clean (FIXUI-02).
 	phaseCleanGreen
 	phaseCleanFails
+	// phaseApplyConfirm — A/:A показал список изменённых файлов, перенос ещё
+	// не подтверждён (задача 2, FIXUI-03).
+	phaseApplyConfirm
+	// phaseApplied — правки перенесены трёхсторонним мерджем, ещё не
+	// закоммичены.
+	phaseApplied
+	// phaseCommitted — :commit зафиксировал перенесённое.
+	phaseCommitted
 )
 
 // shellHandoffMsg гарантирует, что последний полный кадр с подсказкой
@@ -126,6 +134,12 @@ type jobModel struct {
 	// передаёт ей фокус; пока она активна, клавиши уходят в неё, а не в
 	// экран, и место строки клавиш занимает поле ввода (см. keyBar).
 	cmd commandBar
+
+	// apply — состояние экрана переноса правок (задача 2, план 09-03,
+	// FIXUI-03): показ списка изменённых файлов, перенос трёхсторонним
+	// мерджем, фиксация с полем ввода сообщения. Пока apply.stage не равна
+	// applyIdle, клавиши уходят в неё же приёмом, что и у cmd выше.
+	apply applyState
 
 	width, height int
 }
@@ -203,6 +217,52 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case runFinishedMsg:
 		return m.applyRunFinished(msg), nil
 
+	case captureDoneMsg:
+		m.apply = newApplyState(msg.patch, msg.stats, msg.ahead, msg.aheadKnown)
+		m.phase = phaseApplyConfirm
+		return m, nil
+
+	case captureEmptyMsg:
+		// Пустой патч: подсказка HintNoChanges, панель не открывается —
+		// приём тот же, что и у отказа переноса ниже (m.banner), приглушённым
+		// стилем, потому что это честное «нечего переносить», а не поломка.
+		m.banner = HintNoChanges()
+		m.blockedCanceled = true
+		return m, nil
+
+	case captureFailedMsg:
+		m.banner = msg.reason
+		m.blockedCanceled = false
+		return m, nil
+
+	case appliedMsg:
+		m.apply.stage = applyIdle
+		m.phase = phaseApplied
+		m.banner = ""
+		return m, nil
+
+	case applyFailedMsg:
+		m.apply.stage = applyIdle
+		m.phase = phaseLeftShell
+		m.banner = msg.reason
+		m.blockedCanceled = false
+		return m, nil
+
+	case committedMsg:
+		m.apply.stage = applyIdle
+		m.phase = phaseCommitted
+		m.banner = ""
+		return m, nil
+
+	case commitFailedMsg:
+		// Отказ фиксации — однострочный баннер цветом отказа и возврат в
+		// стадию покоя; фаза остаётся phaseApplied, потому что перенесённое
+		// никуда не делось (задача 2, done-критерий плана).
+		m.apply.stage = applyIdle
+		m.banner = msg.reason
+		m.blockedCanceled = false
+		return m, nil
+
 	case commandMsg:
 		return m.applyCommand(msg)
 
@@ -232,10 +292,38 @@ func (m jobModel) applyCommand(msg commandMsg) (jobModel, tea.Cmd) {
 		if m.canRun() {
 			return m.startRun(runClean)
 		}
+	case "A":
+		return m.startCapture()
+	case "commit":
+		return m.startCommitMessage()
 	case "q":
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// startCapture запускает CaptureCmd — единственное место запуска переноса
+// правок и для клавиши A, и для команды :A (второго места, как и у
+// startRun, не появляется).
+func (m jobModel) startCapture() (jobModel, tea.Cmd) {
+	if !m.canRun() || m.apply.stage != applyIdle {
+		return m, nil
+	}
+	return m, m.session.CaptureCmd(context.Background())
+}
+
+// startCommitMessage открывает поле ввода сообщения коммита — команда
+// :commit. Доступно только после переноса (phaseApplied), пока правки не
+// зафиксированы: до переноса коммитить нечего, а после фиксации — уже
+// нечего коммитить второй раз.
+func (m jobModel) startCommitMessage() (jobModel, tea.Cmd) {
+	if m.phase != phaseApplied || m.apply.stage != applyIdle {
+		return m, nil
+	}
+	m.apply.stage = applyMessage
+	m.apply.msgInput = newMessageInput()
+	m.apply.err = ""
+	return m, textinput.Blink
 }
 
 // applyRunFinished разбирает итог одного из трёх прогонов задачи 3
@@ -373,6 +461,9 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 	if m.cmd.active {
 		return m.updateCommandKey(msg)
 	}
+	if m.apply.stage != applyIdle {
+		return m.updateApplyKey(msg)
+	}
 
 	switch {
 	case key.Matches(msg, m.keys.Cancel):
@@ -381,6 +472,11 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 			m.canceling = true
 		}
 		return m, nil
+
+	case key.Matches(msg, m.keys.Apply):
+		// Клавиша переноса правок (FIXUI-03) — доступна и работает уже
+		// здесь; :A вводится командным режимом, но зовёт тот же startCapture.
+		return m.startCapture()
 
 	case key.Matches(msg, m.keys.Command):
 		// Двоеточие открывает строку команды и передаёт ей фокус (задача 1,
@@ -447,6 +543,75 @@ func (m jobModel) updateCommandKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.cmd.input, cmd = m.cmd.input.Update(msg)
 	return m, cmd
+}
+
+// updateApplyKey обрабатывает нажатие клавиши, пока экран переноса правок
+// открыт (apply.stage != applyIdle) — три разных набора клавиш по стадиям
+// (FIXUI-03): согласие на перенос (y/n), ввод сообщения коммита (обычный
+// текстовый ввод + ⏎), согласие на фиксацию (y/n). Без явного согласия на
+// каждой из двух y/n-стадий не пишется ничего — тот же предохранитель, что
+// и у переноса правок обычного режима (cmd/ci/main.go).
+func (m jobModel) updateApplyKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
+	switch m.apply.stage {
+	case applyConfirm:
+		switch msg.String() {
+		case "y":
+			if !m.apply.canApply() {
+				// Коммита джобы нет в этом репозитории — базы для
+				// трёхстороннего мерджа нет, перенос не предлагается вовсе
+				// (задача 2, пункт 9 плана): согласие ничего не запускает.
+				return m, nil
+			}
+			return m, m.session.ApplyCmd(context.Background())
+		case "n":
+			m.banner = m.apply.discardedNotice()
+			m.blockedCanceled = true
+			m.apply = applyState{}
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.Back) {
+			m.banner = m.apply.discardedNotice()
+			m.blockedCanceled = true
+			m.apply = applyState{}
+		}
+		return m, nil
+
+	case applyMessage:
+		if msg.String() == "enter" {
+			text := strings.TrimSpace(m.apply.msgInput.Value())
+			if text == "" {
+				m.apply.err = emptyMessageNotice()
+				return m, nil
+			}
+			m.apply.err = ""
+			m.apply.msgInput.SetValue(text)
+			m.apply.stage = applyCommitConfirm
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.Back) {
+			m.apply.stage = applyIdle
+			m.apply.msgInput = textinput.Model{}
+			m.apply.err = ""
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.apply.msgInput, cmd = m.apply.msgInput.Update(msg)
+		return m, cmd
+
+	case applyCommitConfirm:
+		switch msg.String() {
+		case "y":
+			return m, m.session.CommitCmd(context.Background(), m.apply.msgInput.Value())
+		case "n":
+			m.apply.stage = applyMessage
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.Back) {
+			m.apply.stage = applyMessage
+		}
+		return m, nil
+	}
+	return m, nil
 }
 
 // stepRowsFromSession строит срез строк шагов из уже готового результата
@@ -616,10 +781,17 @@ func (m jobModel) preparingView() string {
 
 // bodyView собирает тело экрана джобы: две панели рядом (шаги, окружение),
 // под ними панель лога на всю ширину минус отступ от краёв, и однострочный
-// баннер над строкой подсказки при отказе.
+// баннер над строкой подсказки при отказе. Пока экран переноса правок
+// открыт (apply.stage != applyIdle) — список изменённых файлов занимает
+// тело целиком: человек должен видеть ровно то, что будет записано, до
+// любого согласия (FIXUI-03), а не гадать по шагам и окружению позади него.
 func (m jobModel) bodyView() string {
 	if m.phase == phasePreparing {
 		return m.preparingView()
+	}
+
+	if m.apply.stage != applyIdle {
+		return m.apply.filesPanel(m.theme)
 	}
 
 	left := m.stepsPanel()
@@ -639,13 +811,15 @@ func (m jobModel) bodyView() string {
 	return body
 }
 
-// keyBar собирает строку клавиш экрана джобы: шелл, повторить шаг, командный
-// режим, назад, выход (перенос правок клавишей A подключает задача 2). Пока
-// строка команды активна, на её месте — само поле ввода, а последняя ошибка
-// разбора (если есть) показывается строкой НАД ним тем же приёмом, что и
-// строка подсказки (RenderHint) — контракт требует, чтобы отказ не закрывал
-// поле, и чтобы настоящая строка подсказки внизу экрана осталась на месте
-// без исключений (она рисуется отдельно, в App.View).
+// keyBar собирает строку клавиш экрана джобы: шелл, повторить шаг,
+// перенести правки, командный режим, назад, выход. Пока строка команды
+// активна, на её месте — само поле ввода, а последняя ошибка разбора (если
+// есть) показывается строкой НАД ним тем же приёмом, что и строка подсказки
+// (RenderHint) — контракт требует, чтобы отказ не закрывал поле, и чтобы
+// настоящая строка подсказки внизу экрана осталась на месте без исключений
+// (она рисуется отдельно, в App.View). Стадия applyMessage экрана переноса
+// занимает то же место тем же приёмом — commandBar и applyState.msgInput
+// никогда не активны одновременно (applyIdle-проверка в updateKey).
 func (m jobModel) keyBar() string {
 	if m.cmd.active {
 		var b strings.Builder
@@ -656,7 +830,10 @@ func (m jobModel) keyBar() string {
 		b.WriteString(m.cmd.input.View())
 		return b.String()
 	}
-	return KeyBar(m.theme, m.keys.Shell, m.keys.Retry, m.keys.Command, m.keys.Back, m.keys.Quit)
+	if m.apply.stage == applyMessage {
+		return m.apply.messageView(m.theme)
+	}
+	return KeyBar(m.theme, m.keys.Shell, m.keys.Retry, m.keys.Apply, m.keys.Command, m.keys.Back, m.keys.Quit)
 }
 
 // hintText — (jobModel) hintText() string, единственная функция отображения
@@ -690,6 +867,16 @@ func (m jobModel) hintText() string {
 		return HintCleanGreen()
 	case m.phase == phaseCleanFails:
 		return HintCleanFails(m.session.outcome.FailedIndex)
+	case m.apply.stage == applyConfirm:
+		return HintApplyConfirm(len(m.apply.stats))
+	case m.apply.stage == applyMessage:
+		return HintCommitMessage()
+	case m.apply.stage == applyCommitConfirm:
+		return m.apply.commitConfirmPrompt(m.session.patchRoot)
+	case m.phase == phaseApplied:
+		return HintApplied(len(m.apply.stats))
+	case m.phase == phaseCommitted:
+		return HintCommitted()
 	case m.phase == phaseImageReady:
 		return HintImageReady(m.session.img.Ref)
 	}

@@ -75,6 +75,19 @@ type Session struct {
 	// успешного возврата ничего не делает (та же причина, что у
 	// Container.Remove в internal/runner/docker.go).
 	ownerRestored bool
+
+	// patch/patchStats/patchRoot — перенос правок (задача 2, план 09-03):
+	// снятый и проверенный CaptureCmd патч, отчёт по изменённым файлам и
+	// корень репозитория человека. ApplyCmd и CommitCmd читают их без
+	// второго снятия и без второго разбора — второй сбор мог бы захватить
+	// то, что появилось после проверки путей. Синхронизация та же, что и у
+	// остального состояния подготовки (jobCfg, code, steps выше): поля
+	// пишет горутина команды, а читает только код экрана, уже получивший её
+	// сообщение (captureDoneMsg) — доставку сообщения Bubble Tea это
+	// happens-before устанавливает само, отдельный мьютекс не нужен.
+	patch      repo.Patch
+	patchStats []repo.FileStat
+	patchRoot  string
 }
 
 // NewSession собирает сессию из того, что уже получено заставкой и списком
@@ -472,6 +485,148 @@ func (s *Session) CleanCmd(ctx context.Context) tea.Cmd {
 		s.outcome = outcome
 
 		return runFinishedMsg{kind: runClean, outcome: outcome}
+	}
+}
+
+// captureDoneMsg — патч снят, отчёт по файлам получен и пути проверены:
+// экран может показать список и спросить согласие на перенос. ahead —
+// расхождение базы (число коммитов от коммита джобы до HEAD человека);
+// aheadKnown ложно, когда коммита джобы в этом репозитории нет вовсе —
+// базы для трёхстороннего мерджа нет, и перенос не предлагается (apply.go).
+type captureDoneMsg struct {
+	patch      repo.Patch
+	stats      []repo.FileStat
+	ahead      int
+	aheadKnown bool
+}
+
+// captureEmptyMsg — в воспроизведённом чекауте нет правок: переносить
+// нечего (repo.ErrNoChanges), панель списка не открывается.
+type captureEmptyMsg struct{}
+
+// captureFailedMsg — снятие патча, поиск корня репозитория человека, разбор
+// отчёта по патчу или проверка путей отказали; reason — причина исходной
+// ошибки домена, второго перевода в текст здесь нет.
+type captureFailedMsg struct {
+	reason string
+}
+
+// CaptureCmd снимает патч из подготовленного воспроизведённого чекаута,
+// находит корень репозитория человека, разбирает отчёт по патчу и проверяет
+// пути — в точности тот же порядок, что и обычный режим переноса правок
+// (cmd/ci/main.go: снятие патча после шелла + подкоманда переноса), всё до
+// любого показа списка и до любого вопроса. Патч и проверенный отчёт
+// сохраняются в самой сессии: ApplyCmd и CommitCmd читают их без второго
+// снятия или второго разбора.
+//
+// Само снятие патча идёт фоновым контекстом, а не переданным ctx: то же
+// решение и по той же причине, что и в обычном режиме — прерывание,
+// дошедшее до группы процессов сразу после возврата из шелла, не должно
+// оставить человека без того, ради чего он тут сидел. Остальные вызовы ниже
+// (поиск корня, разбор отчёта, проверка путей, расхождение базы) — только
+// чтение, отменять их нечем и незачем.
+func (s *Session) CaptureCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		patch, notes, err := repo.Capture(context.Background(), s.code.Dir, s.ref.Host, s.ref.ProjectPath, s.job.ID, s.job.CommitSHA)
+		// Печатается в лог независимо от исхода ниже, тем же порядком, что и
+		// в обычном режиме (cmd/ci/main.go): отказ регистрации новых файлов
+		// значит, что созданные человеком файлы в патч не попали — и когда
+		// патч всё равно сохранён, и когда разницы не нашлось вовсе.
+		if notes.UntrackedErr != nil {
+			s.log.note(fmt.Sprintf("предупреждение: %s — созданные вами файлы (ещё не отслеживаемые git) в патч не попали", notes.UntrackedErr))
+		}
+		if err != nil {
+			if errors.Is(err, repo.ErrNoChanges) {
+				return captureEmptyMsg{}
+			}
+			return captureFailedMsg{reason: err.Error()}
+		}
+
+		root, err := repo.Root(context.Background())
+		if err != nil {
+			return captureFailedMsg{reason: err.Error()}
+		}
+
+		stats, err := repo.PatchStat(context.Background(), root, patch.Path)
+		if err != nil {
+			return captureFailedMsg{reason: err.Error()}
+		}
+		if err := repo.CheckPaths(stats); err != nil {
+			return captureFailedMsg{reason: err.Error()}
+		}
+
+		ahead, aheadKnown := repo.AheadCount(context.Background(), root, patch.SHA)
+
+		s.patch = patch
+		s.patchStats = stats
+		s.patchRoot = root
+
+		return captureDoneMsg{patch: patch, stats: stats, ahead: ahead, aheadKnown: aheadKnown}
+	}
+}
+
+// appliedMsg — наложение трёхсторонним мерджем прошло; files — число
+// перенесённых файлов, взятое из уже снятого отчёта (ApplyCmd не считает
+// заново).
+type appliedMsg struct {
+	files int
+}
+
+// applyFailedMsg — наложение отказало; патч остаётся файлом на диске
+// (repo.Apply), его путь уже входит в reason.
+type applyFailedMsg struct {
+	reason string
+}
+
+// ApplyCmd накладывает уже снятый и проверенный патч трёхсторонним мерджем
+// — ничего сверх. Патч и корень репозитория берутся из полей сессии,
+// заполненных CaptureCmd: второй сбор здесь не заводится.
+func (s *Session) ApplyCmd(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		if err := repo.Apply(cctx, s.patchRoot, s.patch.Path); err != nil {
+			return applyFailedMsg{reason: err.Error()}
+		}
+		return appliedMsg{files: len(s.patchStats)}
+	}
+}
+
+// committedMsg — фиксация перенесённого прошла.
+type committedMsg struct{}
+
+// commitFailedMsg — фиксация отказала; reason — причина исходной ошибки
+// домена.
+type commitFailedMsg struct {
+	reason string
+}
+
+// CommitCmd фиксирует перенесённое сообщением message. Пути берутся из уже
+// снятого отчёта патча (поле сессии, заполненное CaptureCmd), а не
+// собираются заново — второй сбор мог бы захватить то, что появилось в
+// рабочем дереве после проверки путей. Для переименования в список путей
+// идут ОБЕ стороны: исходный путь и новый — те же, что видит человек в
+// списке (apply.go), и те же, что уже прошли проверку.
+func (s *Session) CommitCmd(ctx context.Context, message string) tea.Cmd {
+	return func() tea.Msg {
+		cctx, cancel := context.WithCancel(ctx)
+		s.setCancel(cancel)
+		defer s.clearCancel()
+
+		paths := make([]string, 0, len(s.patchStats))
+		for _, st := range s.patchStats {
+			if st.From != "" {
+				paths = append(paths, st.From)
+			}
+			paths = append(paths, st.Path)
+		}
+
+		if err := repo.Commit(cctx, s.patchRoot, message, paths); err != nil {
+			return commitFailedMsg{reason: err.Error()}
+		}
+		return committedMsg{}
 	}
 }
 
