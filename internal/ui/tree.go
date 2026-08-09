@@ -590,7 +590,8 @@ func (m treeModel) hintText() string {
 	return HintTreeLoading()
 }
 
-// keyBar собирает строку клавиш экрана дерева.
+// keyBar собирает строку клавиш экрана дерева из короткой формы помощи
+// раскладки (Фаза 12, POL-03).
 func (m treeModel) keyBar() string {
-	return KeyBar(m.theme, m.keys.Up, m.keys.Open, m.keys.Back, m.keys.Filter, m.keys.Refresh, m.keys.Quit)
+	return KeyBar(m.theme, m.keys)
 }

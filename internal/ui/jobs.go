@@ -267,13 +267,14 @@ func (m jobsModel) applyCommand(msg commandMsg) (jobsModel, tea.Cmd) {
 	return m, nil
 }
 
-// keyBar собирает строку клавиш экрана: перемещение, открытие, назад,
-// обновление, командный режим, выход.
+// keyBar собирает строку клавиш экрана из короткой формы помощи раскладки
+// (Фаза 12, POL-03) — полный перечень, включая обновление и командный
+// режим, живёт на экране помощи (`?`).
 func (m jobsModel) keyBar() string {
 	if m.cmd.active {
 		return m.cmd.input.View()
 	}
-	return KeyBar(m.theme, m.keys.Up, m.keys.Open, m.keys.Back, m.keys.Refresh, m.keys.Command, m.keys.Quit)
+	return KeyBar(m.theme, m.keys)
 }
 
 // panelTitle собирает заголовок панели: идентификатор пайплайна, ветку и

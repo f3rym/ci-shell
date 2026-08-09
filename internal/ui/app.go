@@ -2,10 +2,13 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
 
 	"github.com/f3rym/ci-shell/internal/browse"
@@ -29,6 +32,9 @@ const (
 	// screenGuide — экран-проводник по типичным поломкам (Фаза 11,
 	// GUIDE-01…05, internal/ui/guide.go).
 	screenGuide
+	// screenHelp — экран помощи (Фаза 12, POL-03, internal/ui/help.go):
+	// `?` с любого экрана, кроме заставки и открытого поля ввода.
+	screenHelp
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
@@ -64,6 +70,12 @@ type App struct {
 	guide       guideModel
 	guideReturn screen
 
+	// help/helpReturn — экран помощи (Фаза 12, POL-03): тот же приём, что и
+	// у экрана проводника выше — экран помощи знает, откуда пришёл, и esc
+	// (или повторное `?`) возвращает ровно туда.
+	help       helpModel
+	helpReturn screen
+
 	// browseClient, provider, host, user — состояние обхода (Фаза 10):
 	// browse.New вызывается ровно в двух местах этого файла (browseMsg и
 	// jobRefMsg) и нигде больше в пакете — единственное место, знающее, как
@@ -87,11 +99,24 @@ type App struct {
 // без пакетной переменной мосту неоткуда было бы взять функцию отправки.
 var programSend func(tea.Msg)
 
-// Init запускает программу пакетом команд: запрос цвета фона терминала
-// (цвет фона в Bubble Tea v2 приходит сообщением, а не запрашивается
-// синхронно, поэтому первая отрисовка идёт темой по умолчанию и
-// перерисовывается по приходу ответа) и старт заставки.
+// Init — тело инициализации обёрнуто единственным перехватом проекта
+// (guard, internal/ui/recover.go, Фаза 12, POL-04): паника здесь чаще всего
+// означает половинчато собранную заставку, и следующие кадры врали бы
+// человеку — при перехваченной панике возвращается команда завершения, а
+// не попытка продолжить.
 func (a App) Init() tea.Cmd {
+	var cmd tea.Cmd
+	if err := guard(func() { cmd = a.initInner() }); err != nil {
+		return tea.Quit
+	}
+	return cmd
+}
+
+// initInner запускает программу пакетом команд: запрос цвета фона
+// терминала (цвет фона в Bubble Tea v2 приходит сообщением, а не
+// запрашивается синхронно, поэтому первая отрисовка идёт темой по
+// умолчанию и перерисовывается по приходу ответа) и старт заставки.
+func (a App) initInner() tea.Cmd {
 	return tea.Batch(
 		tea.RequestBackgroundColor,
 		a.splash.init(),
@@ -118,6 +143,27 @@ func (a App) back() App {
 	return a
 }
 
+// inputActive сообщает, захватывает ли текущий экран сырой ввод текста:
+// строка команды экрана джоб или джобы, поле сообщения коммита, фильтр
+// дерева. Единственный потребитель — сопоставление клавиши помощи в Update
+// ниже (Фаза 12, POL-03): пока открыто одно из этих полей, вопросительный
+// знак — обычный символ ввода, а не запрос помощи, иначе набрать «?» в
+// сообщении коммита было бы нельзя. Экран проводника сюда не входит: для
+// него вопрос уже решён выше (ранний break при screenGuide) — сопоставление
+// клавиши помощи до него не доходит вовсе, каким бы ни был его собственный
+// ввод.
+func (a App) inputActive() bool {
+	switch a.current {
+	case screenJobs:
+		return a.jobs.cmd.active
+	case screenJob:
+		return a.job.cmd.active || a.job.apply.stage == applyMessage
+	case screenTree:
+		return a.tree.list.FilterState() == list.Filtering
+	}
+	return false
+}
+
 // resolveBrowse резолвит токен хоста и собирает и значение интерфейса
 // провайдера, и клиент обхода поверх него — browse.New вызывается ровно
 // здесь и в обработке browseMsg ниже, больше нигде в пакете.
@@ -130,10 +176,25 @@ func resolveBrowse(host string) (provider.Provider, *browse.Client, error) {
 	return p, browse.New(p, host), nil
 }
 
-// Update обрабатывает сообщения программы. Общие для всех экранов случаи
-// (размер окна, цвет фона, выход, возврат) разбираются здесь один раз;
-// остальное уходит подмодели текущего экрана.
+// Update — тело обёрнуто единственным перехватом проекта (guard,
+// internal/ui/recover.go, Фаза 12, POL-04). При перехваченной панике
+// возвращается ПРЕЖНЯЯ модель (та, что была до вызова, — половинчатое
+// обновление в model из updateInner не используется) и команда завершения:
+// паника здесь означает, что состояние модели могло остаться половинчатым,
+// и следующие кадры врали бы человеку.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var model tea.Model
+	var cmd tea.Cmd
+	if err := guard(func() { model, cmd = a.updateInner(msg) }); err != nil {
+		return a, tea.Quit
+	}
+	return model, cmd
+}
+
+// updateInner обрабатывает сообщения программы. Общие для всех экранов
+// случаи (размер окна, цвет фона, выход, возврат) разбираются здесь один
+// раз; остальное уходит подмодели текущего экрана.
+func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -147,6 +208,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// SetSize на нулевом значении небезопасен, в отличие от
 			// jobsModel/jobModel, которые обходятся простыми полями.
 			a.tree = a.tree.setSize(msg.Width, msg.Height)
+		}
+		if a.current == screenHelp {
+			// Тот же приём, что и у дерева выше: область просмотра экрана
+			// помощи (viewport.Model) собрана newHelpModel только при
+			// первом открытии `?`, и SetSize до этого небезопасна.
+			a.help = a.help.setSize(msg.Width, msg.Height)
 		}
 		return a, nil
 	case tea.BackgroundColorMsg:
@@ -179,6 +246,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if key.Matches(msg, a.keys.Back) && a.current != screenSplash {
 			switch a.current {
+			case screenHelp:
+				a.current = a.helpReturn
+				return a, nil
 			case screenJob:
 				if a.job.session != nil {
 					sess := a.job.session
@@ -196,6 +266,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a = a.back()
 				return a, nil
 			}
+		}
+
+		// Сопоставление клавиши помощи — ровно здесь и один раз в проекте
+		// (Фаза 12, POL-03): помощь работает с любого экрана, кроме
+		// заставки. Исключение — пока открыта строка команды или любое
+		// поле ввода: там вопросительный знак обычный символ ввода, иначе
+		// набрать «?» в сообщении коммита было бы нельзя (a.inputActive
+		// ниже). Повторное нажатие с экрана помощи возвращает на
+		// запомненный экран — тот же жест, что и Back.
+		if key.Matches(msg, a.keys.Help) && a.current != screenSplash && !a.inputActive() {
+			if a.current == screenHelp {
+				a.current = a.helpReturn
+				return a, nil
+			}
+			a.helpReturn = a.current
+			a.help = newHelpModel(a.theme, a.keys, a.current)
+			a.help = a.help.setSize(a.width, a.height)
+			a.current = screenHelp
+			return a, nil
 		}
 
 	case jobRefMsg:
@@ -298,17 +387,35 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.guide, cmd = a.guide.Update(msg)
 		return a, cmd
+	case screenHelp:
+		var cmd tea.Cmd
+		a.help, cmd = a.help.Update(msg)
+		return a, cmd
 	}
 	return a, nil
 }
 
-// View собирает кадр экрана. Раскладка кадра общая для всех экранов и
+// View — тело отрисовки обёрнуто единственным перехватом проекта (guard,
+// internal/ui/recover.go, Фаза 12, POL-04). При перехваченной панике
+// возвращается полный кадр отказа (PanicFrame), а не прежний кадр поверх
+// которого что-то дорисовалось — контракт «Вход и выход» (09-UI-SPEC.md)
+// требует полной перерисовки везде, где кадр мог остаться недорисованным,
+// и паника внутри viewInner — ровно такой случай.
+func (a App) View() tea.View {
+	var out string
+	if err := guard(func() { out = a.viewInner() }); err != nil {
+		return tea.NewView(PanicFrame(a.theme, a.width, a.height))
+	}
+	return tea.NewView(out)
+}
+
+// viewInner собирает кадр экрана. Раскладка кадра общая для всех экранов и
 // собирается ровно здесь — единственное место сборки вертикального ритма
 // (заголовок, тело, строка клавиш, строка подсказки): разъехавшийся ритм
 // между экранами первым бросается в глаза.
-func (a App) View() tea.View {
+func (a App) viewInner() string {
 	if (a.width > 0 && a.width < MinWidth) || (a.height > 0 && a.height < MinHeight) {
-		return tea.NewView(TooSmall(a.width, a.height))
+		return TooSmall(a.width, a.height)
 	}
 
 	title := a.theme.ScreenTitle.Render("ci-shell")
@@ -335,8 +442,17 @@ func (a App) View() tea.View {
 		hint = RenderHint(a.theme, a.tree.hintText())
 	case screenGuide:
 		body = a.guide.View(a.width-2*OuterMargin, a.height)
-		keybar = KeyBar(a.theme, a.keys.Back)
+		// Строка клавиш здесь та же короткая форма, что и у остальных
+		// экранов (Фаза 12, POL-03) — единственное место сборки этой
+		// строки в проекте одно на все экраны, второго перечня нет; какая
+		// именно клавиша сработает на конкретной форме проводника,
+		// называет строка подсказки (a.guide.hintText()) под ней.
+		keybar = KeyBar(a.theme, a.keys)
 		hint = RenderHint(a.theme, a.guide.hintText())
+	case screenHelp:
+		body = a.help.View()
+		keybar = KeyBar(a.theme, a.keys)
+		hint = RenderHint(a.theme, a.help.hintText())
 	}
 
 	margin := strings.Repeat(" ", OuterMargin)
@@ -356,17 +472,30 @@ func (a App) View() tea.View {
 		b.WriteString(hint)
 	}
 
-	return tea.NewView(b.String())
+	return b.String()
 }
 
 // Run — точка входа пакета: создаёт корневую модель, создаёт программу
 // Bubble Tea с альтернативным экраном и переданным контекстом, запускает
 // её и возвращает ошибку.
 //
-// Перехват паники Bubble Tea остаётся включённым — отключающая его опция
-// программе не передаётся: паника в отрисовке иначе оставила бы терминал в
-// сломанном режиме (idea-0.3.0 §7; формализация требования — POL-04,
-// Фаза 12).
+// Встроенный в Bubble Tea перехват паники остаётся включённым — опция,
+// которая его выключает, программе не передаётся ни в одном месте: это
+// последняя сеть для паники, случившейся вне трёх точек, обёрнутых guard
+// (Init, Update, View выше) — например, в горутине долгой операции.
+// Сломанный терминал хуже, чем напечатанное значение паники, поэтому
+// размен сделан в пользу восстановления (T-12-09).
+//
+// Сам вызов p.Run() тоже обёрнут guard — на случай паники, вышедшей из
+// внутренностей библиотеки, а не из наших трёх точек. После завершения
+// программы (штатного или panic) Run проверяет запись о панике: если она
+// есть, терминал восстанавливается, честный отчёт (тип паники и
+// трассировка, без значения) уходит в поток ошибок ПОСЛЕ восстановления —
+// иначе он ушёл бы в альтернативный экран и исчез вместе с ним, — и
+// наружу возвращается ошибка вокруг часового ErrRenderPanic. Сама паника
+// наружу не пробрасывается ни одним способом: рантайм напечатал бы её
+// значение целиком, и вся работа по сокрытию значения (internal/ui/recover.go,
+// panicRecord) обнулилась бы.
 func Run(ctx context.Context) error {
 	// Возможности терминала определяются ровно один раз здесь, при
 	// создании модели (Фаза 12, POL-01) — второе место сборки Caps в
@@ -384,6 +513,18 @@ func Run(ctx context.Context) error {
 	// было. Мост событий экрана джобы (internal/ui/bridge.go) подключается
 	// к ней при первом открытии джобы (App.Update, openJobMsg).
 	programSend = p.Send
-	_, err := p.Run()
-	return err
+
+	var runErr error
+	_ = guard(func() { _, runErr = p.Run() })
+
+	if rec := renderPanic.Load(); rec != nil {
+		// Последовательности восстановления идут туда же, куда bubbletea
+		// рисовало кадры (стандартный вывод); честный отчёт — в поток
+		// ошибок, тем же местом, куда уходят все остальные диагностические
+		// сообщения проекта (cmd/ci/main.go).
+		RestoreTerminal(os.Stdout)
+		ReportPanic(os.Stderr, rec)
+		return fmt.Errorf("%w", ErrRenderPanic)
+	}
+	return runErr
 }

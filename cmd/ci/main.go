@@ -96,6 +96,11 @@ const defaultConfigPath = "${XDG_CONFIG_HOME:-~/.config}/ci-shell/config.yml"
 // поломку (idea §7).
 func explain(err error) string {
 	switch {
+	// Паника в отрисовке (Фаза 12, POL-04) — терминал уже восстановлен и
+	// трассировка уже напечатана самим ui.Run до возврата этой ошибки
+	// (internal/ui/recover.go); здесь только следующий шаг.
+	case errors.Is(err, ui.ErrRenderPanic):
+		return fmt.Sprintf("%s; терминал восстановлен, трассировка выше — повторите запуск, а при повторе сохраните трассировку", err)
 	// Отмена контекста — это Ctrl-C/SIGTERM от самого пользователя:
 	// честное «прервано», без доменной ошибки и без советов.
 	case errors.Is(err, context.Canceled):

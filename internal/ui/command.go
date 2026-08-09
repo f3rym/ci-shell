@@ -15,10 +15,28 @@ import (
 	"charm.land/bubbles/v2/textinput"
 )
 
+// commandSpec — одна запись реестра команд: имя, признак обязательного
+// аргумента, описание на русском в нижнем регистре для экрана помощи
+// (internal/ui/help.go, Фаза 12, POL-03) и признак отложенности с честной
+// формулировкой вместо описания. Помощь читает Desc/Deferred отсюда же, где
+// разбор ищет Name — второго перечня команд в проекте не появляется.
+type commandSpec struct {
+	Name        string
+	RequiresArg bool
+	Desc        string
+	// Deferred — команда объявлена, но обработчик ещё не готов. Помощь
+	// показывает вместо Desc честную формулировку «пока не реализовано» —
+	// врать, что команда работает, хуже, чем сказать, что она не готова.
+	Deferred bool
+}
+
 // knownCommands — реестр команд, доступных в проекте (idea-0.3.0 §2):
-// единственное место в проекте, где список команд собран целиком и виден
-// одним взглядом. Таблица команд из idea §2 реализована полностью —
-// отложенных команд в проекте не осталось ни одной (Фаза 11).
+// единственное место в проекте, где список команд собран целиком, виден
+// одним взглядом и несёт описание для экрана помощи. Таблица команд из
+// idea §2 реализована полностью — отложенных команд в проекте не осталось
+// ни одной (Фаза 11), Deferred у всех записей ложен. Порядок записей —
+// порядок таблицы idea-0.3.0 §2, чтобы помощь читалась в том же порядке,
+// что и замысел.
 //
 // "log" — полный лог джобы под курсором (Фаза 10, BROW-04, D-02):
 // осмысленна на экране списка джоб (internal/ui/jobs.go), где есть джоба
@@ -30,7 +48,20 @@ import (
 // "secrets"/"pull"/"env" — редактор файла секретов, обновление рабочей
 // копии и полное окружение джобы (Фаза 11, GUIDE-03…05): обработчики живут
 // в internal/ui/job.go тем же переключателем, что и остальные команды.
-var knownCommands = []string{"R", "rest", "clean", "A", "commit", "image", "log", "secrets", "pull", "env", "q", "!"}
+var knownCommands = []commandSpec{
+	{Name: "R", Desc: "перезапустить упавший шаг против грязного состояния"},
+	{Name: "rest", Desc: "прогнать оставшиеся шаги, тоже против грязного состояния"},
+	{Name: "clean", Desc: "прогнать все шаги начисто в свежем контейнере"},
+	{Name: "A", Desc: "показать изменённые файлы и перенести правки"},
+	{Name: "commit", Desc: "зафиксировать перенесённое сообщением коммита"},
+	{Name: "image", RequiresArg: true, Desc: "подменить образ и перезапустить контейнер"},
+	{Name: "log", Desc: "полный лог джобы под курсором (экран списка джоб)"},
+	{Name: "secrets", Desc: "открыть файл секретов в редакторе"},
+	{Name: "pull", Desc: "обновить рабочую копию (git pull --ff-only)"},
+	{Name: "env", Desc: "полное окружение джобы на весь экран"},
+	{Name: "q", Desc: "выход"},
+	{Name: "!", RequiresArg: true, Desc: "выполнить произвольную команду в контейнере"},
+}
 
 // commandBar — строка команды экрана джобы: поле ввода Bubbles, признак
 // активности и текст последней ошибки разбора. Ошибка показывается строкой
@@ -49,12 +80,6 @@ func newCommandBar() commandBar {
 	ti.Prompt = ":"
 	ti.Focus()
 	return commandBar{input: ti}
-}
-
-// requiresArg сообщает, нужен ли аргумент команде name: :image (заменить
-// образ на что?) и :! (выполнить что?) без аргумента бессмысленны.
-func (commandBar) requiresArg(name string) bool {
-	return name == "image" || name == "!"
 }
 
 // commandMsg — разобранная команда: имя и аргумент одной строкой.
@@ -88,11 +113,11 @@ func parseCommand(raw string) (commandMsg, error) {
 	// внутри контейнера (T-09-21): аргументом идёт ВЕСЬ остаток строки как
 	// есть, без разбиения на поля и без единого преобразования — любая
 	// нормализация здесь означала бы, что человек выполнил не то, что
-	// набрал.
+	// набрал. Требование аргумента ищется в knownCommands тем же обходом,
+	// что и у всех остальных команд ниже — второй проверки нет.
 	if strings.HasPrefix(raw, "!") {
 		arg := strings.TrimPrefix(raw, "!")
-		var cb commandBar
-		if cb.requiresArg("!") && arg == "" {
+		if spec, ok := findCommand("!"); ok && spec.RequiresArg && arg == "" {
 			return commandMsg{}, fmt.Errorf("команде :%s нужен аргумент", "!")
 		}
 		return commandMsg{Name: "!", Arg: arg}, nil
@@ -104,21 +129,26 @@ func parseCommand(raw string) (commandMsg, error) {
 	}
 	arg := strings.TrimSpace(rest)
 
-	known := false
-	for _, k := range knownCommands {
-		if name == k {
-			known = true
-			break
-		}
-	}
+	spec, known := findCommand(name)
 	if !known {
 		return commandMsg{}, fmt.Errorf("неизвестная команда: %s", name)
 	}
-
-	var cb commandBar
-	if cb.requiresArg(name) && arg == "" {
+	if spec.RequiresArg && arg == "" {
 		return commandMsg{}, fmt.Errorf("команде :%s нужен аргумент", name)
 	}
 
 	return commandMsg{Name: name, Arg: arg}, nil
+}
+
+// findCommand ищет запись реестра knownCommands по имени — единственное
+// место поиска в разборе; экран помощи (internal/ui/help.go) обходит тот же
+// срез целиком, а не по имени, но реестр у обоих один и тот же (Фаза 12,
+// POL-03): второго перечня имён команд в проекте нет.
+func findCommand(name string) (commandSpec, bool) {
+	for _, c := range knownCommands {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return commandSpec{}, false
 }
