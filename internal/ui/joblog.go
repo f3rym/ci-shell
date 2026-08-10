@@ -6,17 +6,21 @@
 // воспроизведения из буфера сессии, здесь — лог настоящего прогона,
 // полученный от API через клиент обхода. Источники разные, и общих строк у
 // них нет намеренно.
+//
+// С Фазы 15 (план 15-01) панель-предпросмотр под списком джоб и полноэкранный
+// просмотрщик (internal/ui/logview.go) — одна и та же реализация: панель
+// держит поле lv logView вместо стороннего компонента прокрутки, а Open ниже
+// открывает ту же самую память полноэкранным оверлеем. Второй прокрутки в
+// проекте не заводится (LOG-01).
 package ui
 
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/viewport"
 
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -42,10 +46,10 @@ type logEntry struct {
 }
 
 // logPanel — панель лога джобы: клиент обхода, путь проекта, показываемая
-// джоба, вьюпорт Bubbles для прокрутки, память логов по идентификатору
-// джобы с порядком вытеснения, счётчик поколения запроса, идентификатор
-// джобы, для которой запрос сейчас идёт, спиннер, текст ошибки, признак
-// «показан полный лог» и размеры.
+// джоба, просмотрщик лога (internal/ui/logview.go) для предпросмотра под
+// списком джоб, память логов по идентификатору джобы с порядком вытеснения,
+// счётчик поколения запроса, идентификатор джобы, для которой запрос сейчас
+// идёт, спиннер, текст ошибки, признак «показан полный лог» и размеры.
 type logPanel struct {
 	b           *browse.Client
 	projectPath string
@@ -53,8 +57,12 @@ type logPanel struct {
 	job    provider.Job
 	hasJob bool
 
-	viewport viewport.Model
-	spin     spinner.Model
+	// lv — просмотрщик лога (internal/ui/logview.go), тот же тип, что и у
+	// полноэкранного оверлея: панель показывает окно строк и строку
+	// положения его же методами view/statusLine — второго механизма
+	// прокрутки в проекте не заводится (LOG-01).
+	lv   logView
+	spin spinner.Model
 
 	memo     map[int64]logEntry
 	memoOrd  []int64
@@ -62,6 +70,13 @@ type logPanel struct {
 	loading  bool
 	loadErr  string
 	fullShow bool
+
+	// openAfterLoad — человек попросил открыть полноэкранный просмотрщик
+	// (клавиша лога либо команда :log) раньше, чем лог приехал: по приходу
+	// ответа с неустаревшим поколением панель дополнительно отдаёт команду
+	// открытия и опускает признак — открывать пустой просмотрщик в ответ на
+	// «покажи лог» значило бы соврать про содержимое.
+	openAfterLoad bool
 
 	generation int
 	width      int
@@ -86,18 +101,18 @@ type logFailedMsg struct {
 	reason     string
 }
 
-// newLogPanel собирает панель со вьюпортом; высота — временная, первый
-// setSize (ниже) пересчитает её от высоты, оставшейся под списком джоб
-// (Фаза 13, план 13-02, jobsModel.setSize) — второго расчёта здесь не
+// newLogPanel собирает панель с пустым просмотрщиком; размер — временный,
+// первый setSize (ниже) пересчитает его от высоты, оставшейся под списком
+// джоб (Фаза 13, план 13-02, jobsModel.setSize) — второго расчёта здесь не
 // заводится. Клиент обхода b — тот же, что у списка джоб: второго клиента
 // в интерфейсе не появляется.
 func newLogPanel(b *browse.Client, projectPath string) logPanel {
-	vp := viewport.New(viewport.WithHeight(2))
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return logPanel{
 		b: b, projectPath: projectPath,
-		viewport: vp, spin: sp,
+		lv:   newLogView(),
+		spin: sp,
 		memo: map[int64]logEntry{},
 	}
 }
@@ -114,8 +129,7 @@ func (p logPanel) setSize(width, height int) logPanel {
 	if height < 2 {
 		height = 2
 	}
-	p.viewport.SetWidth(width)
-	p.viewport.SetHeight(height)
+	p.lv = p.lv.setSize(width, height)
 	return p
 }
 
@@ -132,14 +146,14 @@ func (p *logPanel) Select(job provider.Job) tea.Cmd {
 
 	if job.Status != StatusFailed {
 		p.loading = false
-		p.viewport.SetContent("")
+		p.lv = p.lv.setSource(false, -1, "").setLines(nil)
 		return nil
 	}
 
 	if entry, ok := p.memo[job.ID]; ok {
 		p.loading = false
 		p.fullShow = entry.full
-		p.viewport.SetContent(strings.Join(entry.log.Lines, "\n"))
+		p.lv = p.viewOf(entry)
 		return nil
 	}
 
@@ -156,6 +170,12 @@ func (p *logPanel) Select(job provider.Job) tea.Cmd {
 // чего хочет), с нулевым размером хвоста — то есть за логом целиком в
 // пределах, заданных провайдером. Признак полного лога выставляется по
 // приходу ответа, а не по отправке запроса.
+//
+// С Фазы 15 (план 15-01) :log значит не только «обнови панель-предпросмотр
+// под списком джоб» — openAfterLoad поднимается безусловно, и панель
+// дополнительно откроет полноэкранный просмотрщик, как только лог придёт:
+// клавиша лога и команда полного лога обязаны вести в одно и то же
+// (idea-0.3.1 §4).
 func (p *logPanel) Full(job provider.Job) tea.Cmd {
 	if !p.hasJob || p.job.ID != job.ID {
 		p.job = job
@@ -165,7 +185,28 @@ func (p *logPanel) Full(job provider.Job) tea.Cmd {
 	gen := p.generation
 	p.loading = true
 	p.loadErr = ""
+	p.openAfterLoad = true
 	return p.fetchFull(job.ID, gen)
+}
+
+// Open — открыть полноэкранный просмотрщик на джобе job (Фаза 15, план
+// 15-01, задача 3): если лог этой джобы уже в памяти панели, команда шлёт
+// сообщение открытия немедленно, готовыми строками; иначе запускается
+// загрузка и признак openAfterLoad поднимается, чтобы панель открыла
+// просмотрщик сама по приходу ответа (см. update ниже) — открывать пустой
+// просмотрщик в ответ на «покажи лог» значило бы соврать про содержимое.
+// Незапавшая джоба без памяти идёт тем же путём, что и команда :log (Full):
+// Select для неё вообще не запрашивает лог (D-02), а «покажи лог» для
+// незапавшей джобы означает «весь лог целиком», ровно как в applyCommand.
+func (p *logPanel) Open(job provider.Job) tea.Cmd {
+	if entry, ok := p.memo[job.ID]; ok {
+		return openLogCmd(job, entry)
+	}
+	if job.Status != StatusFailed {
+		return p.Full(job)
+	}
+	p.openAfterLoad = true
+	return p.Select(job)
 }
 
 // fetchTail запрашивает хвост лога размером provider.DefaultTailBytes —
@@ -210,9 +251,14 @@ func (p *logPanel) update(msg tea.Msg) tea.Cmd {
 		}
 		p.loading = false
 		p.fullShow = msg.full
-		p.remember(msg.jobID, logEntry{log: msg.log, full: msg.full})
+		entry := logEntry{log: msg.log, full: msg.full}
+		p.remember(msg.jobID, entry)
 		if p.hasJob && p.job.ID == msg.jobID {
-			p.viewport.SetContent(strings.Join(msg.log.Lines, "\n"))
+			p.lv = p.viewOf(entry)
+		}
+		if p.openAfterLoad {
+			p.openAfterLoad = false
+			return openLogCmd(p.job, entry)
 		}
 		return nil
 	case logFailedMsg:
@@ -221,13 +267,29 @@ func (p *logPanel) update(msg tea.Msg) tea.Cmd {
 		}
 		p.loading = false
 		p.loadErr = msg.reason
+		p.openAfterLoad = false
 		return nil
-	case tea.KeyPressMsg:
-		var cmd tea.Cmd
-		p.viewport, cmd = p.viewport.Update(msg)
-		return cmd
 	}
+	// Разбор клавиш здесь больше не ведётся (Фаза 15, план 15-01, задача 3):
+	// встроенная в колонку панель — предпросмотр, клавиши забирает
+	// полноэкранный просмотрщик (internal/ui/app.go, screenLog) — пока
+	// панель ловила их сама, прокрутка спорила бы с движением курсора по
+	// списку джоб: в одной колонке два списка, и стрелка не может значить и
+	// то и другое.
 	return nil
+}
+
+// viewOf — просмотрщик предпросмотра, наполненный записью e: источник
+// (хвост ли, где упавший шаг, чем дотянуть лог целиком) и строки — тем же
+// приёмом, каким наполняется полноэкранный просмотрщик (openLogCmd ниже).
+// Размер (p.lv.width/height) не трогается — setSource/setLines его не
+// меняют.
+func (p logPanel) viewOf(e logEntry) logView {
+	pull := ""
+	if e.log.Truncated {
+		pull = logPullLabel()
+	}
+	return p.lv.setSource(e.log.Truncated, e.log.SectionLine, pull).setLines(e.log.Lines)
 }
 
 // remember кладёт запись в память панели с вытеснением самого давнего при
@@ -272,7 +334,53 @@ func (p logPanel) title() string {
 	}
 }
 
-// view отрисовывает панель: заголовок, затем одно из пяти состояний тела.
+// logTitleFor — заголовок полноэкранного просмотрщика: та же формула, что и
+// у title() панели выше (имя джобы, секция или «целиком»), но принимает
+// джобу и запись явными аргументами, а не читает состояние панели — Open и
+// приход ответа (update выше) зовут её независимо от того, на какую джобу
+// сейчас смотрит панель-предпросмотр.
+func logTitleFor(job provider.Job, e logEntry) string {
+	if e.full {
+		return fmt.Sprintf("ЛОГ ДЖОБЫ %s · целиком", Plain(job.Name))
+	}
+	section := "?"
+	if e.log.Section != "" {
+		section = e.log.Section
+	}
+	return fmt.Sprintf("ЛОГ ДЖОБЫ %s · %s", Plain(job.Name), Plain(section))
+}
+
+// logPullLabel — подпись команды полного лога для строки положения
+// просмотрщика (logView.statusLine): имя команды берётся из реестра команд
+// (internal/ui/command.go, knownCommands) вместо литерала — второе место
+// того же текста в проекте не заводится.
+func logPullLabel() string {
+	if spec, ok := findCommand("log"); ok {
+		return ":" + spec.Name
+	}
+	return ""
+}
+
+// openLogCmd собирает команду открытия полноэкранного просмотрщика
+// (internal/ui/logview.go, openLogMsg): заголовок — logTitleFor выше,
+// строки, признак урезанности и номер строки секции — прямо из записи,
+// подпись дотягивания — logPullLabel, и только когда лог урезан (уже
+// целиком дотягивать нечем).
+func openLogCmd(job provider.Job, e logEntry) tea.Cmd {
+	title := logTitleFor(job, e)
+	pull := ""
+	if e.log.Truncated {
+		pull = logPullLabel()
+	}
+	return func() tea.Msg {
+		return openLogMsg{title: title, lines: e.log.Lines, tail: e.log.Truncated, mark: e.log.SectionLine, pull: pull}
+	}
+}
+
+// view отрисовывает панель: заголовок, затем одно из четырёх состояний тела
+// (пятое, что показывался хвост, теперь называет строка положения
+// просмотрщика — она же и печатает то же самое, отдельной приглушённой
+// строки под телом больше нет, LOG-04).
 func (p logPanel) view(theme Theme) string {
 	title := theme.PanelTitle.Render(p.title())
 
@@ -287,14 +395,10 @@ func (p logPanel) view(theme Theme) string {
 	case p.loading:
 		body = p.spin.View() + " " + "тяну лог…"
 	default:
-		body = p.viewport.View()
+		body = p.lv.view(theme) + "\n" + p.lv.statusLine(theme)
 	}
 
-	parts := []string{title, body}
-	if l, ok := p.currentLog(); ok && l.Truncated && !p.loading && p.loadErr == "" {
-		parts = append(parts, theme.Muted.Render("показан хвост — :log вытянет лог целиком"))
-	}
-	return strings.Join(parts, "\n")
+	return title + "\n" + body
 }
 
 // hintText выбирает строку подсказки панели лога ровно по её четырём

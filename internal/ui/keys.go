@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // KeyMap — раскладка клавиш одним объявлением: единственное место в
@@ -35,6 +37,30 @@ type KeyMap struct {
 	Help   key.Binding
 	Quit   key.Binding
 	Cancel key.Binding
+
+	// Просмотрщик лога, полноэкранный оверлей (Фаза 15, план 15-01,
+	// LOG-01…LOG-04): девять привязок ниже применимы только пока он открыт —
+	// оверлей забирает клавиши целиком, и второе толкование той же клавиши в
+	// какой-нибудь колонке (например, g — обновление списка джоб) не спор, а
+	// два разных момента времени.
+	//
+	// PageUp, PageDown — страница вверх/вниз.
+	PageUp   key.Binding
+	PageDown key.Binding
+	// Top, Bottom — края лога.
+	Top    key.Binding
+	Bottom key.Binding
+	// Search — поиск по логу. Та же клавиша, что и у Filter выше: фильтр
+	// принадлежит спискам колонок, поиск — просмотрщику лога, и в один
+	// момент времени применима ровно одна из двух.
+	Search key.Binding
+	// NextMatch, PrevMatch — переход по совпадениям поиска.
+	NextMatch key.Binding
+	PrevMatch key.Binding
+	// Failed — переход к упавшему шагу (LOG-03).
+	Failed key.Binding
+	// Log — открытие просмотрщика из колонки джоб (LOG-01, JOB-04).
+	Log key.Binding
 }
 
 // DefaultKeys задаёт раскладку клавиш ровно по таблице idea-0.3.0 §2.
@@ -118,6 +144,49 @@ func DefaultKeys() KeyMap {
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "отменить операцию или выйти"),
 		),
+		PageUp: key.NewBinding(
+			key.WithKeys("pgup"),
+			// Отображаемая форма называет обе клавиши страницы сразу; у
+			// PageDown отображаемой подписи нет — тот же приём, что и у пары
+			// Up/Down выше, чтобы пара не задваивалась в строке клавиш.
+			key.WithHelp("pgup/pgdn", "экран"),
+		),
+		PageDown: key.NewBinding(
+			key.WithKeys("pgdown"),
+		),
+		Top: key.NewBinding(
+			// Буква редактора и клавиша начала терминала сразу. Та же буква
+			// g означает «обновить» в колонке джоб (Refresh выше) — не спор:
+			// просмотрщик лога открыт оверлеем и забирает клавиши целиком, а
+			// колонка джоб в этот момент клавиш не видит вовсе.
+			key.WithKeys("g", "home"),
+			key.WithHelp("g/G", "края"),
+		),
+		Bottom: key.NewBinding(
+			key.WithKeys("G", "end"),
+		),
+		Search: key.NewBinding(
+			// Та же клавиша, что и у Filter выше, по той же причине, что
+			// названа там: в один момент времени применимо только одно из
+			// двух толкований.
+			key.WithKeys("/"),
+			key.WithHelp("/", "поиск"),
+		),
+		NextMatch: key.NewBinding(
+			key.WithKeys("n"),
+			key.WithHelp("n/N", "совпадения"),
+		),
+		PrevMatch: key.NewBinding(
+			key.WithKeys("N"),
+		),
+		Failed: key.NewBinding(
+			key.WithKeys("f"),
+			key.WithHelp("f", "падение"),
+		),
+		Log: key.NewBinding(
+			key.WithKeys("L"),
+			key.WithHelp("L", "лог"),
+		),
 	}
 }
 
@@ -158,25 +227,169 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Shell, k.Retry, k.Apply},
 		{k.Refresh, k.Command},
 		{k.Help, k.Quit, k.Cancel},
+		// Просмотрщик лога (Фаза 15, план 15-01): девятая группа, а не
+		// вставка в одну из существующих — привязки применимы только пока
+		// он открыт, и смешивать их с законом ленты или с петлёй фикса было
+		// бы враньём про то, когда клавиша вообще что-то делает.
+		{k.PageUp, k.PageDown, k.Top, k.Bottom, k.Search, k.NextMatch, k.PrevMatch, k.Failed, k.Log},
 	}
 }
 
-// KeyBar собирает строку клавиш внизу экрана — единственное место сборки
-// этой строки в проекте: клавиша жирным акцентным (Theme.KeyCap), описание
-// обычным приглушённым (Theme.KeyDesc), разделитель " · " приглушённый.
-// Источник перечня — короткая форма помощи раскладки (k.ShortHelp), а не
-// перечисление привязок аргументами: второго перечня клавиш в проекте не
-// остаётся (Фаза 12, POL-03). Привязки без отображаемой подписи (например,
-// Down — см. DefaultKeys) пропускаются, чтобы пара ↑↓ не задваивалась.
-func KeyBar(t Theme, k KeyMap) string {
+// KeyHint — одна запись строки клавиш внизу экрана: клавиша и её описание
+// (Фаза 15, план 15-01, JOB-04). Обе строки уже готовы к показу — источник
+// решает, откуда они взялись (привязка раскладки, своя формулировка), а
+// KeyBarOf ниже только укладывает готовые записи в ширину.
+type KeyHint struct {
+	Key  string
+	Desc string
+}
+
+// Hint собирает запись из привязки b — и клавиша, и описание читаются из
+// раскладки, а не пишутся литералом.
+func Hint(b key.Binding) KeyHint {
+	h := b.Help()
+	return KeyHint{Key: h.Key, Desc: h.Desc}
+}
+
+// HintAs — та же клавиша b с другим описанием desc: клавиша по-прежнему
+// читается из раскладки, а описание зависит от состояния колонки (что
+// откроется вправо, какой вид следующий) — подпись привязки статична, а
+// строка клавиш обязана называть то, что произойдёт ЗДЕСЬ И СЕЙЧАС
+// (idea-0.3.1 §6, мокап с подписью следующего вида правой колонки).
+func HintAs(b key.Binding, desc string) KeyHint {
+	return KeyHint{Key: b.Help().Key, Desc: desc}
+}
+
+// NavHints — хвост закона ленты для строки клавиш колонки: движение по
+// колонке, вправо, влево, esc — короткая форма помощи раскладки (k.ShortHelp)
+// БЕЗ двух последних записей (помощь и выход), про которые заботится
+// MetaHints ниже. ShortHelp всегда возвращает эти шесть привязок в этом же
+// порядке (см. её объявление выше) — второй перечень навигации в проекте не
+// заводится, строка клавиш каждой колонки берёт закон отсюда же. Привязки
+// без отображаемой подписи (например, Down) пропускаются, чтобы пара ↑↓ не
+// задваивалась.
+func NavHints(k KeyMap) []KeyHint {
 	bindings := k.ShortHelp()
-	parts := make([]string, 0, len(bindings))
-	for _, b := range bindings {
-		h := b.Help()
+	n := len(bindings) - 2
+	if n < 0 {
+		n = 0
+	}
+	var hints []KeyHint
+	for _, b := range bindings[:n] {
+		h := Hint(b)
 		if h.Key == "" && h.Desc == "" {
 			continue
 		}
+		hints = append(hints, h)
+	}
+	return hints
+}
+
+// MetaHints — помощь и выход: ровно эти две привязки, и больше нигде в
+// строке клавиш они не называются — при нехватке ширины KeyBar уступает
+// сначала законом (NavHints), затем собственными записями колонки, но
+// никогда не этой парой (см. KeyBar ниже).
+func MetaHints(k KeyMap) []KeyHint {
+	return []KeyHint{Hint(k.Help), Hint(k.Quit)}
+}
+
+// keyBarAvail — ширина, в которую обязана уложиться строка клавиш: пол
+// экрана (MinWidth) за вычетом отступов от обоих краёв (OuterMargin), а не
+// текущее окно терминала — иначе перечень клавиш менялся бы от ширины
+// терминала, и человек учил бы разные строки на разных машинах.
+const keyBarAvail = MinWidth - 2*OuterMargin
+
+// hintsWidth — ширина перечня записей в ячейках графемной мерой проекта:
+// клавиша, пробел, описание, разделитель " · " (3 ячейки) между записями.
+func hintsWidth(hints []KeyHint) int {
+	w := 0
+	for i, h := range hints {
+		if i > 0 {
+			w += 3
+		}
+		w += textwidth.Of(h.Key) + 1 + textwidth.Of(h.Desc)
+	}
+	return w
+}
+
+// KeyBarOf — ЕДИНСТВЕННОЕ место отрисовки строки клавиш в проекте: клавиша
+// жирным акцентным (Theme.KeyCap), описание обычным приглушённым
+// (Theme.KeyDesc), разделитель " · " приглушённый. Перечень укладывается в
+// ширину пола экрана (keyBarAvail выше — MinWidth и OuterMargin, не число),
+// графемной мерой проекта (textwidth.Of). Правила укладки:
+//   - запись, которая целиком не помещается, не показывается вовсе —
+//     полклавиши хуже, чем её отсутствие;
+//   - записи с уже названной клавишей отбрасываются: если клавиша
+//     встречается в перечне дважды, остаётся ПЕРВАЯ — колонка знает про
+//     свою клавишу больше, чем общий хвост закона, и «→ секреты» не должно
+//     соседствовать с «→ глубже» в одной строке;
+//   - ширина берётся от ПОЛА, а не от текущего окна.
+func KeyBarOf(t Theme, hints []KeyHint) string {
+	// Ширина пола (MinWidth) за вычетом отступов от обоих краёв
+	// (OuterMargin) — та же формула, что и в keyBarAvail выше, повторена
+	// здесь буквально: KeyBarOf обязана мерить ширину от пола сама, не
+	// полагаясь на то, что вызывающий её код когда-либо это проверит.
+	avail := MinWidth - 2*OuterMargin
+	seen := map[string]bool{}
+	width := 0
+	parts := make([]string, 0, len(hints))
+	for _, h := range hints {
+		if h.Key == "" && h.Desc == "" {
+			continue
+		}
+		if seen[h.Key] {
+			continue
+		}
+		w := textwidth.Of(h.Key) + 1 + textwidth.Of(h.Desc)
+		sep := 0
+		if len(parts) > 0 {
+			sep = 3
+		}
+		if width+sep+w > avail {
+			continue
+		}
+		seen[h.Key] = true
+		width += sep + w
 		parts = append(parts, t.KeyCap.Render(h.Key)+" "+t.KeyDesc.Render(h.Desc))
 	}
 	return strings.Join(parts, t.KeyDesc.Render(" · "))
+}
+
+// combineHints склеивает несколько перечней записей в один — порядок групп
+// сохраняется, второй склейки срезов вручную в KeyBar ниже не заводится.
+func combineHints(groups ...[]KeyHint) []KeyHint {
+	var out []KeyHint
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// KeyBar собирает строку клавиш колонки: собственные записи колонки extra,
+// затем хвост закона (NavHints), затем помощь и выход (MetaHints) — тем же
+// порядком, каким они перечислены здесь. Сигнатура остаётся совместимой с
+// прежними вызовами без своих клавиш (extra пуст) — второй функции сборки
+// строки клавиш не появляется (Фаза 12, POL-03).
+//
+// Если собранное не укладывается в ширину (keyBarAvail), записи
+// отбрасываются в строго названном порядке приоритета: сначала — записи
+// закона ленты (nav) С КОНЦА (их называет ещё и строка подсказки, и первая
+// строка раздела клавиш экрана помощи — план 13-03), затем — собственные
+// записи колонки (extra) с конца (последнее средство), и никогда — помощь и
+// выход (meta): человек, потерявший их, теряет вход и в перечень остальных
+// клавиш, и в выход из утилиты.
+func KeyBar(t Theme, k KeyMap, extra ...KeyHint) string {
+	nav := NavHints(k)
+	meta := MetaHints(k)
+	for {
+		combined := combineHints(extra, nav, meta)
+		if hintsWidth(combined) <= keyBarAvail || (len(nav) == 0 && len(extra) == 0) {
+			return KeyBarOf(t, combined)
+		}
+		if len(nav) > 0 {
+			nav = nav[:len(nav)-1]
+			continue
+		}
+		extra = extra[:len(extra)-1]
+	}
 }

@@ -47,6 +47,10 @@ const (
 	// ленты и оверлея, см. screen() ниже), поэтому дописывание в конец
 	// безопасно.
 	screenMenu
+	// screenLog — полноэкранный просмотрщик лога (Фаза 15, план 15-01,
+	// LOG-01…LOG-04, internal/ui/logview.go): оверлей поверх ленты, тем же
+	// приёмом, что и заставка, проводник, помощь и меню.
+	screenLog
 )
 
 // overlay — экран, не являющийся колонкой ленты (Фаза 13, NAV-01…NAV-04):
@@ -67,6 +71,12 @@ const (
 	// лентой ровно как заставка, но, в отличие от неё, является точкой
 	// входа — заставка теперь открывается из меню, а не наоборот.
 	overlayMenu
+	// overlayLog — полноэкранный просмотрщик лога (Фаза 15, план 15-01):
+	// перекрывает ленту целиком, забирает клавиши целиком (движение по
+	// логу, поиск, переход к упавшему шагу) и закону стрелок не подчиняется
+	// — тот же класс оверлея, что и проводник с помощью. Лента под ним не
+	// меняется, и закрытие возвращает человека ровно туда, где он был.
+	overlayLog
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
@@ -124,6 +134,13 @@ type App struct {
 	// help — экран помощи (Фаза 12, POL-03): тот же приём, что и у экрана
 	// проводника выше — оверлей overlayHelp поверх ленты.
 	help helpModel
+
+	// logv — полноэкранный просмотрщик лога (Фаза 15, план 15-01): оверлей
+	// overlayLog поверх ленты, тем же приёмом, что guide и help выше.
+	// Собирается заново на каждое открытие (openLogMsg) и обнуляется на
+	// закрытии (logDismissMsg) — вторая копия строк лога не переживает
+	// закрытия просмотрщика (T-15-04).
+	logv logView
 
 	// access — доступ по хосту (Фаза 14, план 14-02): «текущий хост» как
 	// понятие корневой модели больше не существует — в один момент времени
@@ -208,6 +225,8 @@ func (a App) screen() screen {
 		return screenGuide
 	case overlayHelp:
 		return screenHelp
+	case overlayLog:
+		return screenLog
 	}
 	return a.ribbon.screen()
 }
@@ -486,6 +505,12 @@ func (a App) inputActive() bool {
 		return a.job.cmd.active || a.job.apply.stage == applyMessage
 	case screenTree:
 		return a.tree.list.FilterState() == list.Filtering
+	case screenLog:
+		// Пока открыто поле ввода запроса поиска просмотрщика лога, ввод
+		// захвачен им же — буква выхода или помощи, набранная в запрос, не
+		// должна завершать программу или открывать помощь поверх (Фаза 15,
+		// план 15-01, T-15-07).
+		return a.logv.searching
 	}
 	return false
 }
@@ -596,6 +621,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// первом открытии `?`, и SetSize до этого небезопасна.
 			a.help = a.help.setSize(msg.Width, msg.Height)
 		}
+		// Просмотрщик лога (Фаза 15, план 15-01, задача 3, пункт 15): высота
+		// — тело кадра, тем же расчётом, что и у openLogMsg выше (title,
+		// пустые строки, строка клавиш и строка подсказки, плюс пустая
+		// строка и строка положения внутри тела — восемь строк накладных
+		// расходов), ширина — за вычетом отступов от краёв. logView —
+		// простое значение без компонентов Bubbles, вызов безопасен даже
+		// когда просмотрщик сейчас не открыт.
+		logHeight := msg.Height - 8
+		if logHeight < 0 {
+			logHeight = 0
+		}
+		a.logv = a.logv.setSize(msg.Width-2*OuterMargin, logHeight)
 		return a, nil
 	case tea.BackgroundColorMsg:
 		// Фон уточняется этим сообщением, а не запрашивается синхронно
@@ -635,7 +672,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
-		if key.Matches(msg, a.keys.Quit) && a.overlay != overlaySplash {
+		// !a.inputActive() — починка существующего дефекта (Фаза 15, план
+		// 15-01, T-15-07), а не украшение: буква выхода, набранная в строке
+		// команды, в поле сообщения коммита или (с этой фазы) в поле поиска
+		// просмотрщика лога, до сих пор завершала программу мимо всякого
+		// намерения человека. Ctrl-C остаётся исключением из этого правила —
+		// он выходит и из открытого поля ввода тоже (сопоставление Cancel
+		// выше по коду, до этой проверки).
+		if key.Matches(msg, a.keys.Quit) && a.overlay != overlaySplash && !a.inputActive() {
 			// Выход идёт единственной точкой на ЛЮБОМ экране, а не только
 			// когда текущий экран — джоба: `q` с экрана помощи, открытого с
 			// экрана джобы, тоже обязан убрать сессию (CR-01).
@@ -660,7 +704,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// меню, откуда помощь открыли; своей строки клавиш меню не
 		// заводит, и пропуск здесь не отнимает у него видимость перечня
 		// клавиш — он доступен с любой колонки ленты.
-		if key.Matches(msg, a.keys.Help) && a.overlay != overlaySplash && a.overlay != overlayMenu && !a.inputActive() {
+		// a.overlay != overlayLog — помощь не открывается поверх просмотрщика
+		// лога (Фаза 15, план 15-01): колода оверлеев одна, второго уровня
+		// вложенности не заводится — помощь доступна сразу после закрытия
+		// просмотрщика, а оверлей поверх оверлея пришлось бы разбирать в
+		// обратном порядке, и первая же ошибка в этом порядке оставила бы
+		// человека в экране без выхода.
+		if key.Matches(msg, a.keys.Help) && a.overlay != overlaySplash && a.overlay != overlayMenu && a.overlay != overlayLog && !a.inputActive() {
 			if a.overlay == overlayHelp {
 				a.overlay = overlayNone
 				return a, nil
@@ -892,6 +942,32 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a = a.focusColumn()
 		return a, cleanup
 
+	case openLogMsg:
+		// Полноэкранный просмотрщик лога (Фаза 15, план 15-01): собирается
+		// заново на каждое открытие из готовых строк сообщения (комментарий
+		// типа openLogMsg — internal/ui/logview.go), а не из ссылки на
+		// источник. Размер — тот же расчёт, каким тело кадра считается на
+		// tea.WindowSizeMsg ниже (title+пустая+тело+пустая+клавиши+пустая+
+		// подсказка сверху, плюс пустая строка и строка положения внутри
+		// самого тела — восемь строк накладных расходов).
+		v := newLogView().setTitle(msg.title)
+		v = v.setSize(a.width-2*OuterMargin, a.height-8)
+		v = v.setSource(msg.tail, msg.mark, msg.pull)
+		v = v.setLines(msg.lines)
+		a.logv = v
+		a.overlay = overlayLog
+		return a, nil
+
+	case logDismissMsg: // сброс a.logv = logView{} — вторая копия лога не переживает закрытия просмотрщика (T-15-04)
+		// Оверлей снимается, и поле просмотрщика обнуляется целиком: строки
+		// лога — вторая копия текста, в котором может оказаться значение
+		// секрета, случайно напечатанное самим шагом; источник (память
+		// панели, буфер сессии) свою копию и так держит, а вторая переживала
+		// бы закрытие просмотрщика без всякой пользы.
+		a.overlay = overlayNone
+		a.logv = logView{}
+		return a, nil
+
 	case guideMsg:
 		// Экран проводника (Фаза 11) перекрывает ленту оверлеем — лента при
 		// этом не меняется, и снятие оверлея само возвращает человека туда,
@@ -944,6 +1020,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenHelp:
 		var cmd tea.Cmd
 		a.help, cmd = a.help.Update(msg)
+		return a, cmd
+	case screenLog:
+		// Разбор клавиш просмотрщика живёт целиком внутри logView.update
+		// (Фаза 15, план 15-01, задача 2) — второго места разбора здесь не
+		// заводится; возврат из него шлёт logDismissMsg{}, который приходит
+		// сюда же новым сообщением и обрабатывается веткой выше.
+		var cmd tea.Cmd
+		a.logv, cmd = a.logv.update(msg, a.keys)
 		return a, cmd
 	}
 	return a, nil
@@ -1017,6 +1101,16 @@ func (a App) viewInner() string {
 		body = a.help.View()
 		keybar = KeyBar(a.theme, a.keys)
 		hint = RenderHint(a.theme, a.help.hintText())
+	case overlayLog:
+		// Тело — окно строк просмотрщика и под ним строка положения
+		// (LOG-04); строка клавиш — перечень, который даёт сам просмотрщик
+		// (a.logv.keyHints), через единственную отрисовку KeyBarOf, а не
+		// через KeyBar с законом ленты — просмотрщик оверлей, закону стрелок
+		// не подчиняется, и его собственные esc/движение уже не то же самое,
+		// что у ленты.
+		body = a.logv.view(a.theme) + "\n\n" + a.logv.statusLine(a.theme)
+		keybar = KeyBarOf(a.theme, a.logv.keyHints(a.keys))
+		hint = RenderHint(a.theme, a.logv.hintText())
 	default:
 		// Оверлея нет — тело кадра рисует лента (NAV-03 держится её
 		// инвариантом, отрисовка только читает его), кроме особых кадров

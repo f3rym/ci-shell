@@ -336,6 +336,16 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		case key.Matches(msg, m.keys.Refresh):
 			m.loading = true
 			return m, m.fetch(true)
+		case key.Matches(msg, m.keys.Log):
+			// Клавиша лога (Фаза 15, план 15-01, задача 3): зовёт открытие
+			// просмотрщика панели для джобы под курсором — ту же функцию,
+			// что и команда :log ниже (applyCommand, "log"), чтобы обе вели
+			// в одну и ту же панель, а не собирали открытие каждая по-своему
+			// (idea-0.3.1 §4).
+			if m.cursor >= 0 && m.cursor < len(m.jobs) {
+				return m, m.log.Open(m.jobs[m.cursor])
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.Command):
 			// Открытие — общим хелпером (internal/ui/command.go), тем же, что
 			// и на экране джобы: без поднятого признака активности строка
@@ -393,14 +403,17 @@ func (m jobsModel) applyCommand(msg commandMsg) (jobsModel, tea.Cmd) {
 	return m, nil
 }
 
-// keyBar собирает строку клавиш экрана из короткой формы помощи раскладки
-// (Фаза 12, POL-03) — полный перечень, включая обновление и командный
-// режим, живёт на экране помощи (`?`).
+// keyBar собирает строку клавиш колонки джоб (Фаза 15, план 15-01, задача 3,
+// JOB-04): собственные записи колонки — клавиша лога, обновление и
+// командный режим — идут ПЕРВЫМИ, затем общий хвост закона ленты и пары
+// помощь/выход (KeyBar ниже сам решает, чем пожертвовать при нехватке
+// ширины). То, ради чего колонка открыта (лог упавшего шага), стоит первым
+// и не вытесняется общим хвостом закона.
 func (m jobsModel) keyBar() string {
 	if m.cmd.active {
 		return m.cmd.input.View()
 	}
-	return KeyBar(m.theme, m.keys)
+	return KeyBar(m.theme, m.keys, Hint(m.keys.Log), Hint(m.keys.Refresh), Hint(m.keys.Command))
 }
 
 // columnLabel собирает уточнение заголовка колонки джоб (Фаза 13, план
