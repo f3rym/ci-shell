@@ -306,6 +306,45 @@ func (p pipelinePanel) hintText() string {
 	return HintPipelinesPick()
 }
 
+// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): номер
+// выбранной строки таблицы и номер пайплайна под курсором строкой — номер
+// пайплайна уникален в пределах проекта, а колонка всегда про один проект.
+// Пустая либо ещё не выбравшая проект панель возвращает нулевые значения.
+func (p pipelinePanel) cursorAt() (int, string) {
+	if pl, ok := p.selected(); ok {
+		return p.table.Cursor(), fmt.Sprintf("%d", pl.IID)
+	}
+	return 0, ""
+}
+
+// withCursor — часть общего контракта колонки (Фаза 13, план 13-03): поиск
+// пайплайна с номером key среди загруженных, установка курсора таблицы на
+// его позицию; не найден — курсор встаёт на index, прижатый к границам
+// списка. Тот же порядок «сначала ключ, затем прижатый номер», что и у
+// остальных трёх моделей колонок.
+func (p pipelinePanel) withCursor(index int, key string) pipelinePanel {
+	if len(p.pipelines) == 0 {
+		p.table.SetCursor(0)
+		return p
+	}
+	if key != "" {
+		for i, pl := range p.pipelines {
+			if fmt.Sprintf("%d", pl.IID) == key {
+				p.table.SetCursor(i)
+				return p
+			}
+		}
+	}
+	idx := index
+	if idx < 0 {
+		idx = 0
+	} else if idx >= len(p.pipelines) {
+		idx = len(p.pipelines) - 1
+	}
+	p.table.SetCursor(idx)
+	return p
+}
+
 // openDeeper — часть общего контракта колонки (Фаза 13): обёртка над open()
 // ниже, чтобы имя вызова было одним на все колонки. Существующее открытие
 // пайплайна под курсором остаётся единственной реализацией — второй не

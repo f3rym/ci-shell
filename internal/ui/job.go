@@ -1172,6 +1172,82 @@ func (m jobModel) columnView(id columnID, width int, focused bool) string {
 	return m.stepsPanel(width, focused)
 }
 
+// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): экран
+// джобы держит две колонки, и id называет, чью позицию читать. Для колонки
+// шагов — номер выбранного шага (индекс в m.stepRows) и его номер строкой
+// (stepRow.Index стабилен в пределах джобы — шаги не переставляются и не
+// удаляются между перезагрузками). Для колонки окружения·секретов·лога —
+// номер выбранной строки и имя переменной под ней (envRow.Key — второго
+// ключа заводить незачем, имя переменной и так уникально в списке). Пустой
+// список любой из двух колонок возвращает нулевые значения.
+func (m jobModel) cursorAt(id columnID) (int, string) {
+	if id == colDetail {
+		if m.envCursor < 0 || m.envCursor >= len(m.envRows) {
+			return 0, ""
+		}
+		return m.envCursor, m.envRows[m.envCursor].Key
+	}
+	if m.cursor < 0 || m.cursor >= len(m.stepRows) {
+		return 0, ""
+	}
+	return m.cursor, fmt.Sprintf("%d", m.stepRows[m.cursor].Index)
+}
+
+// withCursor — часть общего контракта колонки (Фаза 13, план 13-03): тот же
+// порядок «сначала ключ, затем прижатый номер», что и у остальных трёх
+// моделей колонок. Колонка шагов ищет строку с тем же stepRow.Index, колонка
+// окружения — строку с тем же envRow.Key; не найдена — index прижимается к
+// границам списка; список пуст — курсор обнуляется. Метод не возвращает
+// команду: постановка позиции — чтение и запись поля, а не поход в сеть.
+func (m jobModel) withCursor(id columnID, index int, key string) jobModel {
+	switch id {
+	case colDetail:
+		if len(m.envRows) == 0 {
+			m.envCursor = 0
+			return m
+		}
+		if key != "" {
+			for i, r := range m.envRows {
+				if r.Key == key {
+					m.envCursor = i
+					return m
+				}
+			}
+		}
+		idx := index
+		if idx < 0 {
+			idx = 0
+		} else if idx >= len(m.envRows) {
+			idx = len(m.envRows) - 1
+		}
+		m.envCursor = idx
+		return m
+
+	case colSteps:
+		if len(m.stepRows) == 0 {
+			m.cursor = 0
+			return m
+		}
+		if key != "" {
+			for i, r := range m.stepRows {
+				if fmt.Sprintf("%d", r.Index) == key {
+					m.cursor = i
+					return m
+				}
+			}
+		}
+		idx := index
+		if idx < 0 {
+			idx = 0
+		} else if idx >= len(m.stepRows) {
+			idx = len(m.stepRows) - 1
+		}
+		m.cursor = idx
+		return m
+	}
+	return m
+}
+
 // fullFrame — кадр, занимающий ЛЕНТУ целиком вместо колонок (Фаза 13, план
 // 13-02, пункт 6): вид подготовки (спиннер и текст тяги образа) и экран
 // переноса правок со списком изменённых файлов. Оба и раньше занимали тело

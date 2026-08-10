@@ -35,6 +35,14 @@ type jobsModel struct {
 	complete bool
 	cached   bool
 	fetched  string
+	// cursorPinned — человек уже поставил курсор явным действием (движение
+	// клавишами либо восстановление позиции при возврате влево, Фаза 13,
+	// план 13-03): поднимается в withCursor и при движении курсора клавишами
+	// ниже. Правило BROW-04 «курсор на первую упавшую джобу» уступает
+	// запомненной позиции ровно тогда, когда этот признак поднят — «вернулся
+	// туда, откуда ушёл» сильнее «сразу показана упавшая», потому что это
+	// про явное действие человека.
+	cursorPinned bool
 
 	loading bool
 	loadErr string
@@ -171,6 +179,50 @@ func (m jobsModel) setColumnFocus(id columnID) jobsModel {
 	return m
 }
 
+// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): номер
+// курсора и имя джобы под ним. Курсор вне границ списка (список ещё пуст)
+// возвращает нулевые значения.
+func (m jobsModel) cursorAt() (int, string) {
+	if m.cursor < 0 || m.cursor >= len(m.jobs) {
+		return 0, ""
+	}
+	return m.cursor, m.jobs[m.cursor].Name
+}
+
+// withCursor — часть общего контракта колонки (Фаза 13, план 13-03): поиск
+// джобы с именем key, иначе прижатый к границам номер index. Постановка
+// курсора отсюда — явное действие («вернулся туда, откуда ушёл»), поэтому
+// cursorPinned поднимается здесь же: следующая перезагрузка списка (update,
+// jobsLoadedMsg) больше не переставляет курсор на первую упавшую джобу
+// безусловно (BROW-04 уступает запомненной позиции). Метод не трогает
+// панель лога (m.log) — восстановление позиции не возвращает команд ни в
+// одном из четырёх контрактов колонок этой фазы, а выбор джобы для панели
+// лога уже делает selectCursor там, где движение курсора действительно
+// команду возвращает.
+func (m jobsModel) withCursor(index int, key string) jobsModel {
+	m.cursorPinned = true
+	if len(m.jobs) == 0 {
+		m.cursor = 0
+		return m
+	}
+	if key != "" {
+		for i, j := range m.jobs {
+			if j.Name == key {
+				m.cursor = i
+				return m
+			}
+		}
+	}
+	idx := index
+	if idx < 0 {
+		idx = 0
+	} else if idx >= len(m.jobs) {
+		idx = len(m.jobs) - 1
+	}
+	m.cursor = idx
+	return m
+}
+
 // openDeeper — часть общего контракта колонки (Фаза 13): джоба под курсором
 // отдаётся сообщением открытия джобы (тело прежней ветви клавиши открытия).
 func (m jobsModel) openDeeper() (jobsModel, tea.Cmd) {
@@ -192,18 +244,42 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 	case jobsLoadedMsg:
 		m.loading = false
 		m.loadErr = ""
+		// cursorPinned (Фаза 13, план 13-03): человек уже стоял на
+		// конкретной джобе явным действием — её имя запоминается ДО того,
+		// как m.jobs перезапишется новым списком, потому что старый
+		// m.cursor после перезаписи указывает уже на другую джобу, если
+		// порядок или состав списка изменился.
+		pinnedName := ""
+		if m.cursorPinned && m.cursor >= 0 && m.cursor < len(m.jobs) {
+			pinnedName = m.jobs[m.cursor].Name
+		}
 		m.jobs = msg.jobs
 		m.complete = msg.complete
 		m.cached = msg.cached
 		m.fetched = msg.fetched
-		// Курсор встаёт на первую упавшую джобу, если она есть, и на
-		// первую строку, если её нет — «сразу показан» из требования: без
-		// этого человеку пришлось бы искать упавшую джобу глазами (BROW-04).
-		m.cursor = 0
-		for i, j := range m.jobs {
-			if j.Status == StatusFailed {
-				m.cursor = i
-				break
+		if m.cursorPinned {
+			// Возврат туда, откуда ушёл, сильнее правила первого показа —
+			// курсор ищет прежнюю джобу по имени, а не сбрасывается на
+			// первую упавшую (BROW-04 уступает запомненной позиции).
+			m.cursor = 0
+			for i, j := range m.jobs {
+				if j.Name == pinnedName {
+					m.cursor = i
+					break
+				}
+			}
+		} else {
+			// Курсор встаёт на первую упавшую джобу, если она есть, и на
+			// первую строку, если её нет — «сразу показан» из требования:
+			// без этого человеку пришлось бы искать упавшую джобу глазами
+			// (BROW-04). Применяется только пока человек ещё не подтвердил
+			// свою позицию явным действием.
+			m.cursor = 0
+			for i, j := range m.jobs {
+				if j.Status == StatusFailed {
+					m.cursor = i
+					break
+				}
 			}
 		}
 		return m.selectCursor()
@@ -240,12 +316,18 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		// (internal/ui/app.go, navFor/openDeeper).
 		switch {
 		case key.Matches(msg, m.keys.Up):
+			// cursorPinned (Фаза 13, план 13-03): движение клавишей — тоже
+			// явное действие человека, ровно как withCursor; следующая
+			// перезагрузка списка обязана уступить и этой позиции, а не
+			// только позиции, восстановленной при возврате.
+			m.cursorPinned = true
 			if m.cursor > 0 {
 				m.cursor--
 				return m.selectCursor()
 			}
 			return m, nil
 		case key.Matches(msg, m.keys.Down):
+			m.cursorPinned = true
 			if m.cursor < len(m.jobs)-1 {
 				m.cursor++
 				return m.selectCursor()

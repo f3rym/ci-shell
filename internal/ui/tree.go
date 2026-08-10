@@ -691,6 +691,52 @@ func (m treeModel) columnView(id columnID, width int, focused bool) string {
 	return m.bodyView(width, focused)
 }
 
+// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): номер
+// выбранной строки списка и путь строки под курсором. Путь узла уже
+// уникален и уже используется как ключ во всех картах модели (findRow) —
+// второго ключа здесь не заводится. Пустое дерево (курсор ни на чём не
+// стоит) возвращает нулевые значения: запоминать в этом случае нечего.
+func (m treeModel) cursorAt() (int, string) {
+	if row, ok := m.selected(); ok {
+		return m.list.Index(), row.FullPath
+	}
+	return 0, ""
+}
+
+// withCursor — часть общего контракта колонки (Фаза 13, план 13-03):
+// сначала ищется узел по пути (m.findRow) — если он всё ещё существует,
+// курсор списка встаёт на его позицию в уже пересобранном плоском списке;
+// не найден — курсор встаёт на index, прижатый к границам списка. Порядок
+// обязан быть именно таким: пересборка плоского списка после раскрытия узла
+// и после загрузки детей меняет номера строк, поэтому «помню номер» соврало
+// бы после первого же обновления — путь узла переживает перезагрузку, а
+// номер строки нет.
+func (m treeModel) withCursor(index int, key string) treeModel {
+	items := m.list.Items()
+	if len(items) == 0 {
+		m.list.Select(0)
+		return m
+	}
+	if key != "" {
+		if _, ok := m.findRow(key); ok {
+			for i, it := range items {
+				if row, ok := it.(treeRow); ok && row.Kind != treeKindNote && row.FullPath == key {
+					m.list.Select(i)
+					return m
+				}
+			}
+		}
+	}
+	idx := index
+	if idx < 0 {
+		idx = 0
+	} else if idx >= len(items) {
+		idx = len(items) - 1
+	}
+	m.list.Select(idx)
+	return m
+}
+
 // hintText выбирает строку подсказки: при фокусе на правой панели — из её
 // пяти формулировок; при фокусе на дереве — из восьми формулировок дерева.
 // Подсказка всегда описывает следующий шаг того места, где человек сейчас
