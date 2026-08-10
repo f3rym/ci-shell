@@ -1,3 +1,10 @@
+// Файл секретов имеет два пишущих входа, и оба обязаны быть
+// неразрушающими (Фаза 15, план 15-02, idea-0.3.1 §8: «перезаписывать чужое
+// нельзя — только добавлять и заменять по ключу, сохраняя комментарии»).
+// Первый (EnsureSecretsFile) создаёт файл, которого нет. Второй (SaveSecret)
+// меняет ОДНУ строку уже существующего файла. Оба пишут через временный файл
+// с явными правами и переименованием поверх — третьего приёма записи в
+// проекте нет (тот же, что у токенов и настроек).
 package env
 
 import (
@@ -17,6 +24,24 @@ import (
 // ErrInsecureSecrets означает: файл секретов найден на диске, но его права
 // шире 0600, поэтому читать его небезопасно (T-02-08, T-02-12).
 var ErrInsecureSecrets = errors.New("права файла секретов шире 0600")
+
+// ErrInvalidSecretName — имя переменной не годится в ключ YAML. Имя приходит
+// из окружения, собранного по ответу чужого сервера, а уходит в файл ключом
+// YAML: двоеточие, перевод строки или решётка в нём перестроили бы документ
+// и унесли бы чужие записи в чужие места.
+var ErrInvalidSecretName = errors.New("имя переменной не годится в ключ YAML")
+
+// ErrInvalidSecretValue — значение не годится в однострочный скаляр YAML:
+// перевод строки развалил бы однострочный скаляр, а управляющая
+// последовательность доехала бы до переменной окружения контейнера и до
+// кадра терминала.
+var ErrInvalidSecretValue = errors.New("значение не годится в однострочный скаляр YAML")
+
+// ErrSecretNotEditable — значение этого ключа записано в файле в форме,
+// которую точечная правка не переписывает (многострочный или блочный
+// скаляр, якорь, ссылка): отказать честно дешевле, чем испортить файл,
+// который человек правил руками.
+var ErrSecretNotEditable = errors.New("значение записано в форме, которую точечная правка не переписывает")
 
 // secretsFile — верхний уровень файла секретов: карта проектов
 // (<хост>/<путь проекта>) на карту их переменных.
@@ -223,6 +248,280 @@ func EnsureSecretsFile(host, projectPath string, missing []Missing) (path string
 	}
 
 	return path, true, nil
+}
+
+// validSecretNameRe — форма имени переменной, которую допускает сам GitLab:
+// буква или подчёркивание в начале, буквы, цифры и подчёркивания дальше.
+var validSecretNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// mapEntry ищет запись с ключом name в отображении m (узел yaml.MappingNode)
+// и возвращает узел ключа, узел значения и признак найденности. Единственный
+// обход узлов отображения в проекте — SaveSecret зовёт его трижды (раздел
+// проектов, ключ проекта, сама переменная), второго обхода не заводится.
+func mapEntry(m *yaml.Node, name string) (keyNode, valueNode *yaml.Node, ok bool) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil, nil, false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Value == name {
+			return k, m.Content[i+1], true
+		}
+	}
+	return nil, nil, false
+}
+
+// editableScalar сообщает, можно ли переписать значение val точечной
+// правкой одной строки: простой скаляр (не якорь, не ссылка — Kind !=
+// ScalarNode отсекает алиас), не блочный (literal/folded — они всегда
+// начинаются со следующей строки, что уже ловит проверка Line), на той же
+// строке, что и его ключ keyNode.
+func editableScalar(val, keyNode *yaml.Node) bool {
+	if val.Kind != yaml.ScalarNode {
+		return false
+	}
+	if val.Line != keyNode.Line {
+		return false
+	}
+	if val.Style == yaml.LiteralStyle || val.Style == yaml.FoldedStyle {
+		return false
+	}
+	if val.Anchor != "" {
+		return false
+	}
+	return true
+}
+
+// insertLines вставляет newLines в срез lines перед позицией idx (0-индекс).
+// Позиция idx = yaml.Node.Line совпадает с «сразу после строки с этим
+// номером» без дополнительного сдвига, потому что Line 1-индексная, а срез
+// строк — 0-индексный.
+func insertLines(lines []string, idx int, newLines ...string) []string {
+	out := make([]string, 0, len(lines)+len(newLines))
+	out = append(out, lines[:idx]...)
+	out = append(out, newLines...)
+	out = append(out, lines[idx:]...)
+	return out
+}
+
+// SaveSecret — точечная запись ОДНОГО значения секрета: находит место в уже
+// существующем файле разбором в узел YAML по номерам строк и колонок и
+// правит ровно одну строку исходного текста (в случае нового проекта — две,
+// в случае пустого файла — три) — второй, разрушающей формулы записи
+// (сериализация всего документа целиком) в проекте нет и не появляется.
+//
+// Порядок шагов обязателен — каждый закрывает свою поломку:
+//  1. имя переменной проверяется формой переменной окружения GitLab —
+//     иначе двоеточие, перевод строки или решётка в имени перестроили бы
+//     документ и унесли бы чужие записи в чужие места;
+//  2. значение проверяется отсутствием перевода строки и управляющих
+//     символов — иначе перевод строки развалил бы однострочный скаляр, а
+//     управляющая последовательность доехала бы до контейнера и до кадра
+//     терминала;
+//  3. путь файла берётся SecretsPath(), а сам файл — если его ещё нет —
+//     создаётся EnsureSecretsFile (та же формула создания, что и везде в
+//     проекте, второй не заводится);
+//  4. права файла проверяются тем же правилом, что и при чтении (шире 0600
+//     — отказ той же часовой ошибкой ErrInsecureSecrets), и ДО чтения
+//     содержимого: дописать значение в файл, который читает вся машина,
+//     значит своими руками положить туда секрет; права не чинятся молча —
+//     файл открыл кто-то другой, и решение об этом принимает человек;
+//  5. содержимое разбирается в узел YAML (не в структуру secretsFile) —
+//     узлы несут номера строк и колонок, а найти место и есть цель разбора
+//     здесь; ошибка разбора возвращается тем же способом, что и при чтении:
+//     наружу уходят только имя файла и номера строк (WR-02);
+//  6. место правки ищется единственным помощником mapEntry, зовущимся
+//     трижды: раздел проектов, ключ проекта, сама переменная;
+//  7. значение превращается в однострочный скаляр YAML СЕРИАЛИЗАТОРОМ
+//     (yaml.Marshal одной строки, с отбрасыванием завершающего перевода
+//     строки), а не собственным экранированием — первая же кавычка или
+//     обратный слэш в ручном экранировании испортили бы файл или чужие
+//     соседние записи; если после сериализации в скаляре всё-таки оказался
+//     перевод строки — отказ ErrInvalidSecretValue, второй рубеж после
+//     шага 2;
+//  8. правится или добавляется РОВНО одна строка исходного текста (в случае
+//     нового проекта — две, в случае пустого файла — три); остальные строки
+//     не пересобираются;
+//  9. запись атомарна: временный файл в том же каталоге, явные права 0600,
+//     запись, закрытие, переименование поверх; при любой ошибке до
+//     переименования временный файл удаляется — тот же приём, что у
+//     EnsureSecretsFile, у токенов и у настроек, четвёртого не появляется.
+//
+// Ни один текст ошибки не содержит значения — только путь файла, имя
+// переменной и номера строк; это правило уже действует для ошибок разбора
+// при чтении (LoadSecrets), и запись живёт по нему же.
+//
+//nolint:gocyclo // ветвление — четыре места правки файла, а не случайная сложность
+func SaveSecret(host, projectPath, key, value string) (path string, err error) {
+	// Шаг 1: имя переменной.
+	if !validSecretNameRe.MatchString(key) {
+		return "", fmt.Errorf("env: имя переменной %q не годится в ключ YAML: %w", key, ErrInvalidSecretName)
+	}
+
+	// Шаг 2: значение — без перевода строки и без управляющих символов.
+	if strings.ContainsRune(value, '\n') {
+		return "", fmt.Errorf("env: значение переменной %s содержит перевод строки: %w", key, ErrInvalidSecretValue)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("env: значение переменной %s содержит управляющий символ: %w", key, ErrInvalidSecretValue)
+		}
+	}
+
+	// Шаг 3: путь и (при необходимости) создание файла — второй формулы
+	// создания в проекте не появляется.
+	path, err = SecretsPath()
+	if err != nil {
+		return "", err
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		if !errors.Is(statErr, fs.ErrNotExist) {
+			return path, fmt.Errorf("env: файл секретов %s недоступен: %w", path, statErr)
+		}
+		if _, _, ensureErr := EnsureSecretsFile(host, projectPath, []Missing{{Key: key}}); ensureErr != nil {
+			return path, ensureErr
+		}
+	}
+
+	// Шаг 4: права — тем же правилом, что и при чтении, до чтения
+	// содержимого.
+	info, err := os.Stat(path)
+	if err != nil {
+		return path, fmt.Errorf("env: файл секретов %s недоступен: %w", path, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return path, fmt.Errorf(
+			"env: файл секретов %s имеет слишком широкие права (%s), почините: chmod 600 %s: %w",
+			path, info.Mode().Perm(), path, ErrInsecureSecrets,
+		)
+	}
+
+	// Шаг 5: разбор в узел YAML.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return path, fmt.Errorf("env: чтение файла секретов %s: %w", path, err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return path, fmt.Errorf(
+			"env: файл секретов %s не разобран как YAML%s; текст ошибки скрыт — он может содержать значения секретов; проверьте синтаксис и кавычки вокруг значений",
+			path, yamlErrorLines(err),
+		)
+	}
+	var root *yaml.Node
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		root = doc.Content[0]
+	}
+
+	// Шаг 7: значение — скаляром сериализатора, до поиска места: если
+	// значение вообще не сериализуется в однострочный скаляр, дальше идти
+	// незачем.
+	scalarBytes, err := yaml.Marshal(value)
+	if err != nil {
+		return path, fmt.Errorf("env: значение переменной %s не сериализовано в скаляр YAML: %w", key, ErrInvalidSecretValue)
+	}
+	scalar := strings.TrimSuffix(string(scalarBytes), "\n")
+	if strings.Contains(scalar, "\n") {
+		return path, fmt.Errorf("env: значение переменной %s не уместилось в однострочный скаляр YAML: %w", key, ErrInvalidSecretValue)
+	}
+
+	// Шаг 6 и 8: место правки и сама правка исходного текста построчно.
+	lines := strings.Split(string(data), "\n")
+	projectKey := host + "/" + projectPath
+
+	projectsKeyNode, projectsVal, hasProjects := mapEntry(root, "projects")
+	switch {
+	case !hasProjects:
+		// Случай 4: раздела проектов нет вовсе (файл пуст или человек его
+		// выпотрошил) — три строки дописываются в конец файла, ни одна
+		// существующая строка при этом не меняется.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		lines = append(lines,
+			"projects:",
+			"  "+projectKey+":",
+			"    "+key+": "+scalar,
+			"",
+		)
+
+	default:
+		projKeyNode, projVal, hasProject := mapEntry(projectsVal, projectKey)
+		switch {
+		case !hasProject:
+			// Случай 3: раздел проектов есть, проекта нет — сразу после
+			// строки раздела вставляются две строки: ключ проекта и
+			// переменная под ним, с отступами на два и на четыре больше
+			// колонки раздела.
+			indent := projectsKeyNode.Column - 1
+			lines = insertLines(lines, projectsKeyNode.Line,
+				strings.Repeat(" ", indent+2)+projectKey+":",
+				strings.Repeat(" ", indent+4)+key+": "+scalar,
+			)
+
+		default:
+			varKeyNode, varValNode, hasVar := mapEntry(projVal, key)
+			switch {
+			case !hasVar:
+				// Случай 2: проект найден, переменной нет — новая строка
+				// вставляется сразу после строки ключа проекта, с отступом
+				// на два больше его колонки: конец блока нельзя определить,
+				// не гадая, кому принадлежат идущие следом комментарии, а
+				// вставка первой строкой не может присвоить себе чужой
+				// комментарий.
+				indent := projKeyNode.Column - 1
+				lines = insertLines(lines, projKeyNode.Line,
+					strings.Repeat(" ", indent+2)+key+": "+scalar,
+				)
+
+			default:
+				// Случай 1: переменная найдена — правится её собственная
+				// строка целиком; отступ берётся из КОЛОНКИ узла ключа, а
+				// не выдумывается.
+				if !editableScalar(varValNode, varKeyNode) {
+					return path, fmt.Errorf(
+						"env: значение переменной %s в файле %s записано в форме, которую точечная правка не переписывает (строка %d): %w",
+						key, path, varKeyNode.Line, ErrSecretNotEditable,
+					)
+				}
+				indent := varKeyNode.Column - 1
+				lines[varKeyNode.Line-1] = strings.Repeat(" ", indent) + key + ": " + scalar
+			}
+		}
+	}
+
+	newContent := strings.Join(lines, "\n")
+
+	// Шаг 9: атомарная запись — временный файл в том же каталоге, явные
+	// права 0600 (маска процесса иначе оставила бы файл читаемым всей
+	// машине), запись, закрытие, переименование поверх; при любой ошибке до
+	// переименования временный файл удаляется.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".secrets-*.yml.tmp")
+	if err != nil {
+		return path, fmt.Errorf("env: не удалось создать временный файл секретов: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return path, fmt.Errorf("env: не удалось выставить права 0600 на временный файл секретов: %w", err)
+	}
+	if _, err := tmp.WriteString(newContent); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return path, fmt.Errorf("env: не удалось записать временный файл секретов: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return path, fmt.Errorf("env: не удалось закрыть временный файл секретов: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return path, fmt.Errorf("env: не удалось сохранить файл секретов %s: %w", path, err)
+	}
+
+	return path, nil
 }
 
 // yamlLineRe находит в тексте ошибки yaml.v3 упоминания «line N» — из всей
