@@ -163,6 +163,18 @@ type jobModel struct {
 	// мог вырасти (refreshLog), а не на каждом кадре.
 	logv logView
 
+	// secret — поле ввода значения переменной секрета (Фаза 15, план 15-02,
+	// JOB-02): пока оно активно, клавиши уходят ему, а место строки клавиш
+	// занимает его вид (тем же приёмом, что и у cmd выше). filledHere —
+	// человек уже вписывал значение на этом экране: готовая сессия с
+	// недостающими переменными больше не открывает экран проводника сама,
+	// пока этот признак поднят (человек выбрал заполнять на месте).
+	secret secretPrompt
+	// filledHere объявлено без выравнивания столбцом (gofmt в проекте не
+	// запускается, .claude/CLAUDE.md) — человек уже вписывал значение на
+	// этом экране.
+	filledHere bool
+
 	phase loopPhase
 	// pulling/pullImage — идёт тяга образа (для preparingView и hintText).
 	// Полноценный индикатор прогресса Bubbles (progress) с числом слоёв
@@ -349,8 +361,15 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		}
 		// Готовая сессия с непустым списком недостающих переменных больше
 		// не молчит (Фаза 11, GUIDE-03): человек узнаёт о поломке из
-		// экрана сразу, а не из отказа шага через минуту.
-		if missing := m.session.environment.Missing; len(missing) > 0 {
+		// экрана сразу, а не из отказа шага через минуту. Исключение —
+		// человек уже вписывал значение на этом экране (filledHere, Фаза
+		// 15, план 15-02): он выбрал заполнять секреты на месте, и
+		// открывать поверх его выбора предложение уйти в редактор после
+		// каждого повтора подготовки значило бы спорить с ним раз в
+		// тридцать секунд. Команда открытия редактора (:secrets) и
+		// действие проводника (actionEditSecrets) при этом не трогаются —
+		// путь через редактор остаётся.
+		if missing := m.session.environment.Missing; len(missing) > 0 && !m.filledHere {
 			g := guideForMissing(missing, m.session.environment.SecretsPath)
 			return m, func() tea.Msg { return guideMsg{Guide: g} }
 		}
@@ -533,6 +552,34 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		m.phase = phasePreparing
 		return m, tea.Batch(tea.ClearScreen, m.session.RestartCmd(context.Background()))
 
+	case secretEnteredMsg:
+		// Поле уже закрыто и вычищено секундой раньше (secretPrompt.updateKey)
+		// — здесь только запуск записи, единственное место вызова
+		// saveSecretCmd на экране джобы.
+		m.secret = secretPrompt{}
+		return m, saveSecretCmd(m.session.ref.Host, m.session.ref.ProjectPath, msg.Key, msg.Value)
+
+	// secretSavedMsg: ошибка — однострочный баннер цветом отказа, состояние
+	// экрана не меняется, вписать можно снова; успех — баннер приглушённым
+	// стилем (это не поломка), признак «уже вписывал» поднимается, фаза
+	// переводится в подготовку и запускается ПОВТОР ПОДГОТОВКИ, а не
+	// подмена переменной в памяти: окружение собирается доменом из четырёх
+	// слоёв, контейнер уже поднят со своим набором переменных, а
+	// маскировщик лога построен по старому окружению — подмена в памяти
+	// дала бы экран, на котором переменная есть, и контейнер, в котором её
+	// нет. Тот же путь уже проходит возврат из редактора (secretsEditedMsg).
+	case secretSavedMsg:
+		if msg.Err != nil {
+			m.banner = HintSecretFailed(msg.Err.Error())
+			m.blockedCanceled = false
+			return m, nil
+		}
+		m.banner = HintSecretSaved(msg.Key, msg.Path)
+		m.blockedCanceled = true
+		m.filledHere = true
+		m.phase = phasePreparing
+		return m, m.session.RestartCmd(context.Background())
+
 	case pullFinishedMsg:
 		if msg.Err != nil {
 			if g, ok := guideFor(msg.Err, whereSession, m.session.ref); ok {
@@ -566,6 +613,14 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		if m.apply.stage == applyMessage {
 			var cmd tea.Cmd
 			m.apply.msgInput, cmd = m.apply.msgInput.Update(msg)
+			return m, cmd
+		}
+		if m.secret.active {
+			// Вставка секрета из менеджера паролей — обычный способ его
+			// ввести (Фаза 15, план 15-02): без этой ветви она молча уходила
+			// бы в никуда.
+			var cmd tea.Cmd
+			m.secret.input, cmd = m.secret.input.Update(msg)
 			return m, cmd
 		}
 		return m, nil
@@ -927,6 +982,19 @@ func (m jobModel) applyEvent(e event.Event) jobModel {
 // увидеть каждый символ, включая те, что совпадают с горячими клавишами
 // экрана (например, "R" внутри набираемой команды).
 func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
+	if m.secret.active {
+		// Поле ввода значения секрета (Фаза 15, план 15-02, JOB-02) —
+		// третье поле ввода экрана, той же ветвью-исключением, что и у
+		// строки команды и у экрана переноса правок. Три поля ввода экрана
+		// никогда не активны одновременно, и это держится проверками, а не
+		// удачей: cmd.active выше и apply.stage != applyIdle ниже не могут
+		// стать истинными, пока secret.active истинно (startFill —
+		// единственное место открытия поля, и оно не зовётся из веток,
+		// проверяющих эти два условия).
+		var cmd tea.Cmd
+		m.secret, cmd = m.secret.updateKey(msg, m.keys)
+		return m, cmd
+	}
 	if m.cmd.active {
 		return m.updateCommandKey(msg)
 	}
@@ -1296,6 +1364,36 @@ func (m jobModel) currentSecretRow() (secretRow, bool) {
 	return m.secretRows[m.envCursor], true
 }
 
+// fillsSecret — можно ли сейчас вписать значение переменной (Фаза 15, план
+// 15-02, JOB-02): фокус в правой колонке (focused), вид «секреты», под
+// курсором есть строка и экран не занят долгой операцией — та же проверка
+// незанятости, что стоит у открытия редактора секретов (applyCommand,
+// "secrets"): повтор подготовки снёс бы идущую операцию из-под ног.
+// Заполненная переменная тоже принимается: перезапись ошибочно введённого
+// значения — законное действие, отказывать в ней значило бы отправлять
+// человека в редактор ради опечатки.
+func (m jobModel) fillsSecret(focused columnID) bool {
+	if focused != colDetail || m.detail != detailSecrets {
+		return false
+	}
+	if _, ok := m.currentSecretRow(); !ok {
+		return false
+	}
+	return m.idle()
+}
+
+// startFill — открывает поле ввода для строки под курсором; единственное
+// место открытия поля.
+func (m jobModel) startFill() (jobModel, tea.Cmd) {
+	row, ok := m.currentSecretRow()
+	if !ok {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.secret, cmd = newSecretPrompt(row.Key)
+	return m, cmd
+}
+
 // openLogCmd собирает команду открытия полноэкранного просмотрщика (план
 // 15-01) из вида «лог шага» правой колонки: тот же источник, что и у
 // встроенного предпросмотра — второго места сборки openLogMsg на экране
@@ -1524,6 +1622,11 @@ func (m jobModel) bannerLine() (string, bool) {
 // занимает то же место тем же приёмом — commandBar и applyState.msgInput
 // никогда не активны одновременно (applyIdle-проверка в updateKey).
 func (m jobModel) keyBar() string {
+	if m.secret.active {
+		// Поле ввода значения секрета на месте строки клавиш — тем же
+		// приёмом, что и у строки команды (Фаза 15, план 15-02).
+		return m.secret.view(m.theme)
+	}
 	if m.cmd.active {
 		var b strings.Builder
 		if m.cmd.err != "" {
@@ -1545,6 +1648,12 @@ func (m jobModel) keyBar() string {
 		if m.detail == detailLog {
 			extra = append(extra, Hint(m.keys.Log))
 		}
+		if m.detail == detailSecrets {
+			// Клавиша подтверждения впишет значение переменной под курсором
+			// (Фаза 15, план 15-02) — читается из раскладки (Open), подпись
+			// живая.
+			extra = append(extra, HintAs(m.keys.Open, "вписать значение"))
+		}
 	}
 	return KeyBar(m.theme, m.keys, extra...)
 }
@@ -1554,6 +1663,11 @@ func (m jobModel) keyBar() string {
 // (internal/ui/hint.go) и ничего не собирает на месте.
 func (m jobModel) hintText() string {
 	switch {
+	case m.secret.active:
+		// Поле открыто — это про то, что происходит прямо сейчас, поэтому
+		// ветка стоит первой, впереди даже долгих операций и отказов (Фаза
+		// 15, план 15-02).
+		return HintSecretPrompt(m.secret.key)
 	case m.canceling:
 		return HintCanceling()
 	case m.pulling:

@@ -518,7 +518,11 @@ func (a App) inputActive() bool {
 	case screenJobs:
 		return a.jobs.cmd.active
 	case screenJob:
-		return a.job.cmd.active || a.job.apply.stage == applyMessage
+		// a.job.secret.active — поле ввода значения секрета (Фаза 15, план
+		// 15-02): пока оно открыто, ввод захвачен — иначе буква выхода,
+		// набранная в значении секрета, завершила бы программу (тот же
+		// класс дефекта, что план 15-01 уже починил для клавиши выхода).
+		return a.job.cmd.active || a.job.apply.stage == applyMessage || a.job.secret.active
 	case screenTree:
 		return a.tree.list.FilterState() == list.Filtering
 	case screenLog:
@@ -742,6 +746,22 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.overlay == overlayHelp && key.Matches(msg, a.keys.Back) {
 			a.overlay = overlayNone
 			return a, nil
+		}
+
+		// Клавиша подтверждения на строке скрытой переменной открывает поле
+		// ввода значения ДО применения закона стрелок (Фаза 15, план
+		// 15-02) — ЕДИНСТВЕННОЕ отступление от синонима «клавиша
+		// подтверждения — то же, что стрелка вправо» (план 13-01):
+		// idea-0.3.1 §6 называет оба правила буквально и в одном разделе —
+		// стрелка вправо переключает вид, а клавиша подтверждения вписывает
+		// значение. Отступление узкое по построению: оно действует ровно в
+		// одном виде одной колонки и только когда под курсором есть строка
+		// (jobModel.fillsSecret); во всех остальных местах обе клавиши
+		// по-прежнему ведут в одну функцию углубления (navFor ниже).
+		if a.overlay == overlayNone && !a.inputActive() && key.Matches(msg, a.keys.Open) && a.job.fillsSecret(a.ribbon.focusedID()) {
+			var cmd tea.Cmd
+			a.job, cmd = a.job.startFill()
+			return a, cmd
 		}
 
 		// Единственное место применения закона ленты колонок (Фаза 13,

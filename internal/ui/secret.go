@@ -9,6 +9,11 @@ import (
 	"sort"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+
+	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/render"
 )
 
@@ -80,4 +85,99 @@ func (r secretRow) line(t Theme, width int, selected bool) string {
 		return t.Selected.Render(line + " " + GlyphCursor)
 	}
 	return line
+}
+
+// secretPrompt — поле ввода значения переменной секрета (Фаза 15, план
+// 15-02, JOB-02): имя переменной, поле ввода, признак активности и текст
+// последней ошибки.
+type secretPrompt struct {
+	key    string
+	input  textinput.Model
+	active bool
+	err    string
+}
+
+// newSecretPrompt собирает поле в режиме СКРЫТОГО эха (тот же режим, что у
+// поля токена проводника, internal/ui/guide.go) — обязательный, а не
+// желательный: значение вводится в терминале, за которым может кто-то
+// смотреть, и остаётся на экране до следующей перерисовки; для токена этот
+// вопрос уже решён ровно так же. Приглашением ставится имя переменной,
+// полю отдаётся фокус и возвращается команда мигания курсора.
+func newSecretPrompt(key string) (secretPrompt, tea.Cmd) {
+	ti := textinput.New()
+	ti.Prompt = key + ": "
+	ti.EchoMode = textinput.EchoPassword
+	ti.Focus()
+	return secretPrompt{key: key, input: ti, active: true}, textinput.Blink
+}
+
+// updateKey — подтверждение: набранное обрезается по краям, пустое не
+// принимается (строка ошибки, поле остаётся открытым — человек может
+// дописать), непустое СРАЗУ вычищается из поля, а само значение уходит
+// наружу сообщением secretEnteredMsg. Модель экрана живёт до конца сессии,
+// а значение секрета не должно жить дольше одного подтверждения — тот же
+// принцип, что и у поля токена проводника. Привязка возврата закрывает
+// поле, вычищая его; любая другая клавиша — обычный ввод.
+func (p secretPrompt) updateKey(msg tea.KeyPressMsg, k KeyMap) (secretPrompt, tea.Cmd) {
+	switch {
+	case msg.String() == "enter":
+		value := strings.TrimSpace(p.input.Value())
+		if value == "" {
+			p.err = "значение не может быть пустым"
+			return p, nil
+		}
+		varKey := p.key
+		p.input.SetValue("")
+		p.active = false
+		return p, func() tea.Msg { return secretEnteredMsg{Key: varKey, Value: value} }
+	case key.Matches(msg, k.Back):
+		p.input.SetValue("")
+		p.active = false
+		return p, nil
+	}
+	var cmd tea.Cmd
+	p.input, cmd = p.input.Update(msg)
+	return p, cmd
+}
+
+// view — вид поля на месте строки клавиш: строка ошибки над полем тем же
+// приёмом, что у строки команды (internal/ui/command.go), затем само поле.
+func (p secretPrompt) view(t Theme) string {
+	var b strings.Builder
+	if p.err != "" {
+		b.WriteString(RenderHint(t, p.err))
+		b.WriteString("\n")
+	}
+	b.WriteString(p.input.View())
+	return b.String()
+}
+
+// secretEnteredMsg — человек подтвердил значение переменной Key. Значение
+// живёт ровно в этом сообщении и в замыкании команды записи (saveSecretCmd)
+// и нигде больше: в модель оно не кладётся, в баннер и подсказку не
+// попадает, в лог не пишется.
+type secretEnteredMsg struct {
+	Key   string
+	Value string
+}
+
+// secretSavedMsg — итог записи секрета: имя переменной, путь файла и
+// ошибка. Значения здесь нет и быть не может — доменная функция уже
+// гарантирует, что в тексте её ошибки значения нет (internal/env/secrets.go).
+type secretSavedMsg struct {
+	Key  string
+	Path string
+	Err  error
+}
+
+// saveSecretCmd — ЕДИНСТВЕННОЕ место вызова доменной записи секрета из
+// интерфейса: команда идёт в горутине, потому что запись ходит на диск и
+// подвесила бы отрисовку, и возвращает итог сообщением. Ошибка кладётся в
+// сообщение как есть — доменная функция уже гарантирует, что в её тексте
+// нет значения (env.SaveSecret).
+func saveSecretCmd(host, projectPath, key, value string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := env.SaveSecret(host, projectPath, key, value)
+		return secretSavedMsg{Key: key, Path: path, Err: err}
+	}
 }

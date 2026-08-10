@@ -686,3 +686,22 @@ func HintSecretsNone() string {
 func HintSecretsFile(path string) string {
 	return fmt.Sprintf("файл: %s — тот же редактор командой :secrets", path)
 }
+
+// HintSecretPrompt — поле ввода значения переменной name открыто: значение
+// не отображается при вводе и уйдёт в файл секретов. Ни в этой формулировке,
+// ни в двух следующих значения нет и быть не может — параметрами идут
+// только имя переменной, путь файла и текст ошибки домена.
+func HintSecretPrompt(name string) string {
+	return fmt.Sprintf("значение %s не отображается при вводе и уйдёт в файл секретов", name)
+}
+
+// HintSecretSaved — значение переменной name записано в файл path,
+// подготовка повторяется.
+func HintSecretSaved(name, path string) string {
+	return fmt.Sprintf("значение %s записано в %s — повторяю подготовку", name, path)
+}
+
+// HintSecretFailed — записать значение не вышло, с причиной reason.
+func HintSecretFailed(reason string) string {
+	return fmt.Sprintf("записать не вышло: %s", reason)
+}
