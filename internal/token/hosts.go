@@ -14,7 +14,7 @@ import (
 //     а при её отсутствии — gitlab.com); второй формулы ожидаемого хоста в
 //     проекте не появляется;
 //   - дальше — ключи файла токенов, у которых запись непуста, нормализованные
-//     normalizeHost и отсортированные: обход карты в Go идёт в случайном
+//     NormalizeHost и отсортированные: обход карты в Go идёт в случайном
 //     порядке, а заставка берёт первый хост списка — без сортировки человек
 //     получал бы разный хост от запуска к запуску.
 //
@@ -32,7 +32,7 @@ func Hosts() []string {
 		if os.Getenv(name) == "" {
 			continue
 		}
-		expected := normalizeHost(os.Getenv("GITLAB_HOST"))
+		expected := NormalizeHost(os.Getenv("GITLAB_HOST"))
 		if expected == "" {
 			expected = "gitlab.com"
 		}
@@ -46,7 +46,7 @@ func Hosts() []string {
 			if entry.Token == "" {
 				continue
 			}
-			fileHosts = append(fileHosts, normalizeHost(key))
+			fileHosts = append(fileHosts, NormalizeHost(key))
 		}
 		sort.Strings(fileHosts)
 		hosts = append(hosts, fileHosts...)

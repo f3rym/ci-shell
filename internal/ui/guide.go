@@ -59,6 +59,12 @@ const (
 	whereSession
 	// whereApply — перенос правок. Наполняется планом 11-02.
 	whereApply
+	// whereMenu — экран добавления ключа, открытый прямо из меню входа
+	// (Фаза 14, MENU-03). Это не поломка, а осознанное действие человека:
+	// место нужно затем, чтобы ответ вернулся в меню, а не в ленту (см.
+	// overlayFor, internal/ui/app.go), и чтобы выбор действия повтора
+	// (retryForWhere ниже) знал, что повторять здесь нечего.
+	whereMenu
 )
 
 // guideAction — действие, которое человек выбирает на экране проводника.
@@ -76,6 +82,11 @@ const (
 	actionRetryPrepare
 	actionRetryChecks
 	actionRetryApply
+	// actionSetHost — задан адрес своего инстанса (Фаза 14, MENU-03):
+	// guideForNewHost() отдаёт это действие, меню приводит адрес к голому
+	// виду единственной формулой пакета токенов и открывает экран ввода
+	// ключа для него.
+	actionSetHost
 )
 
 // guide — описание одного экрана проводника. Описание — данные, а не
@@ -159,6 +170,10 @@ func retryForWhere(where guideWhere) guideAction {
 	switch where {
 	case whereSplash:
 		return actionRetryChecks
+	case whereMenu:
+		// Меню — не поломка, а осознанное действие человека: повторять
+		// здесь нечего.
+		return actionNone
 	case whereApply:
 		return actionRetryApply
 	default:
@@ -393,6 +408,55 @@ func guideForMissing(missing []env.Missing, secretsPath string) guide {
 		Retry:  actionEditSecrets,
 		Hint:   HintSecretsMissing(len(missing)),
 	}
+}
+
+// guideForNewToken — экран ввода ключа для известного хоста host (Фаза 14,
+// MENU-03). Зовётся меню напрямую, а не через словарь распознавания
+// (guideFor выше): словарь отвечает на вопрос «что случилось», а здесь
+// ничего не случилось — человек сам пришёл добавить ключ (тот же приём и та
+// же причина, что у guideForMissing выше).
+func guideForNewToken(host string) guide {
+	return guide{
+		Kind:    guideInput,
+		Where:   whereMenu,
+		Title:   "новый ключ",
+		Reason:  "ключ добавится к уже сохранённым — второй корень дерева репозиториев, а не замена первого",
+		Label:   tokenLabel(host),
+		Hidden:  true,
+		Link:    fmt.Sprintf(tokenSettingsURL, host),
+		Confirm: actionSaveToken,
+		Retry:   retryForWhere(whereMenu),
+		Hint:    HintMenuKeyInput(host),
+	}
+}
+
+// guideForNewHost — экран адреса своего инстанса (Фаза 14, MENU-03): адрес
+// не секрет, и прятать его значило бы мешать человеку проверить опечатку в
+// собственном адресе — ввод здесь НЕ скрытый, в отличие от guideForNewToken
+// выше.
+func guideForNewHost() guide {
+	return guide{
+		Kind:    guideInput,
+		Where:   whereMenu,
+		Title:   "свой инстанс",
+		Reason:  "следующим шагом спросим ключ для этого адреса",
+		Label:   "адрес вашего инстанса (например, gitlab.example.com):",
+		Confirm: actionSetHost,
+		Retry:   retryForWhere(whereMenu),
+		Hint:    HintMenuHostInput(),
+	}
+}
+
+// saveToken — единственная точка сохранения ключа в пакете интерфейса
+// (Фаза 14, MENU-03): тонкая обёртка над token.Save (единственная точка
+// записи проекта, фаза 4), тем же приёмом и по той же причине, что и
+// saveDataDir выше. Сохранять ключ теперь просят два экрана — заставка
+// после ответа проводника и меню, — и два прямых вызова записи разошлись бы
+// на первой же правке (например, при добавлении проверки перед записью).
+// Обёртка ничего не логирует и не возвращает само значение ключа: наружу
+// уходят только путь файла и ошибка.
+func saveToken(host, secret string) (string, error) {
+	return token.Save(host, secret)
 }
 
 // guideModel — модель экрана проводника: описание, поле ввода Bubbles,

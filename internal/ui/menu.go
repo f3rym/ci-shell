@@ -55,6 +55,12 @@ type menuModel struct {
 	cursor int
 	hosts  []string
 	hint   string
+	// pendingHost — хост, для которого сейчас спрашивается ключ (Фаза 14,
+	// задача 2). Единственное поле меню, связанное с добавлением ключа —
+	// значение самого ключа здесь не оседает ни на миг: оно живёт в поле
+	// ввода экрана проводника до подтверждения и уходит в saveToken
+	// аргументом, не задерживаясь ни в одной модели.
+	pendingHost string
 
 	width  int
 	height int
@@ -159,13 +165,12 @@ func (m menuModel) open() (menuModel, tea.Cmd) {
 	case menuOpenLink:
 		return m, func() tea.Msg { return menuLinkMsg{} }
 	case menuAddKeyGitLab:
-		// Тело наполняется планом 14-01, задачей 2 (открытие экрана ввода
-		// ключа для gitlabHost) — заглушка здесь не пропуск, а порядок
-		// исполнения плана.
-		return m, nil
+		m.pendingHost = gitlabHost
+		g := guideForNewToken(gitlabHost)
+		return m, func() tea.Msg { return guideMsg{Guide: g} }
 	case menuAddKeySelf:
-		// Тело наполняется задачей 2 (открытие экрана адреса инстанса).
-		return m, nil
+		g := guideForNewHost()
+		return m, func() tea.Msg { return guideMsg{Guide: g} }
 	}
 	// menuAddKeyGitHub сюда не доходит — enabled() выше отсекает его раньше:
 	// отсутствие ветви и есть реализация требования MENU-04, а не пропуск.
@@ -182,27 +187,58 @@ func (m menuModel) open() (menuModel, tea.Cmd) {
 // некуда) тем же видом сообщения, что уже применяет заставка. Клавиша
 // выхода до меню не доходит: её перехватывает корневая модель.
 func (m menuModel) update(msg tea.Msg) (menuModel, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyPressMsg)
-	if !ok {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch {
+		case key.Matches(msg, m.keys.Up):
+			if m.cursor > 0 {
+				m.cursor--
+			}
+			m.hint = ""
+			return m, nil
+		case key.Matches(msg, m.keys.Down):
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+			}
+			m.hint = ""
+			return m, nil
+		case key.Matches(msg, m.keys.Open), key.Matches(msg, m.keys.Right):
+			return m.open()
+		case key.Matches(msg, m.keys.Back):
+			return m, func() tea.Msg { return quitMsg{} }
+		}
 		return m, nil
+	case guideDoneMsg:
+		return m.applyGuideDone(msg)
 	}
-	switch {
-	case key.Matches(keyMsg, m.keys.Up):
-		if m.cursor > 0 {
-			m.cursor--
+	return m, nil
+}
+
+// applyGuideDone разбирает ответ экрана добавления ключа/адреса, открытого
+// меню (Фаза 14, задача 2): действие сохранения токена вызывает
+// единственную точку сохранения (saveToken, internal/ui/guide.go) с
+// запомненным хостом и пришедшим значением — при успехе перечень хостов
+// перечитывается сразу же, а не со следующего запуска. Действие «задан
+// адрес инстанса» приводит адрес к голому виду единственной формулой
+// пакета токенов (token.NormalizeHost) и открывает экран ввода ключа для
+// него. Значение ответа ни в одной из двух ветвей не присваивается полю
+// модели: ключ уходит аргументом в saveToken, адрес — через приведение.
+func (m menuModel) applyGuideDone(msg guideDoneMsg) (menuModel, tea.Cmd) {
+	switch msg.Action {
+	case actionSaveToken:
+		host := m.pendingHost
+		if _, err := saveToken(host, msg.Value); err != nil {
+			m.hint = HintMenuKeyNotSaved(err.Error())
+			return m, nil
 		}
-		m.hint = ""
+		m = m.refreshHosts()
+		m.hint = HintMenuKeySaved(host)
 		return m, nil
-	case key.Matches(keyMsg, m.keys.Down):
-		if m.cursor < len(m.items)-1 {
-			m.cursor++
-		}
-		m.hint = ""
-		return m, nil
-	case key.Matches(keyMsg, m.keys.Open), key.Matches(keyMsg, m.keys.Right):
-		return m.open()
-	case key.Matches(keyMsg, m.keys.Back):
-		return m, func() tea.Msg { return quitMsg{} }
+	case actionSetHost:
+		host := token.NormalizeHost(msg.Value)
+		m.pendingHost = host
+		g := guideForNewToken(host)
+		return m, func() tea.Msg { return guideMsg{Guide: g} }
 	}
 	return m, nil
 }

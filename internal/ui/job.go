@@ -14,7 +14,6 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/render"
-	"github.com/f3rym/ci-shell/internal/token"
 )
 
 // stepRow — одна строка панели шагов: номер, секция, команда и текущее
@@ -558,7 +557,10 @@ func (m jobModel) applyGuideDone(msg guideDoneMsg) (jobModel, tea.Cmd) {
 	switch msg.Action {
 	case actionSaveToken:
 		host := m.session.ref.Host
-		if path, err := token.Save(host, msg.Value); err != nil {
+		// saveToken (internal/ui/guide.go, Фаза 14) — единственная точка
+		// сохранения ключа в пакете интерфейса: прямой вызов token.Save
+		// отсюда снят той же правкой, что сняла его из заставки.
+		if path, err := saveToken(host, msg.Value); err != nil {
 			m.banner = HintTokenNotSaved()
 		} else {
 			m.banner = HintTokenSaved(path)

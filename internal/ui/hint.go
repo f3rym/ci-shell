@@ -557,3 +557,29 @@ func HintMenuAddKey(host string) string {
 func HintMenuAddHost() string {
 	return GlyphRight + " спросит адрес вашего инстанса, затем ключ"
 }
+
+// HintMenuKeyInput — поле ввода ключа открыто (Фаза 14, задача 2).
+// Формулировка называет ту же честность, ради которой ввод сделан скрытым:
+// ключ не отображается при вводе и сохранится в файл с правами только для
+// владельца. Ни одна из формулировок ниже не принимает значение ключа
+// параметром — это инвариант, а не аккуратность: строка подсказки уходит в
+// кадр целиком.
+func HintMenuKeyInput(host string) string {
+	return fmt.Sprintf("ключ для %s не отображается при вводе и сохранится в файл с правами только для владельца", host)
+}
+
+// HintMenuHostInput — поле адреса инстанса открыто, следующим шагом будет
+// ключ.
+func HintMenuHostInput() string {
+	return "введите адрес своего инстанса — следующим шагом будет ключ"
+}
+
+// HintMenuKeySaved — ключ сохранён, репозитории хоста host теперь видны.
+func HintMenuKeySaved(host string) string {
+	return fmt.Sprintf("ключ для %s сохранён — репозитории хоста теперь видны", host)
+}
+
+// HintMenuKeyNotSaved — сохранить ключ не вышло, с причиной reason.
+func HintMenuKeyNotSaved(reason string) string {
+	return fmt.Sprintf("ключ не сохранён: %s", reason)
+}

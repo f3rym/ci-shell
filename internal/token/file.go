@@ -112,7 +112,7 @@ func fromFile(host string) (Token, error) {
 	// с host (который уже приходит голым от joburl.Parse).
 	entry, ok := hostEntry{}, false
 	for key, e := range cfg.Hosts {
-		if normalizeHost(key) == host {
+		if NormalizeHost(key) == host {
 			entry, ok = e, true
 			break
 		}
@@ -134,7 +134,7 @@ func fromFile(host string) (Token, error) {
 // вторая формула пути в проекте не появляется. Отсутствие файла
 // (os.ErrNotExist) не препятствие: путь всё равно валиден. Существующий
 // файл читается и разбирается, чтобы записи других хостов сохранились;
-// запись для host (ключ нормализуется normalizeHost) добавляется или
+// запись для host (ключ нормализуется NormalizeHost) добавляется или
 // перезаписывается. Файл с небезопасными правами не читается — чинить
 // права за пользователя молча нельзя (T-01-08 в той же логике, что и
 // fromFile).
@@ -177,7 +177,7 @@ func Save(host, secret string) (string, error) {
 	if cfg.Hosts == nil {
 		cfg.Hosts = make(map[string]hostEntry)
 	}
-	cfg.Hosts[normalizeHost(host)] = hostEntry{Token: secret}
+	cfg.Hosts[NormalizeHost(host)] = hostEntry{Token: secret}
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -213,10 +213,17 @@ func Save(host, secret string) (string, error) {
 	return path, nil
 }
 
-// normalizeHost приводит ключ хоста к голому виду. Пользователи иногда
+// NormalizeHost приводит ключ хоста к голому виду. Пользователи иногда
 // копируют хост со схемой ("https://gitlab.com") прямо из адресной
 // строки — конфиг-файл принимает такой ключ наравне с голым хостом.
-func normalizeHost(host string) string {
+//
+// Экспортирована (Фаза 14, MENU-03): адрес своего инстанса человек вводит
+// руками и копирует из адресной строки со схемой и хвостовым слэшем, а этот
+// же адрес идёт и в ключ файла токенов, и в адрес страницы настроек —
+// приводить его обязана та же единственная формула, что и при чтении файла,
+// иначе ключ в файле и ключ в запросе разойдутся на первом же скопированном
+// адресе.
+func NormalizeHost(host string) string {
 	h := strings.TrimSuffix(host, "/")
 	h = strings.TrimPrefix(h, "https://")
 	h = strings.TrimPrefix(h, "http://")
