@@ -88,8 +88,8 @@ func (c *Client) JobLog(ctx context.Context, projectPath string, jobID int64, op
 		}
 	}
 
-	lines, section := cleanTrace(raw, maxLogLines, truncated)
-	return provider.Log{Lines: lines, Section: section, Truncated: truncated}, nil
+	lines, section, sectionLine := cleanTrace(raw, maxLogLines, truncated)
+	return provider.Log{Lines: lines, Section: section, SectionLine: sectionLine, Truncated: truncated}, nil
 }
 
 // readTail читает r в кольцевой буфер, держащий в памяти только последние
@@ -152,20 +152,24 @@ func partialTruncated(contentRange string) bool {
 }
 
 // cleanTrace разбирает кусок сырых байт лога raw на строки. Строка с
-// маркером начала секции (section_start) запоминает имя секции и сама на
-// экран не идёт, строка с маркером конца секции (section_end) просто
-// отбрасывается; каждая оставшаяся строка проходит через provider.SafeText
-// — лог джобы это произвольный вывод чужих команд, и в нём могут быть
-// последовательности, перерисовывающие экран и подделывающие строку
-// подсказки; ровно поэтому ни одна строка лога не попадает наружу
-// непрочищенной (T-10-03). Первая строка отбрасывается, если tailed=true
-// (кусок получен хвостом или урезан пределом кольцевого буфера) — она
-// почти наверняка обрезана посередине и показала бы человеку огрызок. В
-// результат идут последние maxLines строк. Возвращаются строки и имя
-// последней открытой секции — это и есть «упавший шаг» в терминах GitLab
-// (step_script и его соседи); имя секции не переводится, как не
-// переводится статус.
-func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string) {
+// маркером начала секции (section_start) запоминает имя секции и номер
+// строки, с которой эта секция начинается (sectionLine — текущая длина уже
+// накопленного среза lines: строка маркера сама на экран не идёт, поэтому
+// именно эта длина и есть индекс первой строки секции), и на экран не идёт;
+// строка с маркером конца секции (section_end) просто отбрасывается; каждая
+// оставшаяся строка проходит через provider.SafeText — лог джобы это
+// произвольный вывод чужих команд, и в нём могут быть последовательности,
+// перерисовывающие экран и подделывающие строку подсказки; ровно поэтому ни
+// одна строка лога не попадает наружу непрочищенной (T-10-03). Первая строка
+// отбрасывается, если tailed=true (кусок получен хвостом или урезан пределом
+// кольцевого буфера) — она почти наверняка обрезана посередине и показала бы
+// человеку огрызок. В результат идут последние maxLines строк — если урезка
+// отбросила часть строк сверху, sectionLine сдвигается на то же число и
+// становится -1, если ушёл в минус (начало секции уехало за предел урезки).
+// Возвращаются строки, имя последней открытой секции и номер её первой
+// строки — это и есть «упавший шаг» в терминах GitLab (step_script и его
+// соседи); имя секции не переводится, как не переводится статус.
+func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string, int) {
 	rawLines := strings.Split(string(raw), "\n")
 	if tailed && len(rawLines) > 1 {
 		rawLines = rawLines[1:]
@@ -173,11 +177,13 @@ func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string) {
 
 	var lines []string
 	section := ""
+	sectionLine := -1
 	for _, raw := range rawLines {
 		line := strings.TrimRight(raw, "\r")
 		switch {
 		case strings.Contains(line, sectionStartMarker):
 			section = sectionName(line)
+			sectionLine = len(lines)
 			continue
 		case strings.Contains(line, sectionEndMarker):
 			continue
@@ -186,9 +192,16 @@ func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string) {
 	}
 
 	if len(lines) > maxLines {
+		dropped := len(lines) - maxLines
 		lines = lines[len(lines)-maxLines:]
+		if sectionLine >= 0 {
+			sectionLine -= dropped
+			if sectionLine < 0 {
+				sectionLine = -1
+			}
+		}
 	}
-	return lines, section
+	return lines, section, sectionLine
 }
 
 // sectionName вытаскивает имя секции из строки-маркера ранера вида
