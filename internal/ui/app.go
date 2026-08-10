@@ -41,6 +41,12 @@ const (
 	// screenHelp — экран помощи (Фаза 12, POL-03, internal/ui/help.go):
 	// `?` с любого экрана, кроме заставки и открытого поля ввода.
 	screenHelp
+	// screenMenu — меню входа (Фаза 14, MENU-01, internal/ui/menu.go).
+	// Дописано в конец перечисления, а не по месту в цепочке экранов:
+	// порядок в этом перечислении ничего не значит (экран выводится из
+	// ленты и оверлея, см. screen() ниже), поэтому дописывание в конец
+	// безопасно.
+	screenMenu
 )
 
 // overlay — экран, не являющийся колонкой ленты (Фаза 13, NAV-01…NAV-04):
@@ -57,6 +63,10 @@ const (
 	overlaySplash
 	overlayGuide
 	overlayHelp
+	// overlayMenu — меню входа (Фаза 14, MENU-01…MENU-05): стоит ПЕРЕД
+	// лентой ровно как заставка, но, в отличие от неё, является точкой
+	// входа — заставка теперь открывается из меню, а не наоборот.
+	overlayMenu
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
@@ -79,6 +89,11 @@ type App struct {
 	ribbon ribbon
 	// overlay — экран, не являющийся колонкой (см. тип overlay выше).
 	overlay overlay
+
+	// menu — меню входа (Фаза 14, MENU-01…MENU-05): открывается оверлеем
+	// overlayMenu и является стартовым состоянием корневой модели (см.
+	// Run ниже) — точка входа теперь одна, и это меню.
+	menu menuModel
 
 	splash splashModel
 	jobs   jobsModel
@@ -163,15 +178,19 @@ func (a App) Init() tea.Cmd {
 	return cmd
 }
 
-// initInner запускает программу пакетом команд: запрос цвета фона
+// initInner запускает программу единственной командой: запрос цвета фона
 // терминала (цвет фона в Bubble Tea v2 приходит сообщением, а не
 // запрашивается синхронно, поэтому первая отрисовка идёт темой по
-// умолчанию и перерисовывается по приходу ответа) и старт заставки.
+// умолчанию и перерисовывается по приходу ответа). С Фазы 14 точка входа —
+// меню (см. Run ниже), а не тот экран, что раньше запускался отсюда: тик
+// его спиннера и мигание курсора поля ввода — бесконечная череда
+// сообщений, каждое из которых перерисовывает кадр, а платить за них,
+// пока этот экран не открыт, нечем. Команда старта переезжает туда, где
+// этот экран открывается меню (см. обработку menuLinkMsg/menuBrowseMsg
+// ниже) — модель при этом по-прежнему собирается заранее в Run, чтобы
+// принять размер окна до первого открытия.
 func (a App) initInner() tea.Cmd {
-	return tea.Batch(
-		tea.RequestBackgroundColor,
-		a.splash.init(),
-	)
+	return tea.RequestBackgroundColor
 }
 
 // screen — экран, который сейчас видит человек: экран колонки ленты в
@@ -179,6 +198,8 @@ func (a App) initInner() tea.Cmd {
 // хранящего экран, в пакете больше нет.
 func (a App) screen() screen {
 	switch a.overlay {
+	case overlayMenu:
+		return screenMenu
 	case overlaySplash:
 		return screenSplash
 	case overlayGuide:
@@ -493,6 +514,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.splash.width, a.splash.height = msg.Width, msg.Height
+		// Меню занимает кадр целиком, как заставка (Фаза 14) — своей доли
+		// ленты у него нет, поэтому размер приходит за вычетом отступов от
+		// обоих краёв, тем же расчётом, каким считается доступная ширина
+		// колонки ниже.
+		a.menu = a.menu.setSize(msg.Width-2*OuterMargin, msg.Height)
 		// Окно видимых колонок ленты и их ширины пересчитываются на том же
 		// сообщении, что и всё остальное (Фаза 13) — ДО передачи размера
 		// моделям колонок ниже: они читают ровно этот расчёт
@@ -583,8 +609,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// набрать «?» в сообщении коммита было бы нельзя (a.inputActive
 		// ниже). Повторное нажатие снимает оверлей — тот же жест, что и esc
 		// ниже, потому что помощь оверлей, а не колонка ленты, и закону
-		// стрелок не подчиняется.
-		if key.Matches(msg, a.keys.Help) && a.overlay != overlaySplash && !a.inputActive() {
+		// стрелок не подчиняется. Меню исключено тем же способом, что и
+		// заставка (Фаза 14): снятие помощи ниже возвращает overlayNone
+		// безусловно, а на пустой ленте это была бы пустая лента, а не
+		// меню, откуда помощь открыли; своей строки клавиш меню не
+		// заводит, и пропуск здесь не отнимает у него видимость перечня
+		// клавиш — он доступен с любой колонки ленты.
+		if key.Matches(msg, a.keys.Help) && a.overlay != overlaySplash && a.overlay != overlayMenu && !a.inputActive() {
 			if a.overlay == overlayHelp {
 				a.overlay = overlayNone
 				return a, nil
@@ -631,6 +662,34 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// navNone — клавиша пропускается дальше, к подмодели, обычным
 			// путём (финальный диспетчер внизу функции).
 		}
+
+	case menuLinkMsg:
+		// Пункт «открыть джобу по ссылке» (Фаза 14, MENU-01): заставка
+		// пересобирается конструктором вопроса — второй заставки в проекте
+		// не появляется, эта же модель отвечает и на прямую ссылку.
+		a.splash = newSplashModel()
+		a.splash.width, a.splash.height = a.width, a.height
+		a.overlay = overlaySplash
+		return a, a.splash.init()
+
+	case menuBrowseMsg:
+		// Пункт репозиториев (Фаза 14, MENU-01/MENU-03): перечень хостов
+		// уже решён меню (menuModel.enabled) — второе чтение здесь стало бы
+		// вторым местом того же решения.
+		var cmd tea.Cmd
+		a.splash, cmd = newSplashBrowse(msg.Hosts)
+		a.splash.width, a.splash.height = a.width, a.height
+		a.overlay = overlaySplash
+		return a, cmd
+
+	case splashBackMsg:
+		// Возврат с заставки в меню (Фаза 14): за время на заставке человек
+		// мог сохранить ключ через экран проводника (план 14-01, задача 2)
+		// — меню обязано это заметить, а не показывать список хостов, каким
+		// он был до захода на заставку.
+		a.menu = a.menu.refreshHosts()
+		a.overlay = overlayMenu
+		return a, nil
 
 	case jobRefMsg:
 		// Переключение на список джоб и передача выбранной джобы —
@@ -777,6 +836,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch a.screen() {
+	case screenMenu:
+		var cmd tea.Cmd
+		a.menu, cmd = a.menu.update(msg)
+		return a, cmd
 	case screenSplash:
 		var cmd tea.Cmd
 		a.splash, cmd = a.splash.update(msg)
@@ -844,7 +907,20 @@ func (a App) viewInner() string {
 	keybar := ""
 	hint := ""
 
+	// Подпись автора (MENU-05) собирается ровно в одном месте кадра: до
+	// разбора экранов, условием «экран меню или экран заставки» — это два
+	// лица одного входа, меню спрашивает, куда идти, заставка показывает
+	// проверки перед входом. Внутри ленты подписи нет: это след автора, а
+	// не баннер (idea-0.3.1 §1).
+	if s := a.screen(); s == screenMenu || s == screenSplash {
+		title = signatureTitle(a.theme, title, a.width-2*OuterMargin)
+	}
+
 	switch a.overlay {
+	case overlayMenu:
+		body = a.menu.view(a.theme)
+		keybar = KeyBar(a.theme, a.keys)
+		hint = RenderHint(a.theme, a.menu.hintText())
 	case overlaySplash:
 		body = a.splash.view(a.theme)
 	case overlayGuide:
@@ -980,14 +1056,19 @@ func Run(ctx context.Context) error {
 	// проекте не появляется; уточнение фона идёт через отдельное
 	// сообщение (см. Update, tea.BackgroundColorMsg).
 	caps := DetectCaps()
+	theme := NewTheme(caps)
+	keys := DefaultKeys()
 	app := App{
 		caps:   caps,
-		theme:  NewTheme(caps),
-		keys:   DefaultKeys(),
+		theme:  theme,
+		keys:   keys,
 		splash: newSplashModel(),
-		// Стартовый оверлей — заставка: она стоит ПЕРЕД лентой, лента ещё
-		// пуста (Фаза 13).
-		overlay: overlaySplash,
+		menu:   newMenuModel(theme, keys),
+		// Стартовый оверлей — меню (Фаза 14, MENU-01): единственная точка
+		// входа интерфейса. Меню стоит ПЕРЕД лентой ровно как заставка
+		// (Фаза 13, лента ещё пуста), но заставка теперь открывается из
+		// меню, а не наоборот.
+		overlay: overlayMenu,
 	}
 	p := tea.NewProgram(app, tea.WithContext(ctx))
 	// Функция отправки существует только теперь — раньше программы не

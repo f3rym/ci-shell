@@ -75,10 +75,11 @@ type splashModel struct {
 	job provider.Job
 
 	// browsing, host, user, prov, hostsCount — режим обхода (Фаза 10,
-	// BROW-01): пустой ввод на подтверждении включает browsing, host берётся
-	// из token.Hosts(), а проверка ответа API вместо метаданных джобы
-	// спрашивает CurrentUser и несёт готовое значение интерфейса провайдера
-	// дальше в browseMsg — второй раз токен не резолвится.
+	// BROW-01; с Фазы 14 включается пунктом репозиториев меню, а не пустым
+	// подтверждением поля ввода): newSplashBrowse ставит browsing и host из
+	// перечня, пришедшего от меню, а проверка ответа API вместо метаданных
+	// джобы спрашивает CurrentUser и несёт готовое значение интерфейса
+	// провайдера дальше в browseMsg — второй раз токен не резолвится.
 	browsing   bool
 	host       string
 	user       provider.User
@@ -163,16 +164,39 @@ func quitFromSplash() tea.Cmd {
 	return func() tea.Msg { return quitMsg{} }
 }
 
-// reopen возвращает заставку в состояние вопроса: свежее поле ввода, снятые
-// отметки проверок, снятые причина отказа и подсказка. Зовётся при возврате
-// на заставку с другого экрана (internal/ui/app.go, back): без этого
-// заставка оставалась стоять с тремя пройденными проверками, которые ничего
-// больше не запускают, — экран, на котором нельзя ни продолжить, ни ввести
-// новую ссылку.
-func (m splashModel) reopen() splashModel {
-	fresh := newSplashModel()
-	fresh.width, fresh.height = m.width, m.height
-	return fresh
+// newSplashBrowse — конструктор режима обхода (Фаза 14, MENU-01/MENU-03):
+// принимает перечень хостов, ставит режим обхода, берёт первый хост,
+// запоминает длину перечня, ставит первую проверку в состояние «идёт» и
+// возвращает вместе с моделью команду — тик спиннера и первую проверку.
+// Перечень хостов сюда ПРИХОДИТ, а не читается: решение «ключи есть» уже
+// принято меню (internal/ui/menu.go, enabled), и второго чтения перечня в
+// проекте не появляется — меню зовёт эту функцию, только когда hosts
+// непуст. Приписка про первый хост из файла токенов остаётся до плана
+// 14-02, где все ключи становятся корнями дерева и она перестаёт быть
+// правдой.
+func newSplashBrowse(hosts []string) (splashModel, tea.Cmd) {
+	m := newSplashModel()
+	m.asking = false
+	m.browsing = true
+	m.host = hosts[0]
+	m.hostsCount = len(hosts)
+	m.checks[checkTokenIndex].State = checkRunning
+	return m, tea.Batch(m.spin.Tick, m.checkToken())
+}
+
+// splashBackMsg — возврат с заставки в меню (Фаза 14): и на пустом поле
+// ввода, и на экране проверок клавиша возврата теперь уводит туда, откуда
+// заставку открыли, — в меню, а не завершает программу. Выход по-прежнему
+// живёт на клавише выхода и на Ctrl-C, которую перехватывает корневая
+// модель.
+type splashBackMsg struct{}
+
+// splashBackCmd — просьба вернуться в меню, тем же приёмом, что и
+// quitFromSplash ниже: заставка не хранит про меню ничего, кроме желания
+// туда вернуться, — решение, что означает оверлей меню, принимает корневая
+// модель.
+func splashBackCmd() tea.Cmd {
+	return func() tea.Msg { return splashBackMsg{} }
 }
 
 // init запускает мигание курсора поля ввода и тик спиннера заставки.
@@ -194,37 +218,30 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 		keys := DefaultKeys()
 		if m.asking {
 			// Возврат при открытом поле ввода снимает набранное вместе с
-			// последней причиной отказа; на уже пустом поле снимать нечего, и
-			// он означает выход. Проверка стоит ДО передачи клавиши полю: без
-			// неё esc был бы обычным символом ввода, а выхода с заставки не
-			// было бы ни одного (ни q — его съедает поле, ни esc — его
-			// корневая модель на заставке не перехватывает).
+			// последней причиной отказа; на уже пустом поле он теперь
+			// уводит в меню (Фаза 14) — заставка больше не единственная
+			// точка входа, вернуться отсюда есть куда. Проверка стоит ДО
+			// передачи клавиши полю: без неё esc был бы обычным символом
+			// ввода.
 			if key.Matches(msg, keys.Back) {
 				if m.input.Value() != "" {
 					m.input.SetValue("")
 					m.checks[checkTokenIndex].Reason = ""
 					return m, nil
 				}
-				return m, quitFromSplash()
+				return m, splashBackCmd()
 			}
 			if msg.String() == "enter" {
 				raw := strings.TrimSpace(m.input.Value())
 				if raw == "" {
-					// Пустой ввод — режим обхода (BROW-01): ссылку
-					// вставлять не обязательно. Хост берётся перечислением
-					// из пакета токена; пустой список — тот же честный
-					// отказ, что и провалившаяся проверка.
-					hosts := token.Hosts()
-					if len(hosts) == 0 {
-						m.checks[checkTokenIndex].Reason = "токен не найден ни для одного хоста"
-						return m, nil
-					}
-					m.browsing = true
-					m.host = hosts[0]
-					m.hostsCount = len(hosts)
-					m.asking = false
-					m.checks[checkTokenIndex].State = checkRunning
-					return m, m.checkToken()
+					// Вход в дерево репозиториев стал видимым пунктом меню
+					// (Фаза 14, MENU-01) — второй, невидимый вход в него
+					// через пустое подтверждение здесь больше не разбирается:
+					// это и была непонятность, которую релиз чинит
+					// (idea-0.3.1, вводный абзац). Причина остаётся честной
+					// просьбой, а не отказом — поле остаётся открытым.
+					m.checks[checkTokenIndex].Reason = "введите ссылку на джобу или её номер"
+					return m, nil
 				}
 				ref, err := parseRef(context.Background(), raw)
 				if err != nil {
@@ -242,14 +259,15 @@ func (m splashModel) update(msg tea.Msg) (splashModel, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		// Поле ввода не открыто — набирать нечего, и обе привычные клавиши
-		// выхода означают выход. Условие «только при фатальном отказе» отсюда
-		// снято: пока оно стояло, идущие проверки, пройденные проверки и
-		// возврат с дерева оставляли заставку вовсе без выхода — ни q, ни
-		// esc, ни Ctrl-C (последний теперь перехватывает корневая модель до
-		// этого места).
-		if key.Matches(msg, keys.Quit) || key.Matches(msg, keys.Back) {
+		// Поле ввода не открыто: клавиша выхода завершает программу так же,
+		// как и раньше; клавиша возврата с Фазы 14 уводит в меню, а не
+		// завершает программу — на экране проверок вернуться отсюда тоже
+		// есть куда.
+		if key.Matches(msg, keys.Quit) {
 			return m, quitFromSplash()
+		}
+		if key.Matches(msg, keys.Back) {
+			return m, splashBackCmd()
 		}
 		return m, nil
 	case tea.PasteMsg:
@@ -482,8 +500,6 @@ func (m splashModel) view(t Theme) string {
 		b.WriteString(m.input.View())
 		b.WriteString("\n")
 		b.WriteString(t.Muted.Render("номер работает из каталога репозитория проекта"))
-		b.WriteString("\n")
-		b.WriteString(t.Muted.Render("пустой ввод откроет дерево групп и проектов"))
 		b.WriteString("\n")
 		// Выход с заставки обязан быть не только возможен, но и виден: своей
 		// строки клавиш у этого экрана нет (кадр собирает App.viewInner), и
