@@ -194,7 +194,16 @@ func (a App) screen() screen {
 // решает, что открыть, единым вызовом одноимённого метода. «→ открывает
 // пайплайны» и «→ открывает панель действий» обязаны быть одним правилом, а
 // не двумя.
+//
+// Запоминание позиции вызывается первой строкой, ДО обоих исходов: и до
+// переезда фокуса на уже существующую колонку правее, и до просьбы колонке
+// в фокусе открыть что-либо. Открытие (treeModel.openDeeper и подобные) двигает
+// собственный курсор модели-владельца (раскрытие узла дерева, выбор
+// пайплайна) — запиши позицию позже, и в ленте оказался бы уже сдвинутый
+// курсор, а не тот, с которого человек ушёл вглубь (Фаза 13, план 13-03).
 func (a App) openDeeper() (App, tea.Cmd) {
+	a = a.rememberCursor()
+
 	if a.ribbon.hasDeeper() {
 		a.ribbon = a.ribbon.deeper()
 		return a.focusColumn(), nil
@@ -227,6 +236,15 @@ func (a App) openDeeper() (App, tea.Cmd) {
 // трогается только когда он уже собран (treeReady) — тот же приём
 // осторожности, что и у SetSize (CR-04 обзора v0.3.0): до первого browseMsg
 // его компоненты не готовы принимать вызовы.
+//
+// a.restoreCursor() зовётся здесь же, последней строкой, а не отдельным
+// местом при движении назад (Фаза 13, план 13-03): порядок обязан быть
+// «фокус колонке, затем курсор колонке» — восстанавливать позицию раньше,
+// чем колонка узнала, что она в фокусе, было бы рано. У свежеоткрытой
+// колонки (projectPickedMsg, openPipelineMsg, openJobMsg, openDetailMsg)
+// ribbon.recall честно возвращает нулевые значения — восстановление здесь
+// не вредит, оно просто ничего не переставляет, а второго места, ставящего
+// курсор колонке, в проекте так и не появляется.
 func (a App) focusColumn() App {
 	id := a.ribbon.focusedID()
 	if a.treeReady {
@@ -234,6 +252,63 @@ func (a App) focusColumn() App {
 	}
 	a.jobs = a.jobs.setColumnFocus(id)
 	a.job = a.job.setColumnFocus(id)
+	return a.restoreCursor()
+}
+
+// rememberCursor — единственная точка запоминания позиции курсора (Фаза 13,
+// план 13-03): спрашивает у колонки в фокусе её текущую позицию разбором по
+// идентификатору колонки (по одной ветви на колонку — общего интерфейса у
+// моделей-колонок нет, см. комментарий restoreCursor ниже) и записывает её в
+// ленту. Зовётся ровно из одного места — первой строкой openDeeper(), ДО
+// того, как фокус или колонка в фокусе успеют сдвинуть собственный курсор.
+func (a App) rememberCursor() App {
+	var cursor int
+	var key string
+	switch a.ribbon.focusedID() {
+	case colRepos:
+		if a.treeReady {
+			cursor, key = a.tree.cursorAt()
+		}
+	case colPipelines:
+		if a.treeReady {
+			cursor, key = a.tree.runs.cursorAt()
+		}
+	case colJobs:
+		cursor, key = a.jobs.cursorAt()
+	case colSteps, colDetail:
+		cursor, key = a.job.cursorAt(a.ribbon.focusedID())
+	}
+	a.ribbon = a.ribbon.remember(cursor, key)
+	return a
+}
+
+// restoreCursor — единственная точка восстановления позиции курсора (Фаза
+// 13, план 13-03): читает запомненную позицию колонки в фокусе из ленты
+// (ribbon.recall) и ставит её той же колонке тем же разбором по
+// идентификатору, каким rememberCursor читал позицию. Разбор по
+// идентификатору, а не общий интерфейс колонки: все четыре модели-колонки
+// держат методы с получателем-значением, возвращающие саму модель
+// (treeModel, pipelinePanel, jobsModel, jobModel) — такой контракт
+// («withCursor(...) T» на четырёх разных T) интерфейсом Go не выражается.
+// Заводить ради него указательные получатели значило бы сломать стиль всех
+// четырёх моделей ради одной функции — разбор в корневой модели остаётся
+// осознанным выбором, а не обходом незнания интерфейсов Go.
+func (a App) restoreCursor() App {
+	cursor, key := a.ribbon.recall(a.ribbon.focusedID())
+	switch a.ribbon.focusedID() {
+	case colRepos:
+		if a.treeReady {
+			a.tree = a.tree.withCursor(cursor, key)
+		}
+	case colPipelines:
+		if a.treeReady {
+			a.tree.runs = a.tree.runs.withCursor(cursor, key)
+		}
+	case colJobs:
+		a.jobs = a.jobs.withCursor(cursor, key)
+	case colSteps, colDetail:
+		a.job = a.job.withCursor(a.ribbon.focusedID(), cursor, key)
+	}
 	return a
 }
 
@@ -819,18 +894,33 @@ func (a App) viewInner() string {
 		// Заголовок, строка клавиш и строка подсказки по-прежнему
 		// выбираются по ЭКРАНУ КОЛОНКИ В ФОКУСЕ (a.screen()) — ровно тем же
 		// способом, каким выбирались по текущему экрану до этой фазы.
+		var hintText string
 		switch a.screen() {
 		case screenJobs:
 			title = title + "  " + a.theme.Muted.Render(a.jobs.ref.Host)
 			keybar = a.jobs.keyBar()
-			hint = RenderHint(a.theme, a.jobs.hintText())
+			hintText = a.jobs.hintText()
 		case screenJob:
 			keybar = a.job.keyBar()
-			hint = RenderHint(a.theme, a.job.hintText())
+			hintText = a.job.hintText()
 		case screenTree:
 			title = title + "  " + a.theme.Muted.Render(a.host+" · "+a.user.Name)
 			keybar = a.tree.keyBar()
-			hint = RenderHint(a.theme, a.tree.hintText())
+			hintText = a.tree.hintText()
+		}
+		// Страховка закона ленты (Фаза 13, план 13-03): формулировка
+		// собственной колонки могла оказаться пустой — «подсказка
+		// присутствует ВСЕГДА» (09-UI-SPEC.md, «Строка подсказки») не
+		// обязана зависеть от того, обо всех ли своих состояниях уже
+		// подумала каждая из моделей колонок. На самой левой колонке ленты
+		// пустая формулировка заменяется законом: esc отсюда выходит из
+		// утилиты — то же самое, что уже верно для esc в этом месте
+		// (единственная точка выхода, quitCmd, см. выше).
+		if hintText == "" && a.ribbon.atLeftEdge() {
+			hintText = HintColumnLeftmost()
+		}
+		if hintText != "" {
+			hint = RenderHint(a.theme, hintText)
 		}
 	}
 

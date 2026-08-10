@@ -12,6 +12,20 @@ func RenderHint(t Theme, text string) string {
 	return t.Text.Render(GlyphHint) + " " + t.HintText.Render(text)
 }
 
+// confirmKey — клавиша подтверждения текстового поля или согласия проводника
+// (Фаза 13, план 13-03), прочитанная из раскладки, а не литералом:
+// DefaultKeys — тот же единственный источник привязок, что и корневая модель
+// (internal/ui/app.go, Run), поэтому второй живой экземпляр раскладки не
+// расходится с настоящим. Формулировки, зовущие confirmKey, — не про закон
+// ленты (движение вправо): поле ввода токена, поле сообщения коммита, шаг
+// «выполните команду и повторите» проводника означают именно «нажмите
+// клавишу подтверждения», а не «откройте колонку правее» — приписывать им
+// второй смысл не нужно, поэтому они читают Open (та же физическая клавиша
+// подтверждения, что и раньше), а не Right.
+func confirmKey() string {
+	return DefaultKeys().Open.Help().Key
+}
+
 // Формулировки строки подсказки экрана списка джоб (09-UI-SPEC.md, «Строка
 // подсказки») — по одной именованной функции на строку таблицы контракта,
 // чтобы каждая формулировка жила ровно в одном месте проекта. Остальные
@@ -21,9 +35,18 @@ func RenderHint(t Theme, text string) string {
 
 // HintJobFailed — в пайплайне есть упавшая джоба, ещё не открыта, и номер
 // упавшего шага известен.
+//
+// Раздел «Copywriting Contract» контракта Фазы 9 (09-UI-SPEC.md) называет
+// ровно эту формулировку («нажмите [клавиша подтверждения], чтобы
+// воспроизвести её локально») дословно, клавишей подтверждения. Закон ленты
+// (Фаза 13, idea-0.3.1 §3) делает эту клавишу синонимом движения вправо —
+// подсказка обязана называть основную клавишу закона, а не клавишу
+// подтверждения: старая клавиша продолжает работать, меняется только текст.
+// Это осознанное отступление от контракта Фазы 9, зафиксированное здесь и в
+// SUMMARY плана 13-03.
 func HintJobFailed(name string, step, total int) string {
 	return fmt.Sprintf(
-		"джоба %s упала на шаге %d из %d — нажмите "+GlyphEnter+", чтобы воспроизвести её локально",
+		"джоба %s упала на шаге %d из %d — нажмите "+GlyphRight+", чтобы воспроизвести её локально",
 		Plain(name), step, total,
 	)
 }
@@ -31,10 +54,11 @@ func HintJobFailed(name string, step, total int) string {
 // HintJobFailedUnknownStep — та же ситуация, но номер упавшего шага
 // неизвестен: конфиг джобы на экране списка не запрашивается. Отдельная
 // формулировка, а не нули в подстановке: «упала на шаге 0 из 0» — такое же
-// враньё числами, только менее заметное (WR-13 обзора v0.3.0).
+// враньё числами, только менее заметное (WR-13 обзора v0.3.0). То же
+// отступление от Copywriting Contract, что и у HintJobFailed выше.
 func HintJobFailedUnknownStep(name string) string {
 	return fmt.Sprintf(
-		"джоба %s упала — нажмите "+GlyphEnter+", чтобы воспроизвести её локально",
+		"джоба %s упала — нажмите "+GlyphRight+", чтобы воспроизвести её локально",
 		Plain(name),
 	)
 }
@@ -164,9 +188,10 @@ func HintApplied(files int) string {
 }
 
 // HintCommitMessage — поле ввода сообщения коммита открыто (стадия
-// applyMessage).
+// applyMessage). Про подтверждение текста, а не про закон ленты — клавиша
+// читается confirmKey (см. выше), а не GlyphRight.
 func HintCommitMessage() string {
-	return "введите сообщение коммита и нажмите ⏎"
+	return "введите сообщение коммита и нажмите " + confirmKey()
 }
 
 // HintCommitted — :commit выполнен успешно.
@@ -206,19 +231,24 @@ func HintTreeLoading() string {
 	return "тяну список групп и проектов…"
 }
 
-// HintTreeExpand — курсор на свёрнутой группе.
+// HintTreeExpand — курсор на свёрнутой группе. Закон ленты делает клавишу
+// подтверждения синонимом движения вправо (Фаза 13, idea-0.3.1 §3) —
+// раскрытие узла тоже «глубже», хоть и внутри той же колонки репозиториев,
+// а не переход в колонку правее; подсказка называет основную клавишу
+// закона, а не клавишу подтверждения.
 func HintTreeExpand(name string) string {
-	return fmt.Sprintf("группа %s свёрнута — ⏎ раскроет её", name)
+	return fmt.Sprintf("группа %s свёрнута — "+GlyphRight+" раскроет её", name)
 }
 
 // HintTreeCollapse — курсор на раскрытой группе.
 func HintTreeCollapse(name string) string {
-	return fmt.Sprintf("⏎ свернёт группу %s", name)
+	return fmt.Sprintf(GlyphRight+" свернёт группу %s", name)
 }
 
-// HintTreeOpenProject — курсор на проекте.
+// HintTreeOpenProject — курсор на проекте: → откроет колонку пайплайнов
+// правее — настоящий переход в колонку, а не раскрытие внутри той же.
 func HintTreeOpenProject(name string) string {
-	return fmt.Sprintf("⏎ покажет пайплайны проекта %s", name)
+	return fmt.Sprintf(GlyphRight+" покажет пайплайны проекта %s", name)
 }
 
 // HintTreeEmpty — токену не видно ни одной группы и ни одного проекта.
@@ -297,9 +327,10 @@ func HintPipelinesFailed(reason string) string {
 	return fmt.Sprintf("не удалось получить пайплайны: %s — g повторит запрос", reason)
 }
 
-// HintPipelineOpen — курсор на строке пайплайна iid.
+// HintPipelineOpen — курсор на строке пайплайна iid: → откроет колонку джоб
+// правее (закон ленты, Фаза 13).
 func HintPipelineOpen(iid int64) string {
-	return fmt.Sprintf("⏎ покажет джобы пайплайна #%d", iid)
+	return fmt.Sprintf(GlyphRight+" покажет джобы пайплайна #%d", iid)
 }
 
 // Формулировки панели лога джобы настоящего прогона (Фаза 10, BROW-04).
@@ -317,9 +348,13 @@ func HintLogTail(section string) string {
 	return fmt.Sprintf("показан хвост секции %s — :log вытянет лог целиком", section)
 }
 
-// HintLogFull — показан полный лог.
+// HintLogFull — показан полный лог. esc здесь означает то же, что и везде
+// после Фазы 13 — уход в самую левую колонку ленты, а не «назад к списку
+// джоб»: список джоб — не всегда самая левая колонка (вход из браузера
+// групп и проектов кладёт репозитории левее него), и старая формулировка
+// после ленты стала бы враньём в этом случае.
 func HintLogFull() string {
-	return "лог целиком — ↑↓ прокрутит его, esc вернёт к списку"
+	return "лог целиком — ↑↓ прокрутит его, esc уйдёт в начало ленты"
 }
 
 // HintLogUnavailable — запрос лога провалился.
@@ -331,14 +366,16 @@ func HintLogUnavailable(reason string) string {
 // именованной функции на ситуацию словаря internal/ui/guide.go — тот же
 // приём, что и у остальных строк подсказки этого файла.
 
-// HintTokenNeeded — экран проводника: токена для хоста нет.
+// HintTokenNeeded — экран проводника: токена для хоста нет. Про
+// подтверждение поля ввода проводника, а не про закон ленты — confirmKey, а
+// не GlyphRight (проводник — оверлей, закону стрелок не подчиняется).
 func HintTokenNeeded(host string) string {
-	return fmt.Sprintf("токен для %s не найден — введите его здесь, ⏎ сохранит и повторит проверку", host)
+	return fmt.Sprintf("токен для %s не найден — введите его здесь, "+confirmKey()+" сохранит и повторит проверку", host)
 }
 
 // HintTokenRejected — экран проводника: хост отклонил токен.
 func HintTokenRejected(host string) string {
-	return fmt.Sprintf("%s отклонил токен — вставьте новый, ⏎ сохранит и повторит проверку", host)
+	return fmt.Sprintf("%s отклонил токен — вставьте новый, "+confirmKey()+" сохранит и повторит проверку", host)
 }
 
 // HintTokenSaved — токен сохранён на диск, проверка повторяется.
@@ -360,17 +397,17 @@ func HintTokenScope(host string) string {
 
 // HintFixPerms — экран проводника с готовой командой chmod.
 func HintFixPerms() string {
-	return "выполните команду ниже и нажмите ⏎, чтобы повторить"
+	return "выполните команду ниже и нажмите " + confirmKey() + ", чтобы повторить"
 }
 
 // HintDockerMissing — экран проводника: Docker не найден.
 func HintDockerMissing() string {
-	return "Docker не найден — выполните команду ниже, поставьте его и нажмите ⏎"
+	return "Docker не найден — выполните команду ниже, поставьте его и нажмите " + confirmKey()
 }
 
 // HintDaemonDown — экран проводника: демон Docker не отвечает.
 func HintDaemonDown() string {
-	return "демон Docker не отвечает — запустите его и нажмите ⏎"
+	return "демон Docker не отвечает — запустите его и нажмите " + confirmKey()
 }
 
 // HintCacheHidden — экран проводника: демон не видит каталог данных,
@@ -392,7 +429,7 @@ func HintDataDirSaved(dir string) string {
 
 // HintSecretsMissing — экран проводника: не хватает n значений секретов.
 func HintSecretsMissing(n int) string {
-	return fmt.Sprintf("не хватает %d значений — ⏎ откроет файл секретов в редакторе", n)
+	return fmt.Sprintf("не хватает %d значений — "+confirmKey()+" откроет файл секретов в редакторе", n)
 }
 
 // HintSecretsEdited — редактор секретов закрыт, права возвращены, подготовка
@@ -408,7 +445,7 @@ func HintSecretsFailed(reason string) string {
 
 // HintSSHKey — экран проводника: git просит ключ доступа.
 func HintSSHKey(host string) string {
-	return fmt.Sprintf("git просит ключ — заведите его командами ниже, добавьте на %s и нажмите ⏎", host)
+	return fmt.Sprintf("git просит ключ — заведите его командами ниже, добавьте на %s и нажмите "+confirmKey(), host)
 }
 
 // HintPullDone — :pull обновил рабочую копию успешно.

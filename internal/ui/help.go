@@ -8,6 +8,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -100,6 +101,20 @@ func (m helpModel) render() string {
 // сложение длин строк: имена команд и описания короче ключевых слов не
 // всегда, и без графемной меры колонка на кириллице поехала бы.
 func (m helpModel) renderKeys() string {
+	// Первая строка раздела — закон ленты одним предложением (Фаза 13, план
+	// 13-03): человек, открывший помощь, узнаёт правило раньше перечня
+	// клавиш, а не только по перечислению одних символов без объяснения.
+	// Все четыре клавиши читаются из привязок раскладки (k.Right.Help().Key
+	// и т. д.) — тот же приём, что и у hintText() экрана помощи (Back) и у
+	// перечня ниже, — второго литерала клавиши в файле не появляется:
+	// инвариант «ни одного имени клавиши здесь не написано» остаётся в силе
+	// и для этой строки.
+	k := m.keys
+	law := m.theme.Muted.Render(fmt.Sprintf(
+		"%s — глубже, %s — назад, %s — то же, что %s, %s — в начало ленты и выход",
+		k.Right.Help().Key, k.Left.Help().Key, k.Open.Help().Key, k.Right.Help().Key, k.Back.Help().Key,
+	))
+
 	groups := m.keys.FullHelp()
 	cols := make([]string, 0, len(groups))
 	for _, g := range groups {
@@ -131,7 +146,7 @@ func (m helpModel) renderKeys() string {
 		cols = append(cols, col.String())
 	}
 	if len(cols) == 0 {
-		return ""
+		return law
 	}
 	// Склейка колонок помощи построчно — тем же зазором PanelGap, что и у
 	// ленты (Фаза 13, план 13-02): собственная функция joinPanels ушла из
@@ -145,7 +160,7 @@ func (m helpModel) renderKeys() string {
 		}
 		parts = append(parts, c)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	return law + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
 // renderCommands обходит knownCommands (internal/ui/command.go) целиком —
