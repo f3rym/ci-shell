@@ -282,6 +282,14 @@ func (p pipelinePanel) hintText() string {
 	return HintPipelinesPick()
 }
 
+// openDeeper — часть общего контракта колонки (Фаза 13): обёртка над open()
+// ниже, чтобы имя вызова было одним на все колонки. Существующее открытие
+// пайплайна под курсором остаётся единственной реализацией — второй не
+// заводится.
+func (p pipelinePanel) openDeeper() (pipelinePanel, tea.Cmd) {
+	return p, p.open()
+}
+
 // open отдаёт openPipelineMsg для пайплайна под курсором, если он есть.
 func (p pipelinePanel) open() tea.Cmd {
 	pl, ok := p.selected()
