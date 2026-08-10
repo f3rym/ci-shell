@@ -72,6 +72,13 @@ const (
 // недорисованная строка (09-UI-SPEC.md, «Вход и выход», пункт 2).
 type shellHandoffMsg struct{}
 
+// openDetailMsg — просьба открыть колонку окружения·секретов·лога (Фаза 13,
+// NAV-01…NAV-02): единственная колонка фазы, которая не приходит из сети,
+// поэтому у неё нет своих данных для загрузки — сообщение существует ради
+// того же единого правила, по которому открываются все остальные колонки
+// (internal/ui/app.go, openDeeper).
+type openDetailMsg struct{}
+
 // logPanelLines — сколько последних строк ограниченного буфера лога сессии
 // показывает панель лога.
 const logPanelLines = 14
@@ -98,6 +105,21 @@ type jobModel struct {
 	// достаточно для «хвоста упавшего шага» контракта, а постраничная
 	// навигация по длинным логам принадлежит Фазе 10 (BROW-02).
 	cursor int
+
+	// pane — какая из двух колонок экрана джобы сейчас в фокусе ленты (шаги
+	// либо окружение·секреты·лог), по умолчанию колонка шагов (Фаза 13,
+	// NAV-01…NAV-02): движение вверх/вниз в updateKey смотрит на это поле, а
+	// не на то, какая панель отрисована — фокус раздаёт лента, а не сам
+	// экран.
+	pane columnID
+	// envCursor — курсор строки в колонке окружения, по умолчанию ноль,
+	// прижимается к границам списка строк окружения. Видимой пользы от него
+	// в этой фазе нет — заполнение незаполненных скрытых переменных прямо на
+	// строке принадлежит Фазе 15, и заводить второй курсор туда было бы
+	// вторым правилом навигации в той же колонке; курсор появляется уже
+	// сейчас, чтобы Фаза 15 не переизобретала навигацию внутри уже
+	// существующей колонки.
+	envCursor int
 
 	phase loopPhase
 	// pulling/pullImage — идёт тяга образа (для preparingView и hintText).
@@ -174,6 +196,7 @@ func newJobModel(session *Session, gen int, theme Theme, keys KeyMap) jobModel {
 		cursor:     -1,
 		phase:      phasePreparing,
 		spin:       sp,
+		pane:       colSteps,
 	}
 }
 
@@ -186,6 +209,26 @@ func (m jobModel) setSize(width, height int) jobModel {
 	m.width = width
 	m.height = height
 	return m
+}
+
+// setColumnFocus — часть общего контракта колонки (Фаза 13): записывает,
+// какая из двух колонок экрана джобы (шаги либо окружение·секреты·лог)
+// сейчас в фокусе ленты — движение вверх/вниз в updateKey читает это поле.
+func (m jobModel) setColumnFocus(id columnID) jobModel {
+	m.pane = id
+	return m
+}
+
+// openDeeper — часть общего контракта колонки (Фаза 13): из колонки шагов
+// возвращается команда, шлющая openDetailMsg; из колонки
+// окружения·секретов·лога — ничего, потому что правее в этой фазе ничего
+// нет (переключение видов окружение → секреты → лог внутри колонки
+// принадлежит Фазе 15).
+func (m jobModel) openDeeper() (jobModel, tea.Cmd) {
+	if m.pane == colSteps {
+		return m, func() tea.Msg { return openDetailMsg{} }
+	}
+	return m, nil
 }
 
 // update обрабатывает сообщения экрана джобы: тик спиннера, готовность или
@@ -816,6 +859,15 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		return m.startRun(runRetry)
 
 	case key.Matches(msg, m.keys.Up):
+		// Движение смотрит на m.pane (Фаза 13): в колонке
+		// окружения·секретов·лога двигает envCursor, в колонке шагов —
+		// cursor, ровно как раньше.
+		if m.pane == colDetail {
+			if m.envCursor > 0 {
+				m.envCursor--
+			}
+			return m, nil
+		}
 		if m.cursor > 0 {
 			m.cursor--
 		}
@@ -825,6 +877,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
+		if m.pane == colDetail {
+			if m.envCursor < len(m.envRows)-1 {
+				m.envCursor++
+			}
+			return m, nil
+		}
 		if m.cursor < len(m.stepRows)-1 {
 			m.cursor++
 		}

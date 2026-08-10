@@ -151,6 +151,25 @@ func (m jobsModel) selectCursor() (jobsModel, tea.Cmd) {
 	return m, cmd
 }
 
+// setColumnFocus — часть общего контракта колонки (Фаза 13): у колонки джоб
+// внутренних частей нет (в отличие от дерева и экрана джобы), и метод
+// объявляется ради единообразия вызова из единственной точки передачи
+// фокуса (App.focusColumn) — он честно ничего не меняет, а не изображает
+// работу.
+func (m jobsModel) setColumnFocus(id columnID) jobsModel {
+	return m
+}
+
+// openDeeper — часть общего контракта колонки (Фаза 13): джоба под курсором
+// отдаётся сообщением открытия джобы (тело прежней ветви клавиши открытия).
+func (m jobsModel) openDeeper() (jobsModel, tea.Cmd) {
+	if m.cursor >= 0 && m.cursor < len(m.jobs) {
+		job := m.jobs[m.cursor]
+		return m, func() tea.Msg { return openJobMsg{job: job} }
+	}
+	return m, nil
+}
+
 func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case spinner.TickMsg:
@@ -205,6 +224,9 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		if m.cmd.active {
 			return m.updateCommandKey(msg)
 		}
+		// Клавиши возврата и открытия (esc, ⏎, →, ←) до модели больше не
+		// доходят — их забирает закон ленты в корневой модели
+		// (internal/ui/app.go, navFor/openDeeper).
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			if m.cursor > 0 {
@@ -218,17 +240,9 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 				return m.selectCursor()
 			}
 			return m, nil
-		case key.Matches(msg, m.keys.Open):
-			if m.cursor >= 0 && m.cursor < len(m.jobs) {
-				job := m.jobs[m.cursor]
-				return m, func() tea.Msg { return openJobMsg{job: job} }
-			}
-			return m, nil
 		case key.Matches(msg, m.keys.Refresh):
 			m.loading = true
 			return m, m.fetch(true)
-		case key.Matches(msg, m.keys.Back):
-			return m, func() tea.Msg { return backMsg{} }
 		case key.Matches(msg, m.keys.Command):
 			// Открытие — общим хелпером (internal/ui/command.go), тем же, что
 			// и на экране джобы: без поднятого признака активности строка

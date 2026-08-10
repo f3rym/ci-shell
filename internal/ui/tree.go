@@ -203,15 +203,12 @@ type treeFailedMsg struct {
 
 // projectPickedMsg — проект под курсором дерева: правая панель пайплайнов
 // слушает это сообщение и решает сама, запрашивать ли пайплайны заново
-// (дребезг, «уже показан» — internal/ui/pipelines.go, setProject).
+// (дребезг, «уже показан» — internal/ui/pipelines.go, setProject), а
+// корневая модель — держать ли в ленте колонку пайплайнов (Фаза 13,
+// internal/ui/app.go).
 type projectPickedMsg struct {
 	project provider.Project
 }
-
-// backMsg — уход с текущего экрана на предыдущий экран стека корневой
-// модели (internal/ui/app.go): экран сам решает, снять ли внутренний фокус
-// или строку команды, прежде чем попросить о переходе.
-type backMsg struct{}
 
 // newTreeModel собирает экран дерева: компонент списка Bubbles с включённой
 // фильтрацией и выключенными собственными заголовком, строкой состояния и
@@ -248,6 +245,24 @@ func (m treeModel) setSize(width, height int) treeModel {
 	}
 	m.list.SetSize(lw, bodyHeight)
 	m.runs = m.runs.setSize(rw, bodyHeight)
+	return m
+}
+
+// setColumnFocus — часть общего контракта колонки (Фаза 13): колонка
+// репозиториев ставит внутренний фокус на список и снимает фокус с панели
+// пайплайнов, колонка пайплайнов — наоборот. Постановка и снятие фокуса у
+// самой панели уже есть (pipelinePanel.focus/blur) — вторых здесь не
+// заводится. Внутренний признак фокуса остаётся полем модели: он нужен
+// отрисовке и выбору строки подсказки, но меняется теперь только этим
+// методом — фокус раздаёт лента, а не экран сам себе.
+func (m treeModel) setColumnFocus(id columnID) treeModel {
+	if id == colPipelines {
+		m.focus = focusRuns
+		m.runs = m.runs.focus()
+		return m
+	}
+	m.focus = focusTree
+	m.runs = m.runs.blur()
 	return m
 }
 
@@ -418,19 +433,14 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Клавиши возврата и открытия (esc, ⏎, →, ←) до модели больше не
+		// доходят — их забирает закон ленты в корневой модели
+		// (internal/ui/app.go, navFor/openDeeper): второе толкование стрелки
+		// здесь было бы ровно той поломкой, которую фаза чинит. Ветвь «фокус
+		// на правой панели» остаётся, но открытия больше не содержит — она
+		// передаёт панели клавиши движения и обновления.
 		switch {
-		case key.Matches(msg, m.keys.Back):
-			if m.focus == focusRuns {
-				m.focus = focusTree
-				m.runs = m.runs.blur()
-				return m, nil
-			}
-			return m, func() tea.Msg { return backMsg{} }
-
 		case m.focus == focusRuns:
-			if key.Matches(msg, m.keys.Open) {
-				return m, m.runs.open()
-			}
 			if key.Matches(msg, m.keys.Refresh) {
 				var cmd tea.Cmd
 				m.runs, cmd = m.runs.refresh()
@@ -439,9 +449,6 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 			var cmd tea.Cmd
 			m.runs, cmd = m.runs.update(msg)
 			return m, cmd
-
-		case key.Matches(msg, m.keys.Open):
-			return m.openCursor()
 
 		case key.Matches(msg, m.keys.Refresh):
 			return m.refreshCursor()
@@ -456,11 +463,16 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 	return m, nil
 }
 
-// openCursor — ⏎ на строке дерева: на группе/личном пространстве
-// переключает раскрытость и, если дети ещё не загружены, запускает
-// загрузку; на проекте отдаёт проект правой панели и переводит фокус на
-// неё.
-func (m treeModel) openCursor() (treeModel, tea.Cmd) {
+// openDeeper — открыть то, что под курсором дерева (колонка репозиториев,
+// часть общего контракта колонки, Фаза 13): на строке-объяснении ничего не
+// происходит; на группе или личном пространстве переключается раскрытость
+// и, если дети ещё не загружены, запускается их загрузка — раскрытие ветки
+// это углубление ВНУТРИ колонки репозиториев, а не переход в колонку
+// правее; на проекте отдаётся проект правой панели сообщением выбранного
+// проекта — корневая модель превратит его в открытие колонки пайплайнов.
+// Постановка фокуса на правую панель отсюда убрана: фокус раздаёт лента
+// (setColumnFocus выше).
+func (m treeModel) openDeeper() (treeModel, tea.Cmd) {
 	row, ok := m.selected()
 	if !ok {
 		return m, nil
@@ -472,8 +484,6 @@ func (m treeModel) openCursor() (treeModel, tea.Cmd) {
 		return m, nil
 	}
 	if row.Kind == treeKindProject {
-		m.focus = focusRuns
-		m.runs = m.runs.focus()
 		project := row.Project
 		return m, func() tea.Msg { return projectPickedMsg{project: project} }
 	}
