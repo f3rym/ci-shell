@@ -1047,10 +1047,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		// зовут тот же startRun.
 		return m.startRun(runRetry)
 
-	case key.Matches(msg, m.keys.Log) && m.pane == colDetail && m.detail == detailLog:
+	case key.Matches(msg, m.keys.Log) && m.pane == colDetail && m.detail == detailLog && m.cursor >= 0:
 		// Клавиша открытия полноэкранного просмотрщика (Фаза 15, план
 		// 15-02, JOB-04) — работает только в виде «лог шага»; второго места
-		// сборки openLogMsg на экране джобы не появляется.
+		// сборки openLogMsg на экране джобы не появляется. m.cursor >= 0
+		// (Фаза 15, план 15-03, LOG-05) — без выбранного шага открытие
+		// показало бы заголовок «ЛОГ ШАГА 0» с бессмысленным содержимым.
 		return m, m.openLogCmd()
 
 	case key.Matches(msg, m.keys.Up):
@@ -1073,6 +1075,14 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		// Выбор другого шага — панель лога возвращается к его хвосту, а не
 		// остаётся на выводе последней команды :! (задача 3).
 		m.execView = false
+		// Смена курсора — тоже точка роста в смысле LOG-05, только растёт не
+		// содержимое, а то, ЧЕЙ это сегмент (Фаза 15, план 15-03): без
+		// обновления здесь предпросмотр показывал бы лог прежде выбранного
+		// шага до следующего события сессии, а не шага под курсором прямо
+		// сейчас.
+		upLines, upTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(upTail, -1, "")
+		m.logv = m.logv.setLines(upLines)
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
@@ -1093,6 +1103,12 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 			m.cursor++
 		}
 		m.execView = false
+		// Та же точка роста, что и у стрелки вверх (LOG-05) — курсор колонки
+		// шагов сдвинулся, встроенный предпросмотр обязан показать сегмент
+		// шага под ним сразу, не дожидаясь следующего события сессии.
+		downLines, downTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(downTail, -1, "")
+		m.logv = m.logv.setLines(downLines)
 		return m, nil
 	}
 	return m, nil
@@ -1328,7 +1344,16 @@ func (m jobModel) secretsPanel(width int, focused bool) string {
 // приходит аргументом от колонки на каждый кадр, тем же приёмом, что и у
 // остальных видов; setSize здесь безопасен даже когда поле пустое —
 // logView простое значение без компонентов Bubbles.
+//
+// Без выбранного шага (m.cursor < 0 — джоба прошла целиком без единого
+// падения, курсор ни разу не сдвигался) тело честно отказывается открывать
+// логи вслепую (Фаза 15, план 15-03): показывать лог без выбранного шага
+// значило бы показать чужой сегмент или общий поток джобы — ровно то
+// поведение, которое убирает LOG-05.
 func (m jobModel) logDetailPanel(width int) string {
+	if m.cursor < 0 {
+		return m.theme.Muted.Render("шаг ещё не выбран — движение курсора в колонке шагов покажет его лог")
+	}
 	lv := m.logv.setSize(width, m.logDetailHeight())
 	return lv.view(m.theme) + "\n" + lv.statusLine(m.theme)
 }
@@ -1343,17 +1368,32 @@ func (m jobModel) logDetailHeight() int {
 	return h
 }
 
-// logGrowthSource — строки ограниченного буфера лога сессии и признак
-// «буфер уперся в свой предел» для точки роста лога (Фаза 15, план 15-02).
-// Метка упавшего шага у встроенного предпросмотра нет: конец локального
-// лога и есть упавший шаг (план 15-01, toFailed), и подпись «чем дотянуть»
-// пуста — у локального буфера начала уже нет, и предлагать команду было бы
-// враньём. Формула общая, а сами вызовы m.logv.setSource/setLines
-// инлайнятся в каждой точке роста отдельно — там, где лог мог вырасти, а не
-// на каждом кадре.
+// logGrowthSource — сегмент лога ИМЕННО шага под курсором колонки шагов и
+// признак его вытеснения, для точки роста встроенного предпросмотра (Фаза
+// 15, план 15-03, LOG-05). Она больше не отдаёт «буфер целиком», а режет
+// его по шагу под курсором: без выбранного шага (m.cursor < 0, или курсор
+// вышел за длину m.stepRows — та же защита от рассинхронизации, что уже
+// делает cursorAt) сегмента не существует, и подмена его общим потоком
+// была бы ровно тем поведением, которое LOG-05 убирает — тогда возвращаются
+// нулевые значения. Иначе берётся m.stepRows[m.cursor].Index (абсолютный
+// номер шага — то же поле, что уже читает cursorAt и openLogCmd, один
+// источник истины) и передаётся в m.session.StepLog; признак «шаг вообще
+// запускался» в возвращаемое значение не входит — вызывающий код
+// воспринимает «не запускался» и «запускался без вывода» одинаково честно:
+// пустой сегмент. Подпись «чем дотянуть» по-прежнему пуста и никак не
+// меняется этой задачей — у сегмента шага, как и у всего локального буфера
+// до этой задачи, начала может не быть (это теперь означает признак
+// вытеснения ИМЕННО ЕГО, а не всего буфера), а команды дотянуть его нет.
+// Формула общая, а сами вызовы m.logv.setSource/setLines инлайнятся в
+// каждой точке роста отдельно — там, где лог мог вырасти, а не на каждом
+// кадре; шесть уже существующих мест не редактируются этой задачей, они
+// получают новый результат бесплатно.
 func (m jobModel) logGrowthSource() (lines []string, tail bool) {
-	lines = m.session.Log()
-	return lines, len(lines) >= logBufferLines
+	if m.cursor < 0 || m.cursor >= len(m.stepRows) {
+		return nil, false
+	}
+	lines, tail, _ = m.session.StepLog(m.stepRows[m.cursor].Index)
+	return lines, tail
 }
 
 // currentSecretRow — строка вида «секреты» под курсором, если она есть.
@@ -1399,7 +1439,13 @@ func (m jobModel) startFill() (jobModel, tea.Cmd) {
 // встроенного предпросмотра — второго места сборки openLogMsg на экране
 // джобы не появляется.
 func (m jobModel) openLogCmd() tea.Cmd {
-	title := fmt.Sprintf("ЛОГ ШАГА %d", m.cursor+1)
+	// m.stepRows[m.cursor].Index — тот же источник истины, что уже читает
+	// logGrowthSource и cursorAt (Фаза 15, план 15-03): значение равно
+	// m.cursor+1 по построению (stepRowsFromSession), но теперь оба места
+	// читают ОДНО поле, а не пересчитывают его каждое по-своему. Вызов
+	// защищён условием m.cursor >= 0 у клавиши в updateKey — сюда эта
+	// команда без выбранного шага не попадает.
+	title := fmt.Sprintf("ЛОГ ШАГА %d", m.stepRows[m.cursor].Index)
 	lines, tail := m.logGrowthSource()
 	return func() tea.Msg {
 		return openLogMsg{title: title, lines: lines, tail: tail, mark: -1, pull: ""}
