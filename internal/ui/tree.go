@@ -400,7 +400,13 @@ func newTreeModel(hosts []string, first hostAccess, theme Theme, keys KeyMap) (t
 // заводится. Высота считается прежним способом.
 func (m treeModel) setSize(reposWidth, pipelinesWidth, height int) treeModel {
 	m.height = height
-	bodyHeight := height - 8
+	// Рамка колонки (Фаза 16, план 16-01, LOOK-01) добавила 2 строки (верх и
+	// низ) внутри той же высоты, которую эта функция уже делила на
+	// накладные расходы кадра, — без поправки список репозиториев (m.list)
+	// и таблица пайплайнов (m.runs, internal/ui/pipelines.go, получает то же
+	// самое bodyHeight без изменений в своём файле) отрисовывались бы на 2
+	// строки НИЖЕ нижней границы новой рамки.
+	bodyHeight := height - 10
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}

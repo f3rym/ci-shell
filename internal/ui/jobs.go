@@ -124,7 +124,13 @@ func newJobsModelFromPipeline(b *browse.Client, host string, project provider.Pr
 func (m jobsModel) setSize(width, height int) jobsModel {
 	m.width = width
 	m.height = height
-	logHeight := height - 8 - len(m.jobs) - 1
+	// Рамка колонки (Фаза 16, план 16-01, LOOK-01) добавила 2 строки (верх и
+	// низ) внутри той же высоты — тот же источник поправки, что и у
+	// treeModel.setSize выше. Минимум панели лога держит сама logPanel.setSize
+	// (internal/ui/joblog.go, не трогается этим планом) — маленький или
+	// отрицательный logHeight не ломает вызов, только сокращает число видимых
+	// строк лога.
+	logHeight := height - 10 - len(m.jobs) - 1
 	m.log = m.log.setSize(width, logHeight)
 	return m
 }
