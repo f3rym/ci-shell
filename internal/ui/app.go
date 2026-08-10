@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/event"
@@ -236,6 +237,100 @@ func (a App) focusColumn() App {
 	return a
 }
 
+// columnWidthFor — ширина, которую модель колонки id получает при изменении
+// размера окна (Фаза 13, план 13-02): для видимой колонки — из
+// a.ribbon.layout() по её позиции в текущем окне; для колонки, которая уже
+// есть в ленте, но сейчас не видна, — базовая ширина без остатка фокуса
+// (тот же расчёт, каким a.ribbon.layout() делит доступную ширину поровну),
+// чтобы при въезде в кадр колонка не ждала следующего сообщения о размере;
+// для колонки, которой в ленте нет вовсе, — ноль, потому что рисовать её
+// сейчас некому. Второго расчёта ширины колонки в пакете не заводится:
+// отрисовка (columnView ниже) берёт её же, свежую на каждый кадр, из
+// a.ribbon.layout() напрямую.
+func (a App) columnWidthFor(id columnID) int {
+	idx := -1
+	for i, c := range a.ribbon.cols {
+		if c.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return 0
+	}
+	first, count := a.ribbon.window()
+	if count > 0 && idx >= first && idx < first+count {
+		return a.ribbon.layout()[idx-first]
+	}
+	n := a.ribbon.visibleCount()
+	if n == 0 {
+		return 0
+	}
+	avail := a.width - 2*OuterMargin - (n-1)*PanelGap
+	return avail / n
+}
+
+// ribbonView — единственное место сборки кадра из ВИДИМЫХ колонок ленты
+// (Фаза 13, план 13-02, NAV-03): перебирается ОКНО видимых колонок
+// (a.ribbon.window()), а не весь перечень колонок ленты (a.ribbon.cols) —
+// именно это и означает «остальные уезжают за край» (idea-0.3.1 §3).
+// Инвариант «фокус всегда в кадре» держит сама лента (ribbon.reflow,
+// internal/ui/ribbon.go) — здесь он не проверяется повторно, только
+// читается через window()/layout().
+func (a App) ribbonView() string {
+	first, count := a.ribbon.window()
+	if count == 0 {
+		return ""
+	}
+	widths := a.ribbon.layout()
+	gap := strings.Repeat(" ", PanelGap)
+	parts := make([]string, 0, count*2-1)
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			parts = append(parts, gap)
+		}
+		col := a.ribbon.cols[first+i]
+		focused := first+i == a.ribbon.focus
+		parts = append(parts, a.columnView(col, widths[i], focused))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// columnView — одна колонка ленты: заголовок ВЕРХНИМ РЕГИСТРОМ
+// (columnTitle(col.id), плюс уточнение col.label, если оно непусто) и тело,
+// взятое у модели-владельца по идентификатору колонки. Признак фокуса
+// передаётся моделям — колонка вне фокуса не рисует курсор инверсией, иначе
+// на экране было бы два курсора сразу и ни один не был бы настоящим. Вся
+// колонка укладывается в ширину width стилем Lip Gloss, чтобы соседняя
+// колонка начиналась ровно там, где должна, чем бы ни было содержимое.
+//
+// Репозитории и пайплайны рисует модель дерева, джобы — модель списка джоб,
+// шаги и окружение·секреты·лог — модель экрана джобы (план 13-02, задача
+// 2); до задачи 2 последние две ветви возвращают то, что модель уже умеет
+// рисовать целиком (её прежний bodyView), а не колонку — второй отрисовки
+// той же самой модели задача 2 заменит одним методом columnView.
+func (a App) columnView(col column, width int, focused bool) string {
+	title := columnTitle(col.id)
+	if col.label != "" {
+		title = title + " " + col.label
+	}
+	header := a.theme.PanelTitle.Render(Truncate(title, width))
+
+	var body string
+	switch col.id {
+	case colRepos, colPipelines:
+		if a.treeReady {
+			body = a.tree.columnView(col.id, width, focused)
+		}
+	case colJobs:
+		body = a.jobs.bodyView()
+	case colSteps, colDetail:
+		body = a.job.bodyView()
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(header + "\n" + body)
+}
+
 // dropped разбирает колонки, отброшенные лентой при открытии другого пути
 // (ribbon.open) — единая уборка на все обработчики. Колонка, выпавшая из
 // ленты, недостижима, а её контейнер, чекаут и каталог файловых переменных
@@ -324,19 +419,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.splash.width, a.splash.height = msg.Width, msg.Height
+		// Окно видимых колонок ленты и их ширины пересчитываются на том же
+		// сообщении, что и всё остальное (Фаза 13) — ДО передачи размера
+		// моделям колонок ниже: они читают ровно этот расчёт
+		// (columnWidthFor), а не делят ширину кадра сами.
+		a.ribbon = a.ribbon.setSize(msg.Width, msg.Height)
 		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
 		a.job = a.job.setSize(msg.Width, msg.Height)
-		// Окно видимых колонок ленты пересчитывается на том же сообщении,
-		// что и всё остальное (Фаза 13).
-		a.ribbon = a.ribbon.setSize(msg.Width, msg.Height)
 		if a.treeReady {
-			// Дерево держит настоящий компонент списка Bubbles (list.Model)
-			// — до первого browseMsg он ещё не собран newTreeModel, и
-			// SetSize на нулевом значении небезопасен, в отличие от
-			// jobsModel/jobModel, которые обходятся простыми полями. Условие
-			// проверяет ровно тот факт, который декларирует: собран ли экран
-			// дерева, а не собран ли клиент обхода (CR-04).
-			a.tree = a.tree.setSize(msg.Width, msg.Height)
+			// Дерево держит настоящие компоненты Bubbles (list.Model,
+			// table.Model внутри pipelinePanel) — до первого browseMsg они
+			// ещё не собраны newTreeModel, и SetSize на нулевом значении
+			// небезопасен, в отличие от jobsModel/jobModel, которые
+			// обходятся простыми полями. Условие проверяет ровно тот факт,
+			// который декларирует: собран ли экран дерева, а не собран ли
+			// клиент обхода (CR-04). Ширина каждой из двух колонок дерева —
+			// своя (план 13-02, задача 1, пункт 7): список получает ширину
+			// колонки репозиториев, панель пайплайнов — ширину колонки
+			// пайплайнов, а не долю одной общей ширины, посчитанную самим
+			// деревом.
+			a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), msg.Height)
 		}
 		if a.overlay == overlayHelp {
 			// Тот же приём, что и у дерева выше: область просмотра экрана
@@ -641,9 +743,11 @@ func (a App) View() tea.View {
 // viewInner собирает кадр экрана. Раскладка кадра общая для всех экранов и
 // собирается ровно здесь — единственное место сборки вертикального ритма
 // (заголовок, тело, строка клавиш, строка подсказки): разъехавшийся ритм
-// между экранами первым бросается в глаза. Отрисовка ленты (несколько
-// колонок рядом вместо одного экрана за раз) — план 13-02, здесь кадр
-// по-прежнему собирается по экрану в фокусе, который называет a.screen().
+// между экранами первым бросается в глаза. С плана 13-02 тело кадра, когда
+// оверлея нет, берётся у ribbonView() (несколько колонок рядом), а не у
+// одной подмодели целиком; заставка, проводник и помощь по-прежнему
+// занимают кадр целиком — они оверлеи, а не колонки (план 13-01), и рисуют
+// себя сами, тем же способом, каким рисовали себя до этой фазы.
 func (a App) viewInner() string {
 	if (a.width > 0 && a.width < MinWidth) || (a.height > 0 && a.height < MinHeight) {
 		return TooSmall(a.width, a.height)
@@ -654,24 +758,10 @@ func (a App) viewInner() string {
 	keybar := ""
 	hint := ""
 
-	switch a.screen() {
-	case screenSplash:
+	switch a.overlay {
+	case overlaySplash:
 		body = a.splash.view(a.theme)
-	case screenJobs:
-		title = title + "  " + a.theme.Muted.Render(a.jobs.ref.Host)
-		body = a.jobs.bodyView()
-		keybar = a.jobs.keyBar()
-		hint = RenderHint(a.theme, a.jobs.hintText())
-	case screenJob:
-		body = a.job.bodyView()
-		keybar = a.job.keyBar()
-		hint = RenderHint(a.theme, a.job.hintText())
-	case screenTree:
-		title = title + "  " + a.theme.Muted.Render(a.host+" · "+a.user.Name)
-		body = a.tree.view()
-		keybar = a.tree.keyBar()
-		hint = RenderHint(a.theme, a.tree.hintText())
-	case screenGuide:
+	case overlayGuide:
 		body = a.guide.View(a.width-2*OuterMargin, a.height)
 		// Строка клавиш здесь та же короткая форма, что и у остальных
 		// экранов (Фаза 12, POL-03) — единственное место сборки этой
@@ -680,10 +770,30 @@ func (a App) viewInner() string {
 		// называет строка подсказки (a.guide.hintText()) под ней.
 		keybar = KeyBar(a.theme, a.keys)
 		hint = RenderHint(a.theme, a.guide.hintText())
-	case screenHelp:
+	case overlayHelp:
 		body = a.help.View()
 		keybar = KeyBar(a.theme, a.keys)
 		hint = RenderHint(a.theme, a.help.hintText())
+	default:
+		// Оверлея нет — тело кадра рисует лента (NAV-03 держится её
+		// инвариантом, отрисовка только читает его). Заголовок, строка
+		// клавиш и строка подсказки по-прежнему выбираются по ЭКРАНУ
+		// КОЛОНКИ В ФОКУСЕ (a.screen()) — ровно тем же способом, каким
+		// выбирались по текущему экрану до этой фазы.
+		body = a.ribbonView()
+		switch a.screen() {
+		case screenJobs:
+			title = title + "  " + a.theme.Muted.Render(a.jobs.ref.Host)
+			keybar = a.jobs.keyBar()
+			hint = RenderHint(a.theme, a.jobs.hintText())
+		case screenJob:
+			keybar = a.job.keyBar()
+			hint = RenderHint(a.theme, a.job.hintText())
+		case screenTree:
+			title = title + "  " + a.theme.Muted.Render(a.host+" · "+a.user.Name)
+			keybar = a.tree.keyBar()
+			hint = RenderHint(a.theme, a.tree.hintText())
+		}
 	}
 
 	margin := strings.Repeat(" ", OuterMargin)

@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/textwidth"
 )
@@ -132,11 +133,19 @@ func (m helpModel) renderKeys() string {
 	if len(cols) == 0 {
 		return ""
 	}
-	out := cols[0]
-	for _, c := range cols[1:] {
-		out = joinPanels(out, c, PanelGap)
+	// Склейка колонок помощи построчно — тем же зазором PanelGap, что и у
+	// ленты (Фаза 13, план 13-02): собственная функция joinPanels ушла из
+	// пакета вместе с отрисовкой экрана дерева по двум панелям, второй
+	// склейки строк вручную не заводится — Lip Gloss делает то же самое.
+	gap := strings.Repeat(" ", PanelGap)
+	parts := make([]string, 0, len(cols)*2-1)
+	for i, c := range cols {
+		if i > 0 {
+			parts = append(parts, gap)
+		}
+		parts = append(parts, c)
 	}
-	return out
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
 // renderCommands обходит knownCommands (internal/ui/command.go) целиком —

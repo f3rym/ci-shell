@@ -80,8 +80,20 @@ func noteRow(owner treeRow, text string) treeRow {
 
 // treeDelegate — отрисовщик строки дерева для компонента списка Bubbles:
 // одна высота, без разделителя между строками, обновление ничего не делает.
+// focused — указатель, а не голое поле: список Bubbles не даёт способа
+// подменить делегата на лету без пересборки компонента, и указатель на
+// общий с treeModel признак фокуса (Фаза 13, план 13-02) позволяет
+// treeModel.columnView перед каждой отрисовкой сказать делегату, видна ли
+// сейчас ЭТА колонка (репозитории) в фокусе ленты, — без этого список
+// рисовал бы инверсию курсора даже тогда, когда фокус ленты стоит на
+// колонке пайплайнов правее, и на экране был бы курсор сразу в двух местах.
 type treeDelegate struct {
-	theme Theme
+	theme   Theme
+	focused *bool
+}
+
+func (d treeDelegate) isFocused() bool {
+	return d.focused != nil && *d.focused
 }
 
 func (d treeDelegate) Height() int                       { return 1 }
@@ -95,6 +107,7 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 
 	indent := strings.Repeat(" ", row.Depth*TreeIndent)
+	selected := index == m.Index() && d.isFocused()
 
 	// Строка-объяснение рисуется без символа раскрытия и приглушённым: она
 	// ничего не открывает, и выглядеть как узел дерева не должна. Курсор на
@@ -103,7 +116,7 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	if row.Kind == treeKindNote {
 		width := m.Width() - textwidth.Of(indent) - 2
 		line := indent + Truncate(row.Name, width)
-		if index == m.Index() {
+		if selected {
 			fmt.Fprint(w, d.theme.Selected.Render(line))
 			return
 		}
@@ -127,7 +140,7 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	name := Truncate(row.Name, width)
 	line := indent + glyph + strings.Repeat(" ", RowIconGap) + name
 
-	if index == m.Index() {
+	if selected {
 		line = d.theme.Selected.Render(line + " " + GlyphCursor)
 	} else {
 		line = d.theme.Text.Render(line)
@@ -170,7 +183,12 @@ type treeModel struct {
 	runs  pipelinePanel
 	focus treeFocus
 
-	width, height int
+	// listFocused — тот же указатель, что держит treeDelegate списка
+	// (Фаза 13, план 13-02): columnView выставляет его перед каждой
+	// отрисовкой колонки репозиториев в значение переданного ей focused.
+	listFocused *bool
+
+	height int
 
 	theme Theme
 	keys  KeyMap
@@ -215,7 +233,8 @@ type projectPickedMsg struct {
 // справкой — второй заголовок внутри панели был бы мусором, кадр собирает
 // корневая модель.
 func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme, keys KeyMap) treeModel {
-	l := list.New(nil, treeDelegate{theme: theme}, 0, 0)
+	focused := new(bool)
+	l := list.New(nil, treeDelegate{theme: theme, focused: focused}, 0, 0)
 	l.SetFilteringEnabled(true)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
@@ -223,28 +242,32 @@ func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme
 
 	return treeModel{
 		b: b, host: host, user: user,
-		list:      l,
-		children:  map[string][]treeRow{},
-		complete:  map[string]bool{},
-		cached:    map[string]bool{},
-		fetchedAt: map[string]time.Time{},
-		pending:   map[string]bool{},
-		nodeErr:   map[string]string{},
-		runs:      newPipelinePanel(b, theme),
-		theme:     theme,
-		keys:      keys,
+		list:        l,
+		listFocused: focused,
+		children:    map[string][]treeRow{},
+		complete:    map[string]bool{},
+		cached:      map[string]bool{},
+		fetchedAt:   map[string]time.Time{},
+		pending:     map[string]bool{},
+		nodeErr:     map[string]string{},
+		runs:        newPipelinePanel(b, theme),
+		theme:       theme,
+		keys:        keys,
 	}
 }
 
-func (m treeModel) setSize(width, height int) treeModel {
-	m.width, m.height = width, height
-	lw, rw := m.paneWidths()
+// setSize передаёт моделям обеих колонок дерева (репозитории, пайплайны)
+// ширину ИХ колонки, а не долю всей ширины кадра, — ширину каждой посчитала
+// лента (Фаза 13, план 13-02, App.columnWidthFor), второго расчёта здесь не
+// заводится. Высота считается прежним способом.
+func (m treeModel) setSize(reposWidth, pipelinesWidth, height int) treeModel {
+	m.height = height
 	bodyHeight := height - 8
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}
-	m.list.SetSize(lw, bodyHeight)
-	m.runs = m.runs.setSize(rw, bodyHeight)
+	m.list.SetSize(reposWidth, bodyHeight)
+	m.runs = m.runs.setSize(pipelinesWidth, bodyHeight)
 	return m
 }
 
@@ -264,24 +287,6 @@ func (m treeModel) setColumnFocus(id columnID) treeModel {
 	m.focus = focusTree
 	m.runs = m.runs.blur()
 	return m
-}
-
-// paneWidths считает ширины двух панелей от доли и минимумов темы за
-// вычетом отступов от краёв и зазора между панелями.
-func (m treeModel) paneWidths() (int, int) {
-	avail := m.width - 2*OuterMargin - PanelGap
-	if avail < TreePanelMin+RunsPanelMin {
-		return TreePanelMin, RunsPanelMin
-	}
-	left := avail * TreeSharePercent / 100
-	if left < TreePanelMin {
-		left = TreePanelMin
-	}
-	right := avail - left
-	if right < RunsPanelMin {
-		right = RunsPanelMin
-	}
-	return left, right
 }
 
 // loadRoot собирает корень дерева из двух источников: личное пространство
@@ -632,11 +637,13 @@ func (m *treeModel) rebuild() {
 	m.list.SetItems(items)
 }
 
-// bodyView собирает тело левой панели: заголовок остаётся всегда, тело
-// заменяется честной строкой при первой загрузке, пустом дереве или ошибке.
-func (m treeModel) bodyView(width int) string {
-	header := m.theme.PanelTitle.Render("ГРУППЫ И ПРОЕКТЫ")
-
+// bodyView собирает тело колонки репозиториев (Фаза 13, план 13-02):
+// заголовок теперь рисует корневая модель (App.columnView) — здесь только
+// тело, которое заменяется честной строкой при первой загрузке, пустом
+// дереве или ошибке. focused решает, показывает ли список курсор инверсией
+// (treeDelegate.isFocused, через m.listFocused): вне фокуса ленты второго
+// курсора на экране быть не должно.
+func (m treeModel) bodyView(width int, focused bool) string {
 	// «Корень ещё не отвечал» — это факт наличия записи о полноте, а не
 	// поднятый где-то признак загрузки: сама загрузка корня запускается
 	// корневой моделью (app.go, browseMsg), и m.loading там не поднимается —
@@ -656,10 +663,11 @@ func (m treeModel) bodyView(width int) string {
 	case len(m.roots) == 0:
 		body = NoteSourceEmpty()
 	default:
+		*m.listFocused = focused
 		body = m.list.View()
 	}
 
-	parts := []string{header, body}
+	parts := []string{body}
 	// «Не знаем» и «неполон» — разные вещи: до первого treeLoadedMsg карта
 	// пуста, и голое !m.complete[""] печатало под «тяну список…» строку
 	// «показаны первые 0 записей — список длиннее» (WR-09 обзора v0.3.0).
@@ -672,40 +680,15 @@ func (m treeModel) bodyView(width int) string {
 	return strings.Join(parts, "\n")
 }
 
-// view собирает две панели рядом.
-func (m treeModel) view() string {
-	lw, rw := m.paneWidths()
-	left := m.bodyView(lw)
-	right := m.runs.view(rw)
-	return joinPanels(left, right, PanelGap)
-}
-
-// joinPanels склеивает две колонки построчно с зазором gap ячеек между ними.
-func joinPanels(left, right string, gap int) string {
-	lLines := strings.Split(left, "\n")
-	rLines := strings.Split(right, "\n")
-	n := len(lLines)
-	if len(rLines) > n {
-		n = len(rLines)
+// columnView — тело ОДНОЙ колонки дерева без заголовка (Фаза 13, план
+// 13-02): заголовок рисует корневая модель (App.columnView), второй здесь
+// был бы мусором. Репозитории и пайплайны — общий контракт колонки одной и
+// той же модели: id называет, какая из двух колонок сейчас рисуется.
+func (m treeModel) columnView(id columnID, width int, focused bool) string {
+	if id == colPipelines {
+		return m.runs.view()
 	}
-	sep := strings.Repeat(" ", gap)
-	var b strings.Builder
-	for i := 0; i < n; i++ {
-		l, r := "", ""
-		if i < len(lLines) {
-			l = lLines[i]
-		}
-		if i < len(rLines) {
-			r = rLines[i]
-		}
-		b.WriteString(l)
-		b.WriteString(sep)
-		b.WriteString(r)
-		if i < n-1 {
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
+	return m.bodyView(width, focused)
 }
 
 // hintText выбирает строку подсказки: при фокусе на правой панели — из её

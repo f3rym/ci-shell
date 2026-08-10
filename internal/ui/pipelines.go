@@ -75,18 +75,45 @@ type openPipelineMsg struct {
 	pipeline provider.Pipeline
 }
 
-// newPipelinePanel собирает таблицу Bubbles: символ статуса, номер, ветка,
-// сокращённый коммит, относительное время. Заголовки колонок таблицы
-// выключены — заголовок несёт панель (panelTitle ниже), не таблица.
-func newPipelinePanel(b *browse.Client, theme Theme) pipelinePanel {
-	cols := []table.Column{
-		{Title: "", Width: 1},
-		{Title: "#", Width: 8},
-		{Title: "ветка", Width: 16},
-		{Title: "коммит", Width: 8},
-		{Title: "когда", Width: 12},
+// pipelineColumns считает ширины столбцов таблицы пайплайнов от ширины
+// колонки width (Фаза 13, план 13-02): символ статуса и номер держат свою
+// малую ширину — расширять их от лишней ширины окна незачем, — а весь
+// остаток делится между веткой и коммитом. Заголовки колонок таблицы
+// выключены — заголовок несёт лента (App.columnView), не таблица.
+func pipelineColumns(width int) []table.Column {
+	const (
+		symbolWidth = 1
+		numberWidth = 8
+		whenWidth   = 12
+		minBranch   = 12
+		minCommit   = 8
+	)
+	rest := width - symbolWidth - numberWidth - whenWidth
+	if rest < minBranch+minCommit {
+		rest = minBranch + minCommit
 	}
-	t := table.New(table.WithColumns(cols), table.WithFocused(false))
+	branch := rest * 2 / 3
+	if branch < minBranch {
+		branch = minBranch
+	}
+	commit := rest - branch
+	if commit < minCommit {
+		commit = minCommit
+	}
+	return []table.Column{
+		{Title: "", Width: symbolWidth},
+		{Title: "#", Width: numberWidth},
+		{Title: "ветка", Width: branch},
+		{Title: "коммит", Width: commit},
+		{Title: "когда", Width: whenWidth},
+	}
+}
+
+// newPipelinePanel собирает таблицу Bubbles: символ статуса, номер, ветка,
+// сокращённый коммит, относительное время. Ширина столбцов — временная,
+// первый setSize (ниже) пересчитает её от настоящей ширины колонки.
+func newPipelinePanel(b *browse.Client, theme Theme) pipelinePanel {
+	t := table.New(table.WithColumns(pipelineColumns(ColumnMin)), table.WithFocused(false))
 	styles := table.DefaultStyles()
 	// Стиль выбранной строки — инверсия видео (Reverse(true), тот же приём,
 	// что и Theme.Selected), как требует контракт; собственного цвета
@@ -220,18 +247,22 @@ func (p pipelinePanel) blur() pipelinePanel {
 	return p
 }
 
-// setSize передаёт таблице ширину и высоту панели; ширины колонок остаются
-// фиксированными (заданы в newPipelinePanel).
+// setSize передаёт таблице ширину и высоту КОЛОНКИ (Фаза 13, план 13-02) и
+// пересчитывает от неё ширины столбцов (pipelineColumns) — растяжение
+// таблицы при большем окне живёт здесь, а не в отрисовке (idea-0.3.1 §3,
+// «панели становятся крупнее, а не оставляют пустоту справа»).
 func (p pipelinePanel) setSize(width, height int) pipelinePanel {
 	p.table.SetWidth(width)
 	p.table.SetHeight(height)
+	p.table.SetColumns(pipelineColumns(width))
 	return p
 }
 
-// view отрисовывает панель: заголовок всегда, тело — по состоянию.
-func (p pipelinePanel) view(width int) string {
-	title := p.theme.PanelTitle.Render(fmt.Sprintf("ПАЙПЛАЙНЫ %s", Truncate(p.projectTitle(), width)))
-
+// view отрисовывает тело колонки без заголовка (Фаза 13, план 13-02):
+// заголовок с именем проекта рисует корневая модель уточнением заголовка
+// колонки (App.updateInner, projectPickedMsg) — второй заголовок здесь был
+// бы мусором.
+func (p pipelinePanel) view() string {
 	var body string
 	switch {
 	case !p.hasProject:
@@ -246,7 +277,7 @@ func (p pipelinePanel) view(width int) string {
 		body = p.table.View()
 	}
 
-	parts := []string{title, body}
+	parts := []string{body}
 	if p.hasProject && !p.complete {
 		parts = append(parts, p.theme.Muted.Render(fmt.Sprintf("показаны первые %d записей — список длиннее", len(p.pipelines))))
 	}
@@ -254,13 +285,6 @@ func (p pipelinePanel) view(width int) string {
 		parts = append(parts, p.theme.Muted.Render(fmt.Sprintf("из кэша, %s назад", Ago(p.fetched))))
 	}
 	return strings.Join(parts, "\n")
-}
-
-func (p pipelinePanel) projectTitle() string {
-	if !p.hasProject {
-		return ""
-	}
-	return p.project.FullPath
 }
 
 // hintText выбирает строку подсказки правой панели ровно по её пяти
