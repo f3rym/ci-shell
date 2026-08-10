@@ -446,3 +446,28 @@ func HintNoPatchYet() string {
 func HintEnvScreen(n int) string {
 	return fmt.Sprintf("окружение джобы, %d переменных — esc вернёт на экран джобы", n)
 }
+
+// Формулировки закона ленты колонок (Фаза 13, NAV-01…NAV-02): по одной
+// именованной функции на ситуацию, тем же приёмом, что и все остальные
+// формулировки этого файла. Клавиша называется не литералом, а отображаемой
+// формой привязки — GlyphRight/GlyphLeft те же константы единственной
+// таблицы символов темы (internal/ui/theme.go), которыми названы сами
+// привязки Right/Left в раскладке (internal/ui/keys.go), поэтому текст не
+// может разойтись с раскладкой.
+
+// HintColumnDeeper — что откроется по стрелке вправо на текущем элементе.
+func HintColumnDeeper(what string) string {
+	return fmt.Sprintf(GlyphRight+" откроет %s", what)
+}
+
+// HintColumnLeftmost — человек в самой левой колонке ленты: esc отсюда
+// выходит из утилиты — единственное место, где esc завершает программу, и
+// формулировка обязана назвать это прямо.
+func HintColumnLeftmost() string {
+	return "esc выйдет из утилиты"
+}
+
+// HintColumnDeepest — правее фокуса в ленте ничего нет, ← вернёт назад.
+func HintColumnDeepest() string {
+	return GlyphLeft + " вернёт назад"
+}

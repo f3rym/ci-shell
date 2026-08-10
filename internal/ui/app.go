@@ -23,7 +23,10 @@ import (
 // screen — экран интерфейса. screenJobs и screenJob объявлены с самого
 // начала (план 09-01/09-02); screenTree наполняет Фаза 10 (BROW-01) —
 // переключение экранов должно жить в одном месте, а не расползаться правкой
-// перечисления.
+// перечисления. С Фазы 13 перечень выводится из ленты колонок (ribbon.go,
+// screenFor) для колонок и из поля оверлея для заставки/проводника/помощи —
+// сам перечень экранов при этом не меняется, его по-прежнему читает экран
+// помощи.
 type screen int
 
 const (
@@ -37,6 +40,22 @@ const (
 	// screenHelp — экран помощи (Фаза 12, POL-03, internal/ui/help.go):
 	// `?` с любого экрана, кроме заставки и открытого поля ввода.
 	screenHelp
+)
+
+// overlay — экран, не являющийся колонкой ленты (Фаза 13, NAV-01…NAV-04):
+// заставка стоит ПЕРЕД лентой — лента ещё пуста, вопрос «куда идти»
+// задаётся раньше, чем лента начинает существовать; проводник и помощь
+// перекрывают ленту целиком и закону стрелок не подчиняются — стрелка
+// внутри них принадлежит им. Возвращаться после снятия оверлея некуда:
+// лента при этом не менялась, и само снятие оверлея возвращает человека
+// ровно туда, где он был.
+type overlay int
+
+const (
+	overlayNone overlay = iota
+	overlaySplash
+	overlayGuide
+	overlayHelp
 )
 
 // App — корневая модель Bubble Tea; единственная модель проекта,
@@ -53,12 +72,12 @@ type App struct {
 	width  int
 	height int
 
-	current screen
-	// stack — ранее открытые экраны (Фаза 10): путь по интерфейсу перестал
-	// быть линейным (заставка → дерево → джобы → джоба, но и заставка →
-	// джобы → джоба), и «назад» без стека расходится с тем, откуда человек
-	// пришёл.
-	stack []screen
+	// ribbon — лента колонок (Фаза 13): то, что «глубже», живёт правее, и
+	// это единственное, что нужно знать про навигацию. Экран больше не
+	// хранится полем — он выводится методом screen() ниже.
+	ribbon ribbon
+	// overlay — экран, не являющийся колонкой (см. тип overlay выше).
+	overlay overlay
 
 	splash splashModel
 	jobs   jobsModel
@@ -80,18 +99,14 @@ type App struct {
 	// панелях лога и пайплайнов.
 	sessionGen int
 
-	// guide/guideReturn — экран проводника по типичным поломкам (Фаза 11):
-	// экран проводника всегда знает, откуда пришёл, и esc возвращает ровно
-	// туда. Возврат хранится значением, а не вычисляется, потому что одна и
-	// та же ситуация приходит и с заставки, и с экрана джобы.
-	guide       guideModel
-	guideReturn screen
+	// guide — экран проводника по типичным поломкам (Фаза 11): открывается
+	// оверлеем overlayGuide поверх ленты; возвращаться при закрытии некуда
+	// специально хранить не нужно — лента не менялась (см. тип overlay).
+	guide guideModel
 
-	// help/helpReturn — экран помощи (Фаза 12, POL-03): тот же приём, что и
-	// у экрана проводника выше — экран помощи знает, откуда пришёл, и esc
-	// (или повторное `?`) возвращает ровно туда.
-	help       helpModel
-	helpReturn screen
+	// help — экран помощи (Фаза 12, POL-03): тот же приём, что и у экрана
+	// проводника выше — оверлей overlayHelp поверх ленты.
+	help helpModel
 
 	// browseClient, provider, host, user — состояние обхода (Фаза 10):
 	// browse.New вызывается ровно в двух местах этого файла (browseMsg и
@@ -104,9 +119,6 @@ type App struct {
 
 	keys KeyMap
 }
-
-// backMsg обрабатывается здесь же (см. Update) — экран сам решает, когда
-// его пора послать, объявление типа в internal/ui/tree.go.
 
 // quitMsg — просьба экрана завершить программу. Экраны НЕ зовут tea.Quit
 // сами: выход обязан пройти через уборку сессии, а знает про неё только
@@ -161,33 +173,83 @@ func (a App) initInner() tea.Cmd {
 	)
 }
 
-// push кладёт текущий экран в стек и переключается на next — единственное
-// место, меняющее a.current при переходе вперёд по дереву экранов.
-func (a App) push(next screen) App {
-	a.stack = append(a.stack, a.current)
-	a.current = next
+// screen — экран, который сейчас видит человек: экран колонки ленты в
+// фокусе, а при активном оверлее — экран самого оверлея. Второго места,
+// хранящего экран, в пакете больше нет.
+func (a App) screen() screen {
+	switch a.overlay {
+	case overlaySplash:
+		return screenSplash
+	case overlayGuide:
+		return screenGuide
+	case overlayHelp:
+		return screenHelp
+	}
+	return a.ribbon.screen()
+}
+
+// openDeeper — единственная точка углубления: если правее фокуса колонка
+// уже есть, фокус просто переезжает в неё; иначе колонка в фокусе сама
+// решает, что открыть, единым вызовом одноимённого метода. «→ открывает
+// пайплайны» и «→ открывает панель действий» обязаны быть одним правилом, а
+// не двумя.
+func (a App) openDeeper() (App, tea.Cmd) {
+	if a.ribbon.hasDeeper() {
+		a.ribbon = a.ribbon.deeper()
+		return a.focusColumn(), nil
+	}
+
+	switch a.ribbon.focusedID() {
+	case colRepos:
+		var cmd tea.Cmd
+		a.tree, cmd = a.tree.openDeeper()
+		return a, cmd
+	case colPipelines:
+		var cmd tea.Cmd
+		a.tree.runs, cmd = a.tree.runs.openDeeper()
+		return a, cmd
+	case colJobs:
+		var cmd tea.Cmd
+		a.jobs, cmd = a.jobs.openDeeper()
+		return a, cmd
+	case colSteps, colDetail:
+		var cmd tea.Cmd
+		a.job, cmd = a.job.openDeeper()
+		return a, cmd
+	}
+	return a, nil
+}
+
+// focusColumn — единственная точка передачи фокуса подмоделям колонок:
+// зовётся из всех трёх исходов движения по закону и из открытия новой
+// колонки; второго места, раздающего фокус, не заводится. Экран дерева
+// трогается только когда он уже собран (treeReady) — тот же приём
+// осторожности, что и у SetSize (CR-04 обзора v0.3.0): до первого browseMsg
+// его компоненты не готовы принимать вызовы.
+func (a App) focusColumn() App {
+	id := a.ribbon.focusedID()
+	if a.treeReady {
+		a.tree = a.tree.setColumnFocus(id)
+	}
+	a.jobs = a.jobs.setColumnFocus(id)
+	a.job = a.job.setColumnFocus(id)
 	return a
 }
 
-// back снимает экран со стека и возвращает его; пустой стек равнозначен
-// нынешнему поведению — уходит на заставку.
-//
-// Возврат НА ЗАСТАВКУ возвращает её в состояние вопроса (splash.reopen):
-// заставка, оставленная с тремя пройденными проверками, ничего больше не
-// запускает — человек, вернувшийся с дерева по esc, оказывался на экране,
-// где нельзя ни продолжить, ни ввести новую ссылку.
-func (a App) back() App {
-	if len(a.stack) == 0 {
-		a.current = screenSplash
-		a.splash = a.splash.reopen()
-		return a
+// dropped разбирает колонки, отброшенные лентой при открытии другого пути
+// (ribbon.open) — единая уборка на все обработчики. Колонка, выпавшая из
+// ленты, недостижима, а её контейнер, чекаут и каталог файловых переменных
+// с материализованными секретами остались бы на машине до конца процесса,
+// если их не убрать здесь (T-13-02).
+func (a App) dropped(ids []columnID) (App, tea.Cmd) {
+	for _, id := range ids {
+		if id == colSteps && a.job.session != nil {
+			sess := a.job.session
+			a.job.session = nil
+			return a, func() tea.Msg { sess.Close(); return nil }
+		}
 	}
-	a.current = a.stack[len(a.stack)-1]
-	a.stack = a.stack[:len(a.stack)-1]
-	if a.current == screenSplash {
-		a.splash = a.splash.reopen()
-	}
-	return a
+	return a, nil
 }
 
 // inputActive сообщает, захватывает ли текущий экран сырой ввод текста:
@@ -195,14 +257,16 @@ func (a App) back() App {
 // дерева. Потребителей два, и оба здесь же: сопоставление клавиши помощи в
 // Update ниже (Фаза 12, POL-03) — пока открыто одно из этих полей,
 // вопросительный знак обычный символ ввода, а не запрос помощи, иначе
-// набрать «?» в сообщении коммита было бы нельзя, — и cancelsRun ниже.
+// набрать «?» в сообщении коммита было бы нельзя, — и cancelsRun ниже, а
+// также ветвь закона ленты (Фаза 13): пока поле ввода открыто, стрелки
+// двигают курсор в тексте, а не фокус по ленте.
 // Ctrl-C в этот перечень не заглядывает никогда: он выходит и из открытого
 // поля ввода тоже (см. Update). Экран проводника сюда не входит: для
-// него вопрос уже решён выше (ранний break при screenGuide) — сопоставление
+// него вопрос уже решён выше (ранний break при overlayGuide) — сопоставление
 // клавиши помощи до него не доходит вовсе, каким бы ни был его собственный
 // ввод.
 func (a App) inputActive() bool {
-	switch a.current {
+	switch a.screen() {
 	case screenJobs:
 		return a.jobs.cmd.active
 	case screenJob:
@@ -221,7 +285,7 @@ func (a App) inputActive() bool {
 // Ctrl-C не делал бы вообще ничего. Во всех остальных случаях Ctrl-C
 // означает выход.
 func (a App) cancelsRun() bool {
-	return a.current == screenJob && !a.inputActive() && a.job.cancelable()
+	return a.screen() == screenJob && !a.inputActive() && a.job.cancelable()
 }
 
 // resolveBrowse резолвит токен хоста и собирает и значение интерфейса
@@ -252,7 +316,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateInner обрабатывает сообщения программы. Общие для всех экранов
-// случаи (размер окна, цвет фона, выход, возврат) разбираются здесь один
+// случаи (размер окна, цвет фона, выход, закон ленты) разбираются здесь один
 // раз; остальное уходит подмодели текущего экрана.
 func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -262,6 +326,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.splash.width, a.splash.height = msg.Width, msg.Height
 		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
 		a.job = a.job.setSize(msg.Width, msg.Height)
+		// Окно видимых колонок ленты пересчитывается на том же сообщении,
+		// что и всё остальное (Фаза 13).
+		a.ribbon = a.ribbon.setSize(msg.Width, msg.Height)
 		if a.treeReady {
 			// Дерево держит настоящий компонент списка Bubbles (list.Model)
 			// — до первого browseMsg он ещё не собран newTreeModel, и
@@ -271,7 +338,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// дерева, а не собран ли клиент обхода (CR-04).
 			a.tree = a.tree.setSize(msg.Width, msg.Height)
 		}
-		if a.current == screenHelp {
+		if a.overlay == overlayHelp {
 			// Тот же приём, что и у дерева выше: область просмотра экрана
 			// помощи (viewport.Model) собрана newHelpModel только при
 			// первом открытии `?`, и SetSize до этого небезопасна.
@@ -299,9 +366,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// там первое нажатие отменяет её (контракт, «Долгие операции»), а
 		// когда отменять нечего, Ctrl-C снова означает выход.
 		//
-		// Выход идёт через quitCmd, а не через tea.Quit: иначе сессия не
-		// убирается, и на машине остаются живой контейнер, чекаут и каталог
-		// файловых переменных с материализованными секретами (CR-01).
+		// Выход идёт через единственную точку выхода quitCmd, а не напрямую
+		// командой библиотеки: иначе сессия не убирается, и на машине
+		// остаются живой контейнер, чекаут и каталог файловых переменных с
+		// материализованными секретами (CR-01).
 		if key.Matches(msg, a.keys.Cancel) && !a.cancelsRun() {
 			return a, a.quitCmd()
 		}
@@ -310,65 +378,77 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// целиком, включая привязки выхода и возврата (T-11-10): буква
 		// выхода, набранная в поле ввода токена, не должна завершать
 		// программу, а esc обязан вернуться на нужный экран через
-		// guideDismissMsg проводника, а не через общий стек.
-		if a.current == screenGuide {
+		// guideDismissMsg проводника, а не через закон ленты.
+		if a.overlay == overlayGuide {
 			break
 		}
-		if key.Matches(msg, a.keys.Quit) && a.current != screenSplash {
+
+		if key.Matches(msg, a.keys.Quit) && a.overlay != overlaySplash {
 			// Выход идёт единственной точкой на ЛЮБОМ экране, а не только
 			// когда текущий экран — джоба: `q` с экрана помощи, открытого с
 			// экрана джобы, тоже обязан убрать сессию (CR-01).
-			//
-			// Заставка исключена не потому, что с неё нельзя выйти, а потому,
-			// что решение принимает она сама (internal/ui/splash.go): пока её
-			// поле ввода открыто, `q` — обычный символ ссылки, и завершать
-			// программу им нельзя. Закрытое поле ввода она выпускает сама, тем
-			// же quitMsg, что и все остальные экраны.
 			return a, a.quitCmd()
 		}
-		// Заставка исключена по той же причине и с тем же следствием: esc на
-		// ней снимает набранное, а на пустом поле выходит — решает splashModel.
-		if key.Matches(msg, a.keys.Back) && a.current != screenSplash {
-			switch a.current {
-			case screenHelp:
-				a.current = a.helpReturn
-				return a, nil
-			case screenJob:
-				if a.job.session != nil {
-					sess := a.job.session
-					a = a.back()
-					return a, func() tea.Msg { sess.Close(); return nil }
-				}
-				a = a.back()
-				return a, nil
-			case screenTree, screenJobs:
-				// Экран сам решает: снять внутренний фокус/строку команды
-				// или попросить о переходе назад сообщением backMsg (case
-				// ниже) — Back здесь не перехватывается, а доходит до
-				// подмодели обычным путём (диспетчер в конце функции).
-			default:
-				a = a.back()
-				return a, nil
-			}
-		}
+		// Заставка исключена не потому, что с неё нельзя выйти, а потому,
+		// что решение принимает она сама (internal/ui/splash.go): пока её
+		// поле ввода открыто, `q` — обычный символ ссылки, и завершать
+		// программу им нельзя. Закрытое поле ввода она выпускает сама, тем
+		// же quitMsg, что и все остальные экраны.
 
 		// Сопоставление клавиши помощи — ровно здесь и один раз в проекте
 		// (Фаза 12, POL-03): помощь работает с любого экрана, кроме
 		// заставки. Исключение — пока открыта строка команды или любое
 		// поле ввода: там вопросительный знак обычный символ ввода, иначе
 		// набрать «?» в сообщении коммита было бы нельзя (a.inputActive
-		// ниже). Повторное нажатие с экрана помощи возвращает на
-		// запомненный экран — тот же жест, что и Back.
-		if key.Matches(msg, a.keys.Help) && a.current != screenSplash && !a.inputActive() {
-			if a.current == screenHelp {
-				a.current = a.helpReturn
+		// ниже). Повторное нажатие снимает оверлей — тот же жест, что и esc
+		// ниже, потому что помощь оверлей, а не колонка ленты, и закону
+		// стрелок не подчиняется.
+		if key.Matches(msg, a.keys.Help) && a.overlay != overlaySplash && !a.inputActive() {
+			if a.overlay == overlayHelp {
+				a.overlay = overlayNone
 				return a, nil
 			}
-			a.helpReturn = a.current
-			a.help = newHelpModel(a.theme, a.keys, a.current)
+			a.help = newHelpModel(a.theme, a.keys, a.screen())
 			a.help = a.help.setSize(a.width, a.height)
-			a.current = screenHelp
+			a.overlay = overlayHelp
 			return a, nil
+		}
+		// esc снимает оверлей помощи тем же жестом, что и повторное `?` —
+		// возвращаться специально некуда: лента не менялась, пока оверлей
+		// был открыт.
+		if a.overlay == overlayHelp && key.Matches(msg, a.keys.Back) {
+			a.overlay = overlayNone
+			return a, nil
+		}
+
+		// Единственное место применения закона ленты колонок (Фаза 13,
+		// NAV-01…NAV-04): срабатывает только когда нет оверлея и ни одно
+		// поле ввода не захватывает ввод — иначе стрелка внутри строки
+		// команды или фильтра списка перестала бы двигать курсор в тексте.
+		// Заставка исключена тем же условием (a.overlay != overlayNone,
+		// пока идёт overlaySplash): её esc/⏎ разбирает она сама, решение
+		// того же рода, что и у Quit/Help выше.
+		if a.overlay == overlayNone && !a.inputActive() {
+			switch navFor(msg, a.keys) {
+			case navDeeper:
+				return a.openDeeper()
+			case navShallower:
+				a.ribbon = a.ribbon.shallower()
+				return a.focusColumn(), nil
+			case navLeftmost:
+				if a.ribbon.atLeftEdge() || a.ribbon.empty() {
+					// Завершение здесь идёт исключительно через единственную
+					// точку выхода: иначе сессия не уберётся, и на машине
+					// останутся живой контейнер, чекаут и каталог файловых
+					// переменных с материализованными секретами — ровно тот
+					// дефект, который обзор v0.3.0 уже находил (CR-01).
+					return a, a.quitCmd()
+				}
+				a.ribbon = a.ribbon.leftmost()
+				return a.focusColumn(), nil
+			}
+			// navNone — клавиша пропускается дальше, к подмодели, обычным
+			// путём (финальный диспетчер внизу функции).
 		}
 
 	case jobRefMsg:
@@ -386,7 +466,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.jobs = newJobsModel(msg.ref, msg.job, b, loadErr, a.theme, a.keys)
 		a.jobs = a.jobs.setSize(a.width, a.height)
-		a = a.push(screenJobs)
+		// По прямой ссылке репозиториев и пайплайнов слева нет — самая
+		// левая колонка ленты становится колонка джоб, и esc из неё выходит.
+		a.ribbon = a.ribbon.reset(colJobs, "")
+		a.overlay = overlayNone
 		return a, a.jobs.load()
 
 	case browseMsg:
@@ -400,8 +483,31 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tree = newTreeModel(a.browseClient, a.host, a.user, a.theme, a.keys)
 		a.treeReady = true
 		a.tree = a.tree.setSize(a.width, a.height)
-		a = a.push(screenTree)
+		a.ribbon = a.ribbon.reset(colRepos, "")
+		a.overlay = overlayNone
 		return a, a.tree.loadRoot(false)
+
+	case projectPickedMsg:
+		// Курсор дерева встал на проект: колонка пайплайнов открывается в
+		// ленте, если её ещё нет; если она уже есть, обновляется только её
+		// уточнение заголовка — правая панель и так следит за курсором
+		// дребезгом (setProject ниже, по дispatcher'у), второй загрузки
+		// заводить не нужно. Сообщение НЕ перехватывается (нет return) —
+		// оно обязано дойти и до treeModel.update, который передаст проект
+		// правой панели.
+		label := Plain(msg.project.FullPath)
+		if a.ribbon.has(colPipelines) {
+			for i := range a.ribbon.cols {
+				if a.ribbon.cols[i].id == colPipelines {
+					a.ribbon.cols[i].label = label
+				}
+			}
+			break
+		}
+		var dropped []columnID
+		a.ribbon, dropped = a.ribbon.open(colPipelines, label)
+		a, _ = a.dropped(dropped)
+		a = a.focusColumn()
 
 	case openPipelineMsg:
 		// Открытие пайплайна с правой панели экрана дерева (BROW-03):
@@ -409,68 +515,80 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// второй конструктор.
 		a.jobs = newJobsModelFromPipeline(a.browseClient, a.host, msg.project, msg.pipeline, a.theme, a.keys)
 		a.jobs = a.jobs.setSize(a.width, a.height)
-		a = a.push(screenJobs)
-		return a, a.jobs.load()
+		var dropped []columnID
+		a.ribbon, dropped = a.ribbon.open(colJobs, Plain(fmt.Sprintf("#%d · %s", msg.pipeline.IID, msg.pipeline.Ref)))
+		var cleanup tea.Cmd
+		a, cleanup = a.dropped(dropped)
+		a = a.focusColumn()
+		return a, tea.Batch(cleanup, a.jobs.load())
 
 	case quitMsg:
-		// Команда `:q` любого экрана приходит сюда, а не зовёт tea.Quit сама:
-		// экран не знает про уборку сессии, а точка выхода в проекте одна
-		// (CR-01).
+		// Команда `:q` любого экрана приходит сюда, а не завершает программу
+		// сама: экран не знает про уборку сессии, а точка выхода в проекте
+		// одна (CR-01).
 		return a, a.quitCmd()
-
-	case backMsg:
-		a = a.back()
-		if a.current == screenSplash {
-			// Заставка вернулась в состояние вопроса со свежим полем ввода —
-			// мигание курсора запускается командой, и без неё курсор в поле
-			// стоял бы неподвижно до первого следующего сообщения.
-			return a, textinput.Blink
-		}
-		return a, nil
 
 	case openJobMsg:
 		// Мост подключается к программе ровно здесь и один раз: программа
 		// Bubble Tea уже существует (programSend поставлен в Run), а
 		// экран джобы ещё нет — создание сессии, моста и подготовка идут
 		// одним переходом, чтобы второе место подключения не появилось.
-		// Сессия предыдущей джобы (если человек уже открывал одну и вернулся)
-		// убирается здесь же: Close идемпотентен, поэтому повторный вызов
-		// после esc ничего не делает, а забытая сессия перестаёт существовать.
-		if a.job.session != nil {
-			a.job.session.Close()
-		}
+		// Колонка шагов кладётся в ленту ДО пересборки a.job: если справа от
+		// колонки джоб уже была колонка шагов (человек уже открывал одну
+		// джобу и вернулся выбрать другую), она попадёт в перечень
+		// отброшенных, и dropped уберёт её сессию — ту самую, которую
+		// раньше здесь закрывали вручную (Close идемпотентен, поэтому
+		// повторное закрытие в редком случае гонки ничего не стоит).
+		var dropped []columnID
+		a.ribbon, dropped = a.ribbon.open(colSteps, Plain(msg.job.Name))
+		var cleanup tea.Cmd
+		a, cleanup = a.dropped(dropped)
+
 		a.sessionGen++
 		bridge := NewBridge(a.sessionGen)
 		bridge.Attach(programSend)
 		sess := NewSession(a.jobs.ref, a.provider, msg.job, event.Emitter{Sink: bridge})
 		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
 		a.job = a.job.setSize(a.width, a.height)
-		a = a.push(screenJob)
-		return a, a.job.init()
+		a = a.focusColumn()
+		return a, tea.Batch(cleanup, a.job.init())
+
+	case openDetailMsg:
+		// Колонка окружения·секретов·лога (Фаза 13, задача 3,
+		// internal/ui/job.go): единственная колонка фазы, у которой нет
+		// своих данных для загрузки — сообщение существует ради того же
+		// единого правила, по которому открываются все остальные колонки.
+		var dropped []columnID
+		a.ribbon, dropped = a.ribbon.open(colDetail, "")
+		var cleanup tea.Cmd
+		a, cleanup = a.dropped(dropped)
+		a = a.focusColumn()
+		return a, cleanup
 
 	case guideMsg:
-		// Экран проводника (Фаза 11) запоминает текущий экран как экран
-		// возврата и переключается на себя.
-		a.guideReturn = a.current
+		// Экран проводника (Фаза 11) перекрывает ленту оверлеем — лента при
+		// этом не меняется, и снятие оверлея само возвращает человека туда,
+		// где он был.
 		a.guide = newGuideModel(msg.Guide, a.theme, a.keys)
-		a.current = screenGuide
+		a.overlay = overlayGuide
 		if msg.Guide.Kind == guideInput {
 			return a, textinput.Blink
 		}
 		return a, nil
 
 	case guideDismissMsg:
-		a.current = a.guideReturn
+		a.overlay = overlayNone
 		return a, nil
 
 	case guideDoneMsg:
 		// Обработка guideDoneMsg не выполняется здесь: сообщение уходит
-		// тому экрану, который открыл проводник, — корневая модель только
-		// возвращает экран, а смысл ответа решает уже он (диспетчер ниже).
-		a.current = a.guideReturn
+		// тому экрану, который открыл проводника, — корневая модель только
+		// снимает оверлей, а смысл ответа решает уже он (диспетчер ниже,
+		// теперь читающий a.screen(), который снова указывает на ленту).
+		a.overlay = overlayNone
 	}
 
-	switch a.current {
+	switch a.screen() {
 	case screenSplash:
 		var cmd tea.Cmd
 		a.splash, cmd = a.splash.update(msg)
@@ -523,7 +641,9 @@ func (a App) View() tea.View {
 // viewInner собирает кадр экрана. Раскладка кадра общая для всех экранов и
 // собирается ровно здесь — единственное место сборки вертикального ритма
 // (заголовок, тело, строка клавиш, строка подсказки): разъехавшийся ритм
-// между экранами первым бросается в глаза.
+// между экранами первым бросается в глаза. Отрисовка ленты (несколько
+// колонок рядом вместо одного экрана за раз) — план 13-02, здесь кадр
+// по-прежнему собирается по экрану в фокусе, который называет a.screen().
 func (a App) viewInner() string {
 	if (a.width > 0 && a.width < MinWidth) || (a.height > 0 && a.height < MinHeight) {
 		return TooSmall(a.width, a.height)
@@ -534,7 +654,7 @@ func (a App) viewInner() string {
 	keybar := ""
 	hint := ""
 
-	switch a.current {
+	switch a.screen() {
 	case screenSplash:
 		body = a.splash.view(a.theme)
 	case screenJobs:
@@ -627,6 +747,9 @@ func Run(ctx context.Context) error {
 		theme:  NewTheme(caps),
 		keys:   DefaultKeys(),
 		splash: newSplashModel(),
+		// Стартовый оверлей — заставка: она стоит ПЕРЕД лентой, лента ещё
+		// пуста (Фаза 13).
+		overlay: overlaySplash,
 	}
 	p := tea.NewProgram(app, tea.WithContext(ctx))
 	// Функция отправки существует только теперь — раньше программы не
@@ -641,7 +764,7 @@ func Run(ctx context.Context) error {
 	// Последняя уборка: сюда программа приходит и штатным выходом, и по
 	// отменённому контексту (сигнал, отмена снаружи), и после паники,
 	// пойманной встроенной сетью Bubble Tea. Close идемпотентен, поэтому
-	// повторение уже сделанной уборки (quitCmd, esc с экрана джобы) ничего не
+	// повторение уже сделанной уборки (quitCmd, dropped) ничего не
 	// стоит, а пропущенная — стоила бы живого контейнера и каталога с
 	// секретами на диске.
 	if last, ok := final.(App); ok && last.job.session != nil {
