@@ -396,6 +396,41 @@ func HintLogUnavailable(reason string) string {
 	return fmt.Sprintf("лог джобы недоступен: %s — g повторит запрос", reason)
 }
 
+// Формулировки полноэкранного просмотрщика лога (Фаза 15, план 15-01,
+// LOG-01…LOG-04): по одной именованной функции на состояние просмотрщика,
+// тем же приёмом, что и весь остальной файл. Формулировки панели лога выше
+// (HintLogTail, HintLogFull, HintLogLoading, HintLogUnavailable) не
+// трогаются — они про состояние ЗАГРУЗКИ лога, а не про его чтение.
+
+// HintLogViewing — обычный просмотр: searchKey откроет поиск, failedKey
+// уведёт к упавшему шагу. Обе клавиши читаются из раскладки вызывающим
+// кодом (internal/ui/logview.go, hintText) — здесь только формулировка.
+func HintLogViewing(searchKey, failedKey string) string {
+	return fmt.Sprintf("%s начнёт поиск, %s уведёт к упавшему шагу", searchKey, failedKey)
+}
+
+// HintLogSearching — поле поиска открыто: подтверждение покажет совпадения,
+// возврат снимет поиск целиком.
+func HintLogSearching() string {
+	return "введите запрос и нажмите " + confirmKey() + " — esc снимет поиск"
+}
+
+// HintLogFound — поиск задан, совпадения есть: nextKey переходит к
+// следующему.
+func HintLogFound(n int, nextKey string) string {
+	return fmt.Sprintf("совпадений: %d — %s к следующему", n, nextKey)
+}
+
+// HintLogNothingFound — поиск задан, совпадений нет.
+func HintLogNothingFound() string {
+	return "совпадений нет"
+}
+
+// HintLogEmpty — лог пуст, читать нечего.
+func HintLogEmpty() string {
+	return "лог пуст — здесь появится вывод шага"
+}
+
 // Формулировки проводника по поломкам (Фаза 11, GUIDE-01…05): по одной
 // именованной функции на ситуацию словаря internal/ui/guide.go — тот же
 // приём, что и у остальных строк подсказки этого файла.

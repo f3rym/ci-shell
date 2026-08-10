@@ -14,11 +14,13 @@ package ui
 import (
 	"fmt"
 	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 )
 
-// logView — состояние просмотрщика лога. Поля поиска (задача 2) здесь не
-// объявляются — они присоединяются отдельной правкой, чтобы задача 2
-// читалась как одно связное изменение.
+// logView — состояние просмотрщика лога. Поля поиска добавлены задачей 2.
 type logView struct {
 	// lines — уже готовые к показу строки: приходят замаскированными и
 	// прочищенными от вызывающего кода, просмотрщик их не трогает.
@@ -36,6 +38,20 @@ type logView struct {
 	mark int
 	// title — заголовок для полноэкранного вида просмотрщика (задача 3).
 	title string
+
+	// query — что ищем; пусто — поиска нет. Эхоится обычным образом, в
+	// отличие от поля токена и поля значения секрета: запрос — не секрет, а
+	// вот совпадение в логе им быть может, и именно поэтому подсветка ниже
+	// не меняет текста строки, а только её начертание.
+	query string
+	// matches — номера строк с совпадением, по возрастанию.
+	matches []int
+	// match — индекс текущего совпадения в matches.
+	match int
+	// input — поле ввода запроса поиска.
+	input textinput.Model
+	// searching — поле ввода запроса открыто.
+	searching bool
 }
 
 // newLogView — пустой просмотрщик: метка отсутствует, смещение нулевое.
@@ -181,8 +197,13 @@ func (v logView) bottom() logView {
 // view рисует окно строк: берётся window, каждая строка обрезается по
 // ширине графемной мерой темы (Truncate), пустой лог заменяется одной
 // честной строкой приглушённым стилем. Ни одного ручного выравнивания
-// форматным глаголом. Подсветку совпадений в эту же функцию добавляет
-// задача 2.
+// форматным глаголом.
+//
+// Подсветка совпадений накладывается ПОСЛЕ обрезки по ширине, одним
+// выражением: highlight принимает уже обрезанную строку. Если бы порядок
+// был обратным, управляющие последовательности стиля попали бы в меру
+// ширины и разъехали бы кадр — тот же класс дефекта, что байтовое
+// выравнивание кириллицы в v0.1.0.
 func (v logView) view(t Theme) string {
 	first, count := v.window()
 	if count == 0 {
@@ -193,7 +214,9 @@ func (v logView) view(t Theme) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(Truncate(v.lines[first+i], v.width))
+		lineIdx := first + i
+		current := v.query != "" && len(v.matches) > 0 && v.matches[v.match] == lineIdx
+		b.WriteString(highlight(Truncate(v.lines[lineIdx], v.width), v.query, t, current))
 	}
 	return b.String()
 }
@@ -215,11 +238,289 @@ func (v logView) statusLine(t Theme) string {
 	if v.tail {
 		text += fmt.Sprintf(" — показан хвост, %s вытянет лог целиком", Plain(v.pull))
 	}
+	if v.query != "" {
+		// Запрос приходит с клавиатуры (набран или вставлен), но попадает в
+		// кадр мимо меры ширины — очистка Plain здесь так же обязательна,
+		// как у подписи дотягивания выше.
+		if len(v.matches) == 0 {
+			text += fmt.Sprintf(" — поиск «%s»: совпадений нет", Plain(v.query))
+		} else {
+			text += fmt.Sprintf(" — поиск «%s»: %d из %d", Plain(v.query), v.match+1, len(v.matches))
+		}
+	}
 	return t.Muted.Render(text)
 }
 
-// hintText — строка подсказки просмотрщика. Наполняется задачей 2
-// (состояния поиска); здесь — формулировка обычного просмотра.
+// hintText — строка подсказки просмотрщика: четыре состояния ровно четырьмя
+// именованными формулировками (internal/ui/hint.go) — поле поиска открыто;
+// поиск задан и совпадения есть; поиск задан и совпадений нет; обычный
+// просмотр (в том числе пустой лог). Клавиши в формулировках не пишутся
+// литералами — они читаются из раскладки здесь же.
 func (v logView) hintText() string {
-	return "обычный просмотр лога"
+	keys := DefaultKeys()
+	switch {
+	case v.searching:
+		return HintLogSearching()
+	case v.query != "" && len(v.matches) > 0:
+		return HintLogFound(len(v.matches), keys.NextMatch.Help().Key)
+	case v.query != "" && len(v.matches) == 0:
+		return HintLogNothingFound()
+	case v.empty():
+		return HintLogEmpty()
+	default:
+		return HintLogViewing(keys.Search.Help().Key, keys.Failed.Help().Key)
+	}
+}
+
+// openSearch открывает поле ввода запроса: собирает поле, ставит фокус,
+// поднимает признак и возвращает команду мигания курсора — тот же приём,
+// что у строки команды (internal/ui/command.go, openCommandBar).
+func (v logView) openSearch() (logView, tea.Cmd) {
+	ti := textinput.New()
+	ti.Prompt = "/"
+	ti.Focus()
+	v.input = ti
+	v.searching = true
+	return v, textinput.Blink
+}
+
+// closeSearch закрывает поле ввода, НЕ трогая запрос и совпадения: человек
+// закрыл ввод, а не отменил поиск.
+func (v logView) closeSearch() logView {
+	v.searching = false
+	return v
+}
+
+// clearSearch снимает поиск целиком: запрос, совпадения и поле ввода.
+func (v logView) clearSearch() logView {
+	v.query = ""
+	v.matches = nil
+	v.match = 0
+	v.input = textinput.Model{}
+	v.searching = false
+	return v
+}
+
+// applyQuery — единственное место, где считаются совпадения: построчно, а
+// не по всему тексту разом — лог это строки, и «совпадение на границе
+// строк» человеку показать всё равно нечем. По каждой строке лога решается,
+// содержит ли она query без учёта регистра (обе стороны приводятся к
+// нижнему регистру), номера подходящих строк складываются по возрастанию.
+// Текущим становится первое совпадение НЕ ВЫШЕ текущего смещения, а если
+// такого нет — первое вообще (нулевой индекс, к которому match уже
+// прижат по умолчанию). Пустой запрос очищает совпадения.
+func (v logView) applyQuery(query string) logView {
+	v.query = query
+	v.matches = nil
+	if query != "" {
+		q := strings.ToLower(query)
+		for i, line := range v.lines {
+			if strings.Contains(strings.ToLower(line), q) {
+				v.matches = append(v.matches, i)
+			}
+		}
+	}
+	first, _ := v.window()
+	v.match = 0
+	for i, m := range v.matches {
+		if m >= first {
+			v.match = i
+			break
+		}
+	}
+	return v
+}
+
+// reveal прижимает смещение так, чтобы текущее совпадение попало в окно:
+// если оно уже видно, смещение не трогается — иначе кадр прыгал бы на
+// каждом переходе внутри одного экрана.
+func (v logView) reveal() logView {
+	if len(v.matches) == 0 {
+		return v
+	}
+	line := v.matches[v.match]
+	first, count := v.window()
+	if line >= first && line < first+count {
+		return v
+	}
+	v.offset = v.clamp(line)
+	return v
+}
+
+// nextMatch / prevMatch — переход по кольцу совпадений.
+func (v logView) nextMatch() logView {
+	if len(v.matches) == 0 {
+		return v
+	}
+	v.match = (v.match + 1) % len(v.matches)
+	return v.reveal()
+}
+
+func (v logView) prevMatch() logView {
+	if len(v.matches) == 0 {
+		return v
+	}
+	v.match = (v.match - 1 + len(v.matches)) % len(v.matches)
+	return v.reveal()
+}
+
+// toFailed — LOG-03, единственная точка перехода к упавшему шагу: если
+// метка есть (неотрицательна), смещение ставится так, чтобы строка метки
+// стала первой видимой; если метки нет — просмотрщик уходит в конец.
+//
+// Две ветви — не два поведения, а одно правило на двух источниках: в логе
+// настоящего прогона метка приходит от провайдера (номер строки последней
+// открытой секции, provider.Log.SectionLine); в логе локального
+// воспроизведения меток нет и быть не может — маркеры шагов вырезаются
+// раньше, чем строка попадает в буфер (internal/runner/steps.go), зато
+// set -e обрывает скрипт ровно на упавшем шаге, поэтому конец локального
+// лога И ЕСТЬ упавший шаг.
+func (v logView) toFailed() logView {
+	if v.mark < 0 {
+		return v.bottom()
+	}
+	v.offset = v.clamp(v.mark)
+	return v
+}
+
+// update — единственное место разбора клавиш просмотрщика. Пока поле поиска
+// открыто, клавиши уходят в него (тот же приём, что у строки команды):
+// подтверждение применяет набранное и переходит к текущему совпадению,
+// привязка возврата закрывает поле, снимая поиск целиком, остальное —
+// обычный ввод текста. Вне поля ввода разбираются: движение, страница, края,
+// поиск, переход по совпадениям, переход к упавшему шагу, привязка
+// возврата — закрытие просмотрщика (logDismissMsg, задача 3). Все клавиши
+// берутся из раскладки k, ни одного строкового литерала клавиши в файле.
+func (v logView) update(msg tea.Msg, k KeyMap) (logView, tea.Cmd) {
+	if v.searching {
+		if paste, ok := msg.(tea.PasteMsg); ok {
+			var cmd tea.Cmd
+			v.input, cmd = v.input.Update(paste)
+			return v, cmd
+		}
+		keyMsg, ok := msg.(tea.KeyPressMsg)
+		if !ok {
+			var cmd tea.Cmd
+			v.input, cmd = v.input.Update(msg)
+			return v, cmd
+		}
+		switch {
+		case key.Matches(keyMsg, k.Open):
+			v = v.applyQuery(v.input.Value())
+			v = v.closeSearch()
+			return v.reveal(), nil
+		case key.Matches(keyMsg, k.Back):
+			return v.clearSearch(), nil
+		}
+		var cmd tea.Cmd
+		v.input, cmd = v.input.Update(keyMsg)
+		return v, cmd
+	}
+
+	keyMsg, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return v, nil
+	}
+	switch {
+	case key.Matches(keyMsg, k.Up):
+		return v.scroll(-1), nil
+	case key.Matches(keyMsg, k.Down):
+		return v.scroll(1), nil
+	case key.Matches(keyMsg, k.PageUp):
+		return v.page(-1), nil
+	case key.Matches(keyMsg, k.PageDown):
+		return v.page(1), nil
+	case key.Matches(keyMsg, k.Top):
+		return v.top(), nil
+	case key.Matches(keyMsg, k.Bottom):
+		return v.bottom(), nil
+	case key.Matches(keyMsg, k.Search):
+		return v.openSearch()
+	case key.Matches(keyMsg, k.NextMatch):
+		return v.nextMatch(), nil
+	case key.Matches(keyMsg, k.PrevMatch):
+		return v.prevMatch(), nil
+	case key.Matches(keyMsg, k.Failed):
+		return v.toFailed(), nil
+	case key.Matches(keyMsg, k.Back):
+		return v, func() tea.Msg { return logDismissMsg{} }
+	}
+	return v, nil
+}
+
+// keyHints — перечень записей строки клавиш просмотрщика (тип KeyHint и
+// единственная отрисовка KeyBarOf — задача 3): прокрутка, страница, края,
+// поиск, переход к упавшему шагу, закрытие. При активном поиске запись
+// поиска заменяется записью перехода по совпадениям — иначе строка не
+// уложилась бы в пол 80.
+//
+// Ширина в ячейках (пол 80, доступно 78 за вычетом отступов от краёв),
+// шесть записей и пять разделителей " · " (3 ячейки каждый):
+//
+//	обычный просмотр:
+//	  "↑↓ выбор"(8) + "pgup/pgdn экран"(15) + "gG края"(7) + "/ поиск"(7) +
+//	  "f падение"(10) + "esc назад"(9) + 5*" · "(15) = 71 <= 78
+//	поиск активен (запись поиска заменена переходом по совпадениям):
+//	  8 + 15 + 7 + "nN совпадения"(13) + 10 + 9 + 15 = 77 <= 78
+func (v logView) keyHints(k KeyMap) []KeyHint {
+	hints := []KeyHint{
+		Hint(k.Up),
+		Hint(k.PageUp),
+		Hint(k.Top),
+	}
+	if v.searching {
+		hints = append(hints, Hint(k.NextMatch))
+	} else {
+		hints = append(hints, Hint(k.Search))
+	}
+	hints = append(hints, Hint(k.Failed), HintAs(k.Back, "назад"))
+	return hints
+}
+
+// highlight подсвечивает в строке s все вхождения query без учёта регистра:
+// начертанием, а не заменой текста — строка после подсветки состоит из тех
+// же символов, что и до неё. Строка текущего совпадения (current) рисуется
+// инверсией, остальные — акцентом.
+//
+// Поиск позиции идёт по копиям строки и запроса в нижнем регистре; если
+// приведение к нижнему регистру изменило длину строки в байтах (такое
+// бывает на отдельных письменностях), позиции фрагментов доверять нельзя —
+// неверное смещение разрезало бы UTF-8 посередине и выдало бы в кадр мусор
+// вместо текста лога, поэтому в этом случае подсвечивается строка целиком,
+// без разбора на фрагменты.
+func highlight(s, query string, t Theme, current bool) string {
+	if query == "" {
+		return s
+	}
+
+	style := t.Accent
+	if current {
+		style = t.Selected
+	}
+
+	lower := strings.ToLower(s)
+	q := strings.ToLower(query)
+	if len(lower) != len(s) || len(q) == 0 {
+		return style.Render(s)
+	}
+
+	var b strings.Builder
+	rest, restLower := s, lower
+	found := false
+	for {
+		idx := strings.Index(restLower, q)
+		if idx < 0 {
+			break
+		}
+		found = true
+		b.WriteString(rest[:idx])
+		b.WriteString(style.Render(rest[idx : idx+len(q)]))
+		rest = rest[idx+len(q):]
+		restLower = restLower[idx+len(q):]
+	}
+	if !found {
+		return s
+	}
+	b.WriteString(rest)
+	return b.String()
 }
