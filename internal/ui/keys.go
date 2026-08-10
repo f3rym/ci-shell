@@ -12,8 +12,16 @@ import (
 // строку: перечень привязок пересчитывается гейтом (см. FullHelp ниже), и
 // объявление в несколько имён на строке сделало бы пересчёт невозможным.
 type KeyMap struct {
-	Up      key.Binding
-	Down    key.Binding
+	Up   key.Binding
+	Down key.Binding
+	// Right, Left — закон ленты колонок (Фаза 13, NAV-01…NAV-02): → всегда
+	// переносит фокус в колонку справа, ← — в колонку слева, и это
+	// единственное значение обеих клавиш во всём интерфейсе. Второе
+	// толкование стрелки где-либо в пакете и есть та поломка, которую фаза
+	// чинит — закон применяется ровно в одном месте (navFor,
+	// internal/ui/ribbon.go).
+	Right   key.Binding
+	Left    key.Binding
 	Open    key.Binding
 	Back    key.Binding
 	Shell   key.Binding
@@ -43,13 +51,26 @@ func DefaultKeys() KeyMap {
 		Down: key.NewBinding(
 			key.WithKeys("down", "j"),
 		),
+		Right: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp(GlyphRight, "глубже"),
+		),
+		Left: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp(GlyphLeft, "назад"),
+		),
 		Open: key.NewBinding(
 			key.WithKeys("enter"),
-			key.WithHelp(GlyphEnter, "открыть"),
+			// По закону ленты ⏎ — синоним движения вправо, а не отдельное
+			// действие (idea-0.3.1 §3, строка таблицы про ⏎): подпись обязана
+			// называть его именно так, а не изображать второе действие.
+			key.WithHelp(GlyphEnter, "то же, что "+GlyphRight),
 		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
-			key.WithHelp("esc", "назад"),
+			// esc уводит в самую левую колонку ленты, а из неё — выходит:
+			// прежняя подпись «назад» после этой фазы врёт (idea-0.3.1 §3).
+			key.WithHelp("esc", "в начало · выход"),
 		),
 		Shell: key.NewBinding(
 			key.WithKeys("s"),
@@ -101,10 +122,25 @@ func DefaultKeys() KeyMap {
 }
 
 // ShortHelp — короткая форма для строки клавиш внизу экрана (KeyBar ниже):
-// навигация, открыть, назад, помощь, выход. Реализация интерфейса помощи
+// движение по колонке, вправо, влево, esc, помощь, выход — закон ленты
+// колонок (Фаза 13, NAV-01). Open (⏎) в короткой форме не участвует: она
+// синоним Right, и задваивать её в строке клавиш незачем — в полной форме
+// она остаётся и там названа синонимом. Реализация интерфейса помощи
 // компонента Bubbles.
+//
+// Ширина получившейся строки укладывается в 78 ячеек (пол 80 минус отступы
+// от краёв):
+//
+//	"↑↓ выбор"            → 2+1+5 = 8
+//	"→ глубже"             → 1+1+6 = 8
+//	"← назад"              → 1+1+5 = 7
+//	"esc в начало · выход" → 3+1+16 = 20
+//	"? помощь"             → 1+1+6 = 8
+//	"q выход"              → 1+1+5 = 7
+//	5 разделителей " · "   → 5*3 = 15
+//	итого: 8+8+7+20+8+7+15 = 73 <= 78
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Open, k.Back, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Right, k.Left, k.Back, k.Help, k.Quit}
 }
 
 // FullHelp — полная форма для экрана помощи (internal/ui/help.go, Фаза 12,
@@ -118,7 +154,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // упомянутых здесь, — забыть клавишу в помощи структурно невозможно.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Open, k.Back, k.Filter},
+		{k.Up, k.Down, k.Right, k.Left, k.Open, k.Back, k.Filter},
 		{k.Shell, k.Retry, k.Apply},
 		{k.Refresh, k.Command},
 		{k.Help, k.Quit, k.Cancel},
