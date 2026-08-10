@@ -24,12 +24,21 @@ import (
 // себе и чужому серверу.
 const pipelineDebounce = 250 * time.Millisecond
 
-// pipelinePanel — правая панель: пакет обхода, показываемый проект, таблица
+// pipelinePanel — правая панель: пакет обхода и хост показываемого проекта
+// (Фаза 14, план 14-02: приходят вместе с проектом, а не фиксируются при
+// сборке — проект может принадлежать любому из корней дерева), таблица
 // Bubbles, срез пайплайнов, признаки загрузки/полноты/кэша, время
 // получения, текст ошибки, признак фокуса и счётчик поколения запроса
 // (защита от дребезга при быстром движении курсора).
 type pipelinePanel struct {
-	b *browse.Client
+	// b, host — клиент обхода и хост проекта, которого показывает панель
+	// сейчас (Фаза 14, план 14-02): панель не хранит клиента, зафиксированного
+	// при сборке (newPipelinePanel ниже его не принимает) — второй экран
+	// одного и того же дерева может открыть проект другого инстанса, и
+	// клиент, зафиксированный однажды, спрашивал бы чужой хост ключом
+	// первого.
+	b    *browse.Client
+	host string
 
 	project    provider.Project
 	hasProject bool
@@ -68,9 +77,12 @@ type pipelineDebounceMsg struct {
 	generation  int
 }
 
-// openPipelineMsg — открытие пайплайна на панели: проект и выбранный
-// пайплайн уходят экрану списка джоб единственным сообщением.
+// openPipelineMsg — открытие пайплайна на панели: хост, проект и выбранный
+// пайплайн уходят экрану списка джоб единственным сообщением (Фаза 14, план
+// 14-02: экран списка джоб собирается корневой моделью и должен знать,
+// чьим доступом его собирать).
 type openPipelineMsg struct {
+	host     string
 	project  provider.Project
 	pipeline provider.Pipeline
 }
@@ -111,8 +123,10 @@ func pipelineColumns(width int) []table.Column {
 
 // newPipelinePanel собирает таблицу Bubbles: символ статуса, номер, ветка,
 // сокращённый коммит, относительное время. Ширина столбцов — временная,
-// первый setSize (ниже) пересчитает её от настоящей ширины колонки.
-func newPipelinePanel(b *browse.Client, theme Theme) pipelinePanel {
+// первый setSize (ниже) пересчитает её от настоящей ширины колонки. Клиент
+// обхода панель больше не принимает при сборке (Фаза 14, план 14-02) — он
+// приходит вместе с каждым проектом (setProject ниже).
+func newPipelinePanel(theme Theme) pipelinePanel {
 	t := table.New(table.WithColumns(pipelineColumns(ColumnMin)), table.WithFocused(false))
 	styles := table.DefaultStyles()
 	// Стиль выбранной строки — инверсия видео (Reverse(true), тот же приём,
@@ -121,16 +135,19 @@ func newPipelinePanel(b *browse.Client, theme Theme) pipelinePanel {
 	styles.Selected = theme.Selected.Reverse(true)
 	t.SetStyles(styles)
 
-	return pipelinePanel{b: b, table: t, theme: theme}
+	return pipelinePanel{table: t, theme: theme}
 }
 
-// setProject меняет показываемый проект: уже загруженный проект остаётся из
-// памяти без нового запроса; новый проект запускает дребезг задержкой
-// pipelineDebounce.
-func (p pipelinePanel) setProject(project provider.Project) (pipelinePanel, tea.Cmd) {
-	if p.hasProject && p.project.FullPath == project.FullPath {
+// setProject меняет показываемый проект вместе с хостом и клиентом обхода,
+// которому он принадлежит (Фаза 14, план 14-02): уже загруженный проект того
+// же хоста остаётся из памяти без нового запроса; новый проект запускает
+// дребезг задержкой pipelineDebounce.
+func (p pipelinePanel) setProject(host string, b *browse.Client, project provider.Project) (pipelinePanel, tea.Cmd) {
+	if p.hasProject && p.host == host && p.project.FullPath == project.FullPath {
 		return p, nil
 	}
+	p.host = host
+	p.b = b
 	p.project = project
 	p.hasProject = true
 	p.loadErr = ""
@@ -159,9 +176,11 @@ func (p pipelinePanel) fetch(gen int, refresh bool) tea.Cmd {
 
 // refresh перезапрашивает пайплайны показанного проекта, минуя кэш —
 // клавиша обновления. Повторное обновление, пока предыдущая загрузка не
-// завершилась, игнорируется.
+// завершилась, игнорируется; без клиента (см. pipelineDebounceMsg ниже)
+// запрос тоже не уходит — путь недостижим (см. ту же ветвь), но защита
+// стоит и здесь на случай зажатой клавиши между вкладками.
 func (p pipelinePanel) refresh() (pipelinePanel, tea.Cmd) {
-	if !p.hasProject || p.loading {
+	if !p.hasProject || p.loading || p.b == nil {
 		return p, nil
 	}
 	p.generation++
@@ -173,6 +192,16 @@ func (p pipelinePanel) update(msg tea.Msg) (pipelinePanel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case pipelineDebounceMsg:
 		if msg.generation != p.generation {
+			return p, nil
+		}
+		if p.b == nil {
+			// Путь недостижим: проект приходит только из уже загруженного
+			// узла дерева, а узел загружается только когда доступ к его
+			// хосту уже есть (needHostMsg/hostReadyMsg, internal/ui/tree.go,
+			// internal/ui/app.go). Ветвь — защита инварианта, а не логика:
+			// без неё погасший клиент привёл бы к панике на b.Pipelines
+			// вместо честной строки отказа с именем хоста.
+			p.loadErr = fmt.Sprintf("нет доступа к хосту %s", p.host)
 			return p, nil
 		}
 		p.loading = true
@@ -353,12 +382,13 @@ func (p pipelinePanel) openDeeper() (pipelinePanel, tea.Cmd) {
 	return p, p.open()
 }
 
-// open отдаёт openPipelineMsg для пайплайна под курсором, если он есть.
+// open отдаёт openPipelineMsg для пайплайна под курсором, если он есть, вместе
+// с хостом, которому принадлежит проект (Фаза 14, план 14-02).
 func (p pipelinePanel) open() tea.Cmd {
 	pl, ok := p.selected()
 	if !ok {
 		return nil
 	}
-	project := p.project
-	return func() tea.Msg { return openPipelineMsg{project: project, pipeline: pl} }
+	host, project := p.host, p.project
+	return func() tea.Msg { return openPipelineMsg{host: host, project: project, pipeline: pl} }
 }

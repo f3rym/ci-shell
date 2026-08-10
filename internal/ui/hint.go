@@ -271,6 +271,38 @@ func HintTreeStale(age string) string {
 	return fmt.Sprintf("список из кэша, %s назад — g обновит", age)
 }
 
+// Формулировки корня-хоста дерева репозиториев (Фаза 14, план 14-02,
+// MENU-03): каждый ключ — свой корень, и три состояния строки-хоста
+// (свёрнут, раскрыт, доступ ещё запрашивается) нуждаются в собственных
+// формулировках, тем же приёмом, что и весь остальной файл.
+
+// HintTreeHostExpand — курсор на свёрнутом корне-хосте, доступ к которому
+// уже есть.
+func HintTreeHostExpand(host string) string {
+	return fmt.Sprintf(GlyphRight+" покажет группы и проекты %s", host)
+}
+
+// HintTreeHostCollapse — курсор на раскрытом корне-хосте.
+func HintTreeHostCollapse(host string) string {
+	return fmt.Sprintf(GlyphRight+" свернёт %s", host)
+}
+
+// HintTreeHostOpening — доступ к хосту сейчас запрашивается: просьба уже
+// ушла корневой модели (needHostMsg), ответ (hostReadyMsg) ещё не пришёл.
+func HintTreeHostOpening(host string) string {
+	return fmt.Sprintf("спрашиваю, кто вы на %s…", host)
+}
+
+// HintTreeNoKeys — перечень хостов пуст. Попасть на этот экран без ключей
+// нельзя: пункт репозиториев меню недоступен, пока перечень пуст
+// (menuModel.enabled) — ветвь существует ради честности пустого состояния, а
+// не ради достижимого пути. esc с самой левой колонки ленты завершает
+// программу (закон ленты, Фаза 13) — формулировка называет это прямо, а не
+// обещает возврат в меню, которого отсюда нет.
+func HintTreeNoKeys() string {
+	return "ключей пока нет — esc выйдет из утилиты"
+}
+
 // NoteSourceEmpty и NoteSourceRefused — две формулировки, ради которых
 // строка-объяснение и заведена (internal/ui/tree.go, treeKindNote). Пустой
 // ответ и отказ источника — РАЗНЫЕ события, и на экране они обязаны

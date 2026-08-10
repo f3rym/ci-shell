@@ -1,8 +1,12 @@
-// tree.go — экран дерева групп и проектов (Фаза 10, BROW-01): раскрытие,
-// фильтр, две панели (дерево слева, пайплайны выбранного проекта справа),
-// переключение фокуса между ними. Единственный источник данных — пакет
-// обхода (internal/browse): экран не ходит в сеть сам и не знает ни про
-// страницы, ни про сроки годности кэша.
+// tree.go — экран дерева репозиториев (Фаза 10, BROW-01; Фаза 14, план
+// 14-02): раскрытие, фильтр, две панели (дерево слева, пайплайны выбранного
+// проекта справа), переключение фокуса между ними. Корень дерева больше не
+// принадлежит одному хосту — каждый ключ становится своим корнем (MENU-03),
+// и доступ к хосту запрашивается по требованию при раскрытии его корня.
+// Единственный источник данных узла — пакет обхода (internal/browse) клиента
+// ЕГО хоста: экран не ходит в сеть сам, не знает про страницы и сроки
+// годности кэша и не собирает клиента обхода сам (это по-прежнему делает
+// только корневая модель, internal/ui/app.go).
 package ui
 
 import (
@@ -21,11 +25,11 @@ import (
 	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
-// treeKind различает вид строки дерева: группа, личное пространство
-// человека или проект. Личное пространство — отдельный вид, а не группа с
-// тем же именем: у него другой адрес в API (Namespace{Kind: NamespaceUser})
-// и другой смысл, и подмена одного другим рано или поздно показала бы чужие
-// проекты.
+// treeKind различает вид строки дерева: хост (корень), группа, личное
+// пространство человека или проект. Личное пространство — отдельный вид, а
+// не группа с тем же именем: у него другой адрес в API (Namespace{Kind:
+// NamespaceUser}) и другой смысл, и подмена одного другим рано или поздно
+// показала бы чужие проекты.
 type treeKind int
 
 const (
@@ -40,18 +44,36 @@ const (
 	// на ней не делает ничего) и не участвует в фильтре; обновление (g) на
 	// ней повторяет запрос узла, под которым она стоит.
 	treeKindNote
+	// treeKindHost — корень дерева на один ключ (Фаза 14, план 14-02, MENU-
+	// 03): дописан в конец перечисления, чтобы не двигать существующие
+	// значения. Отдельный вид, а не группа: у хоста нет ни пространства
+	// имён, ни адреса в API — его дети берутся не одним запросом, а двумя
+	// (личное пространство человека и группы верхнего уровня), ровно как
+	// раньше собирался корень целиком.
+	treeKindHost
 )
 
 // treeRow — одна строка дерева: вид, глубина вложенности, отображаемое имя,
 // полный путь, пространство имён (для группы/личного пространства — чем
-// спрашивать его проекты), сама доменная группа/проект и признаки
-// раскрытости/загрузки детей.
+// спрашивать его проекты), сама доменная группа/проект, хост владельца,
+// приписка и признаки раскрытости/загрузки детей.
 type treeRow struct {
 	Kind     treeKind
 	Depth    int
 	Name     string
 	FullPath string
 	NS       provider.Namespace
+
+	// Host — хост, которому принадлежит узел (Фаза 14, план 14-02):
+	// наследуется детьми при сборке (loadChildren ниже). Клиент, которым
+	// спрашивается узел, выбирается по этому полю, а не по полю модели —
+	// узел без хоста был бы узлом, который некому спросить.
+	Host string
+	// Meta — приглушённая приписка справа от имени; заполняется только у
+	// корневой строки-хоста, куда переезжает имя пользователя этого хоста
+	// (задача 2, internal/ui/app.go) — заголовок кадра не может назвать
+	// один хост, когда их несколько.
+	Meta string
 
 	Group   provider.Group
 	Project provider.Project
@@ -60,22 +82,57 @@ type treeRow struct {
 	ChildrenSet bool
 }
 
-// FilterValue отдаёт полный путь: человек ищет по пути, а не по одному
-// сегменту. У строки-объяснения пути нет вовсе — она отдаёт пустое значение
-// и потому не всплывает в отфильтрованном списке как «найденный проект».
+// FilterValue отдаёт то, по чему человек ищет строку: полный путь для
+// группы/проекта/личного пространства, хост для строки-хоста (у неё пути
+// нет). У строки-объяснения нет ни того, ни другого — она отдаёт пустое
+// значение и потому не всплывает в отфильтрованном списке как «найденный
+// проект».
 func (r treeRow) FilterValue() string {
-	if r.Kind == treeKindNote {
+	switch r.Kind {
+	case treeKindNote:
 		return ""
+	case treeKindHost:
+		return r.Host
 	}
 	return r.FullPath
 }
 
 // noteRow собирает строку-объяснение под узлом owner — единственное место
-// сборки такой строки в экране. Путь узла строка носит с собой не для показа
-// (рисуется только Name), а чтобы обновление на ней (g) повторяло запрос
-// ТОГО узла, про который она говорит, а не корня дерева.
+// сборки такой строки в экране. Путь и хост узла строка носит с собой не для
+// показа (рисуется только Name), а чтобы её ключ (nodeKey ниже) совпадал с
+// ключом владельца: обновление на ней (g) повторяет запрос ТОГО узла, про
+// который она говорит, а не постороннего.
 func noteRow(owner treeRow, text string) treeRow {
-	return treeRow{Kind: treeKindNote, Depth: owner.Depth + 1, Name: text, FullPath: owner.FullPath}
+	return treeRow{Kind: treeKindNote, Depth: owner.Depth + 1, Host: owner.Host, Name: text, FullPath: owner.FullPath}
+}
+
+// hostNodeSep — разделитель ключа узла (nodeKey ниже) между хостом и полным
+// путём: символ вне печатаемого диапазона, которого нет ни в нормализованном
+// хосте (token.NormalizeHost), ни в полном пути проекта или группы GitLab —
+// склейка двух частей не создаёт коллизий. Тот же приём, которым уже
+// склеиваются ключи кэша в internal/browse/browse.go.
+const hostNodeSep = "\x00"
+
+// hostKey — ключ строки-хоста: единственная формула для корня во всём
+// проекте, используется и картами модели, и картой доступа корневой модели
+// (internal/ui/app.go, opensHostCmd).
+func hostKey(host string) string {
+	return host + hostNodeSep
+}
+
+// nodeKey — единственная формула ключа узла дерева во всём проекте (Фаза 14,
+// план 14-02): склеивает хост владельца и полный путь узла. Без хоста в
+// ключе две группы с одинаковым путём на разных инстансах делили бы одну
+// запись в карте детей, и проекты чужого инстанса показывались бы под своей
+// группой — тот же класс дефекта, что подмена личного пространства группой
+// (см. комментарий treeKindUser выше). Ключ строки-хоста — hostKey от её
+// хоста; у строки-объяснения (noteRow выше) ключ автоматически совпадает с
+// ключом её владельца, потому что она носит его же Host и FullPath.
+func nodeKey(row treeRow) string {
+	if row.Kind == treeKindHost {
+		return hostKey(row.Host)
+	}
+	return row.Host + hostNodeSep + row.FullPath
 }
 
 // treeDelegate — отрисовщик строки дерева для компонента списка Bubbles:
@@ -129,6 +186,9 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	case treeKindProject:
 		glyph = strings.Repeat(" ", textwidth.Of(GlyphCollapsed))
 	default:
+		// Хост (Фаза 14) рисуется тем же символом свёрнутой/раскрытой
+		// ветки, что и группа: у него тот же вопрос «раскрыт ли он», просто
+		// без отступа — Depth строки-хоста всегда 0.
 		if row.Expanded {
 			glyph = GlyphExpanded
 		} else {
@@ -136,25 +196,40 @@ func (d treeDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		}
 	}
 
-	width := m.Width() - textwidth.Of(indent) - textwidth.Of(glyph) - RowIconGap - 2
+	// meta — приглушённая приписка справа от имени (Фаза 14): у строки-
+	// хоста сюда попадает имя пользователя этого хоста, как только доступ к
+	// нему получен; у остальных строк Meta всегда пуста.
+	meta := ""
+	if row.Meta != "" {
+		meta = "  " + row.Meta
+	}
+
+	width := m.Width() - textwidth.Of(indent) - textwidth.Of(glyph) - RowIconGap - textwidth.Of(meta) - 2
 	name := Truncate(row.Name, width)
 	line := indent + glyph + strings.Repeat(" ", RowIconGap) + name
 
 	if selected {
-		line = d.theme.Selected.Render(line + " " + GlyphCursor)
+		line = d.theme.Selected.Render(line + meta + " " + GlyphCursor)
 	} else {
-		line = d.theme.Text.Render(line)
+		line = d.theme.Text.Render(line) + d.theme.Muted.Render(meta)
 	}
 	fmt.Fprint(w, line)
 }
 
-// treeModel — экран дерева: пакет обхода, хост, пользователь, компонент
-// списка Bubbles, корневые строки, дети по полному пути родителя, признаки
-// полноты/кэша/времени по тому же ключу, правая панель (пайплайны) и фокус.
+// treeModel — экран дерева: перечень хостов (порядок корней), доступ по
+// хосту, компонент списка Bubbles, корневые строки, дети по ключу узла,
+// признаки полноты/кэша/времени по тому же ключу, правая панель (пайплайны)
+// и фокус.
 type treeModel struct {
-	b    *browse.Client
-	host string
-	user provider.User
+	// hosts — перечень хостов в порядке корней (Фаза 14, план 14-02): столько
+	// корней, сколько ключей в файле (MENU-03) — собираются синхронно, без
+	// единого запроса в сеть.
+	hosts []string
+	// access — доступ по хосту: заполняется по мере раскрытия корней (см.
+	// needHostMsg/hostReadyMsg ниже), а не целиком при входе. Тип hostAccess
+	// объявлен здесь, а заполняет карту корневая модель (internal/ui/app.go)
+	// — единственный сборщик клиента обхода остаётся там.
+	access map[string]hostAccess
 
 	list list.Model
 
@@ -165,18 +240,17 @@ type treeModel struct {
 	cached    map[string]bool
 	fetchedAt map[string]time.Time
 
-	// loadErr — отказ загрузки КОРНЯ: только он способен оставить экран без
-	// дерева вовсе, и только он замещает тело панели.
-	loadErr string
-	// nodeErr — отказ загрузки конкретного узла по его ключу: причина вместе
-	// с адресом запроса, пришедшая от провайдера. Отказ узла больше не
-	// стирает дерево с экрана — он показывается строкой под самим узлом
-	// (rebuild ниже), потому что «этот узел не открылся» и «списка нет» —
-	// разные события, и одинаково выглядеть они не должны.
+	// nodeErr — отказ загрузки конкретного узла по его ключу (nodeKey): причина
+	// вместе с адресом запроса, пришедшая от провайдера. Отказ узла не стирает
+	// дерево с экрана — он показывается строкой под самим узлом (rebuild
+	// ниже), потому что «этот узел не открылся» и «списка нет» — разные
+	// события, и одинаково выглядеть они не должны. Тот же приём обслуживает
+	// и отказ доступа к хосту целиком (internal/ui/app.go, openHostCmd) — его
+	// ключ узла — hostKey хоста, и причина ложится под сам корень.
 	nodeErr map[string]string
 	loading bool
-	// pending — ключ узла (пустая строка — корень), для которого сейчас
-	// идёт загрузка; повторное обновление того же узла, пока она не
+	// pending — ключ узла, для которого сейчас идёт загрузка (или ожидается
+	// доступ к хосту); повторное обновление того же узла, пока она не
 	// завершилась, игнорируется.
 	pending map[string]bool
 
@@ -194,6 +268,20 @@ type treeModel struct {
 	keys  KeyMap
 }
 
+// hostAccess — доступ к одному хосту дерева репозиториев (Фаза 14, план
+// 14-02): значение интерфейса провайдера, клиент обхода поверх него и
+// пользователь, спрошенный CurrentUser. Тип объявлен здесь (дерево описывает
+// форму доступа, которым спрашивает узлы), а заполняет карту доступа
+// корневая модель (internal/ui/app.go) — единственный сборщик клиента
+// обхода остаётся там (инвариант фазы 10): второй сборщик в дереве означал
+// бы два кэша списков на один хост и удвоенный трафик к чужому серверу.
+type hostAccess struct {
+	Host     string
+	Provider provider.Provider
+	Client   *browse.Client
+	User     provider.User
+}
+
 type treeFocus int
 
 const (
@@ -201,38 +289,63 @@ const (
 	focusRuns
 )
 
-// Сообщения экрана дерева.
+// Сообщения экрана дерева. Поле «родитель» переименовано в «ключ узла»
+// (key, Фаза 14, план 14-02): после введения nodeKey это уже не путь, и
+// старое имя врало бы читателю.
 type treeLoadedMsg struct {
-	parent   string
+	key      string
 	rows     []treeRow
 	complete bool
 	cached   bool
 	fetched  time.Time
 }
-// treeFailedMsg — узел parent не загрузился. reason приходит уже очищенным
-// (provider.SafeText): текст ошибки провайдера несёт кусок тела ответа
-// чужого сервера, а отсюда он уходит и в строку дерева, и в строку
+
+// treeFailedMsg — узел с ключом key не загрузился. reason приходит уже
+// очищенным (provider.SafeText): текст ошибки провайдера несёт кусок тела
+// ответа чужого сервера, а отсюда он уходит и в строку дерева, и в строку
 // подсказки — управляющая последовательность в нём перерисовала бы кадр
-// (T-10-03).
+// (T-10-03). Тем же сообщением приходит и отказ доступа к хосту целиком
+// (internal/ui/app.go, openHostCmd) — второй формы отказа узла в проекте
+// нет.
 type treeFailedMsg struct {
-	parent string
+	key    string
 	reason string
 }
 
-// projectPickedMsg — проект под курсором дерева: правая панель пайплайнов
-// слушает это сообщение и решает сама, запрашивать ли пайплайны заново
-// (дребезг, «уже показан» — internal/ui/pipelines.go, setProject), а
-// корневая модель — держать ли в ленте колонку пайплайнов (Фаза 13,
-// internal/ui/app.go).
+// needHostMsg — дерево просит корневую модель открыть хост (Фаза 14, план
+// 14-02): собирать клиента обхода умеет ровно одно место проекта —
+// корневая модель (инвариант фазы 10), и заводить второй сборщик в дереве
+// значило бы два кэша списков на один хост и удвоенный трафик к чужому
+// серверу.
+type needHostMsg struct {
+	host string
+}
+
+// hostReadyMsg — готовый доступ к хосту, собранный корневой моделью
+// (internal/ui/app.go, openHostCmd).
+type hostReadyMsg struct {
+	access hostAccess
+}
+
+// projectPickedMsg — проект под курсором дерева вместе с хостом, которому он
+// принадлежит: правая панель пайплайнов слушает это сообщение и решает сама,
+// запрашивать ли пайплайны заново (дребезг, «уже показан» —
+// internal/ui/pipelines.go, setProject), а корневая модель — держать ли в
+// ленте колонку пайплайнов (Фаза 13, internal/ui/app.go).
 type projectPickedMsg struct {
+	host    string
 	project provider.Project
 }
 
-// newTreeModel собирает экран дерева: компонент списка Bubbles с включённой
-// фильтрацией и выключенными собственными заголовком, строкой состояния и
-// справкой — второй заголовок внутри панели был бы мусором, кадр собирает
-// корневая модель.
-func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme, keys KeyMap) treeModel {
+// newTreeModel собирает дерево синхронно из перечня хостов hosts — по
+// строке-корню на хост, без единого запроса в сеть (Фаза 14, план 14-02):
+// перечень ключей известен из файла, и сеть здесь не нужна. Доступ first —
+// доступ первого хоста, уже проверенный заставкой (CurrentUser), кладётся в
+// карту сразу, а его имя пользователя уходит в приписку первой корневой
+// строки; возвращается команда загрузки детей этого хоста — человек,
+// выбравший в меню репозитории, обязан сразу увидеть свои группы, а не
+// пустой список из одной строки.
+func newTreeModel(hosts []string, first hostAccess, theme Theme, keys KeyMap) (treeModel, tea.Cmd) {
 	focused := new(bool)
 	l := list.New(nil, treeDelegate{theme: theme, focused: focused}, 0, 0)
 	l.SetFilteringEnabled(true)
@@ -240,8 +353,9 @@ func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
 
-	return treeModel{
-		b: b, host: host, user: user,
+	m := treeModel{
+		hosts:       hosts,
+		access:      map[string]hostAccess{},
 		list:        l,
 		listFocused: focused,
 		children:    map[string][]treeRow{},
@@ -250,10 +364,34 @@ func newTreeModel(b *browse.Client, host string, user provider.User, theme Theme
 		fetchedAt:   map[string]time.Time{},
 		pending:     map[string]bool{},
 		nodeErr:     map[string]string{},
-		runs:        newPipelinePanel(b, theme),
+		runs:        newPipelinePanel(theme),
 		theme:       theme,
 		keys:        keys,
 	}
+
+	roots := make([]treeRow, 0, len(hosts))
+	for _, h := range hosts {
+		roots = append(roots, treeRow{Kind: treeKindHost, Host: h, Name: h})
+	}
+	m.roots = roots
+	// Запись о полноте выставляется тут же: перечень корней уже известен
+	// целиком (собран из файла ключей выше), и «тяну список…» над уже
+	// готовым перечнем было бы той же поломкой, которую фаза 10 уже чинила
+	// признаком «корень ещё не отвечал» — только теперь применительно к
+	// перечню, который в сеть вообще не ходит.
+	m.complete[""] = true
+	m.rebuild()
+
+	var cmd tea.Cmd
+	if len(hosts) > 0 {
+		host := hosts[0]
+		m.access[host] = first
+		if row, ok := m.findRow(hostKey(host)); ok {
+			cmd = m.loadChildren(row, false)
+		}
+	}
+
+	return m, cmd
 }
 
 // setSize передаёт моделям обеих колонок дерева (репозитории, пайплайны)
@@ -289,45 +427,43 @@ func (m treeModel) setColumnFocus(id columnID) treeModel {
 	return m
 }
 
-// loadRoot собирает корень дерева из двух источников: личное пространство
-// человека первым (мокап idea-0.3.0 §1) и группы верхнего уровня, видимые
-// токену.
-func (m treeModel) loadRoot(refresh bool) tea.Cmd {
-	b, user := m.b, m.user
-	return func() tea.Msg {
-		ctx := context.Background()
-
-		userRow := treeRow{
-			Kind: treeKindUser, Name: user.Name, FullPath: user.Username,
-			NS: provider.Namespace{Kind: provider.NamespaceUser, Path: user.Username},
-		}
-		rows := []treeRow{userRow}
-
-		groups, err := b.Groups(ctx, "", refresh)
-		if err != nil {
-			return treeFailedMsg{parent: "", reason: provider.SafeText(err.Error())}
-		}
-		for _, g := range groups.Items {
-			rows = append(rows, treeRow{
-				Kind: treeKindGroup, Name: g.Name, FullPath: g.FullPath, Group: g,
-				NS: provider.Namespace{Kind: provider.NamespaceGroup, Path: g.FullPath},
-			})
-		}
-
-		return treeLoadedMsg{parent: "", rows: rows, complete: groups.Complete, cached: groups.Cached, fetched: groups.FetchedAt}
-	}
-}
-
-// loadChildren запрашивает детей группы или личного пространства: сначала
-// подгруппы (только для групп — у личного пространства их нет), затем
-// проекты, без включения проектов подгрупп — подгруппы уже отдельные узлы
-// дерева.
+// loadChildren запрашивает детей узла клиентом ЕГО хоста (Фаза 14, план
+// 14-02): клиент берётся из карты доступа по хосту СТРОКИ, а не из поля
+// модели — второго способа выбрать клиента в файле нет. Для строки-хоста —
+// личное пространство человека и группы верхнего уровня (тело прежней
+// loadRoot, которой в проекте больше нет: корень дерева синхронен и в сеть
+// не ходит). Для группы — сначала подгруппы (только для групп — у личного
+// пространства их нет), затем проекты, без включения проектов подгрупп —
+// подгруппы уже отдельные узлы дерева. Для личного пространства — только
+// проекты.
 func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
-	b := m.b
+	access := m.access[row.Host]
+	b := access.Client
+	host := row.Host
 	depth := row.Depth + 1
 	return func() tea.Msg {
 		ctx := context.Background()
-		parent := row.FullPath
+		key := nodeKey(row)
+
+		if row.Kind == treeKindHost {
+			userRow := treeRow{
+				Kind: treeKindUser, Depth: depth, Host: host, Name: access.User.Name, FullPath: access.User.Username,
+				NS: provider.Namespace{Kind: provider.NamespaceUser, Path: access.User.Username},
+			}
+			rows := []treeRow{userRow}
+
+			groups, err := b.Groups(ctx, "", refresh)
+			if err != nil {
+				return treeFailedMsg{key: key, reason: provider.SafeText(err.Error())}
+			}
+			for _, g := range groups.Items {
+				rows = append(rows, treeRow{
+					Kind: treeKindGroup, Depth: depth, Host: host, Name: g.Name, FullPath: g.FullPath, Group: g,
+					NS: provider.Namespace{Kind: provider.NamespaceGroup, Path: g.FullPath},
+				})
+			}
+			return treeLoadedMsg{key: key, rows: rows, complete: groups.Complete, cached: groups.Cached, fetched: groups.FetchedAt}
+		}
 
 		var rows []treeRow
 		complete := true
@@ -337,11 +473,11 @@ func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
 		if row.Kind == treeKindGroup {
 			sub, err := b.Groups(ctx, row.FullPath, refresh)
 			if err != nil {
-				return treeFailedMsg{parent: parent, reason: provider.SafeText(err.Error())}
+				return treeFailedMsg{key: key, reason: provider.SafeText(err.Error())}
 			}
 			for _, g := range sub.Items {
 				rows = append(rows, treeRow{
-					Kind: treeKindGroup, Depth: depth, Name: g.Name, FullPath: g.FullPath, Group: g,
+					Kind: treeKindGroup, Depth: depth, Host: host, Name: g.Name, FullPath: g.FullPath, Group: g,
 					NS: provider.Namespace{Kind: provider.NamespaceGroup, Path: g.FullPath},
 				})
 			}
@@ -352,10 +488,10 @@ func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
 
 		pr, err := b.Projects(ctx, row.NS, refresh)
 		if err != nil {
-			return treeFailedMsg{parent: parent, reason: provider.SafeText(err.Error())}
+			return treeFailedMsg{key: key, reason: provider.SafeText(err.Error())}
 		}
 		for _, p := range pr.Items {
-			rows = append(rows, treeRow{Kind: treeKindProject, Depth: depth, Name: p.Name, FullPath: p.FullPath, Project: p})
+			rows = append(rows, treeRow{Kind: treeKindProject, Depth: depth, Host: host, Name: p.Name, FullPath: p.FullPath, Project: p})
 		}
 		complete = complete && pr.Complete
 		cached = cached || pr.Cached
@@ -363,7 +499,7 @@ func (m treeModel) loadChildren(row treeRow, refresh bool) tea.Cmd {
 			fetched = pr.FetchedAt
 		}
 
-		return treeLoadedMsg{parent: parent, rows: rows, complete: complete, cached: cached, fetched: fetched}
+		return treeLoadedMsg{key: key, rows: rows, complete: complete, cached: cached, fetched: fetched}
 	}
 }
 
@@ -371,40 +507,50 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case treeLoadedMsg:
 		m.loading = false
-		delete(m.pending, msg.parent)
-		delete(m.nodeErr, msg.parent)
-		m.complete[msg.parent] = msg.complete
-		m.cached[msg.parent] = msg.cached
-		m.fetchedAt[msg.parent] = msg.fetched
-		if msg.parent == "" {
-			m.loadErr = ""
-			m.roots = msg.rows
-		} else {
-			// Запись заводится и для пустого ответа: «узел загружен, детей
-			// ноль» и «узел ещё не загружен» — разные состояния, и различает
-			// их именно наличие записи (rebuild ниже читает его же).
-			m.children[msg.parent] = msg.rows
-			m.setExpanded(msg.parent, true)
-		}
+		delete(m.pending, msg.key)
+		delete(m.nodeErr, msg.key)
+		m.complete[msg.key] = msg.complete
+		m.cached[msg.key] = msg.cached
+		m.fetchedAt[msg.key] = msg.fetched
+		// Запись заводится и для пустого ответа: «узел загружен, детей
+		// ноль» и «узел ещё не загружен» — разные состояния, и различает
+		// их именно наличие записи (rebuild ниже читает его же).
+		m.children[msg.key] = msg.rows
+		m.setExpanded(msg.key, true)
 		m.rebuild()
 		return m, nil
 
 	case treeFailedMsg:
 		m.loading = false
-		delete(m.pending, msg.parent)
-		m.nodeErr[msg.parent] = msg.reason
-		if msg.parent == "" {
-			// Отказ корня — дерева нет вовсе, показывать причину больше негде,
-			// кроме тела панели.
-			m.loadErr = msg.reason
-		} else {
-			// Отказ узла раскрывает узел, чтобы причина встала строкой прямо
-			// под ним. Дети при этом НЕ появляются (ChildrenSet остаётся
-			// ложным, пока в children нет записи), поэтому повторное ⏎ на узле
-			// пробует загрузку заново, а не «сворачивает пустоту».
-			m.setExpanded(msg.parent, true)
+		delete(m.pending, msg.key)
+		m.nodeErr[msg.key] = msg.reason
+		// Отказ узла раскрывает узел, чтобы причина встала строкой прямо
+		// под ним (в том числе и под корнем-хостом, если отказал сам доступ
+		// к нему, internal/ui/app.go). Дети при этом НЕ появляются
+		// (ChildrenSet остаётся ложным, пока в children нет записи), поэтому
+		// повторное ⏎/g на узле пробует загрузку заново, а не «сворачивает
+		// пустоту».
+		m.setExpanded(msg.key, true)
+		m.rebuild()
+		return m, nil
+
+	case hostReadyMsg:
+		// Доступ к хосту получен (internal/ui/app.go, openHostCmd): доступ
+		// кладётся в карту, имя пользователя — в приписку корневой строки
+		// этого хоста, признак ожидания снимается, и запускается загрузка
+		// детей хоста — человек не должен нажимать ⏎ дважды.
+		m.access[msg.access.Host] = msg.access
+		key := hostKey(msg.access.Host)
+		delete(m.pending, key)
+		for i := range m.roots {
+			if m.roots[i].Kind == treeKindHost && m.roots[i].Host == msg.access.Host {
+				m.roots[i].Meta = msg.access.User.Name
+			}
 		}
 		m.rebuild()
+		if row, ok := m.findRow(key); ok {
+			return m, m.loadChildren(row, false)
+		}
 		return m, nil
 
 	case pipelineDebounceMsg, pipelinesLoadedMsg, pipelinesFailedMsg:
@@ -414,7 +560,8 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 
 	case projectPickedMsg:
 		var cmd tea.Cmd
-		m.runs, cmd = m.runs.setProject(msg.project)
+		access := m.access[msg.host]
+		m.runs, cmd = m.runs.setProject(msg.host, access.Client, msg.project)
 		return m, cmd
 
 	case tea.PasteMsg:
@@ -470,12 +617,16 @@ func (m treeModel) update(msg tea.Msg) (treeModel, tea.Cmd) {
 
 // openDeeper — открыть то, что под курсором дерева (колонка репозиториев,
 // часть общего контракта колонки, Фаза 13): на строке-объяснении ничего не
-// происходит; на группе или личном пространстве переключается раскрытость
-// и, если дети ещё не загружены, запускается их загрузка — раскрытие ветки
-// это углубление ВНУТРИ колонки репозиториев, а не переход в колонку
-// правее; на проекте отдаётся проект правой панели сообщением выбранного
-// проекта — корневая модель превратит его в открытие колонки пайплайнов.
-// Постановка фокуса на правую панель отсюда убрана: фокус раздаёт лента
+// происходит; на проекте отдаётся проект (вместе с его хостом) правой
+// панели сообщением выбранного проекта — корневая модель превратит его в
+// открытие колонки пайплайнов; на строке-хоста, к которой ещё нет доступа,
+// поднимается признак ожидания по ключу узла и уходит просьба открыть хост
+// (needHostMsg) корневой модели — второй сборщик клиента обхода в дереве не
+// заводится (инвариант фазы 10); на хосте с доступом, на группе или на
+// личном пространстве переключается раскрытость и, если дети ещё не
+// загружены, запускается их загрузка — раскрытие ветки это углубление
+// ВНУТРИ колонки репозиториев, а не переход в колонку правее. Постановка
+// фокуса на правую панель отсюда убрана: фокус раздаёт лента
 // (setColumnFocus выше).
 func (m treeModel) openDeeper() (treeModel, tea.Cmd) {
 	row, ok := m.selected()
@@ -483,72 +634,91 @@ func (m treeModel) openDeeper() (treeModel, tea.Cmd) {
 		return m, nil
 	}
 	// Строка-объяснение ничего не открывает. Без этой проверки ⏎ на ней
-	// уходил бы загружать узел с пустым путём — то есть корень — и стирал бы
-	// дерево отказом разбора пустого пространства имён.
+	// уходил бы загружать посторонний узел.
 	if row.Kind == treeKindNote {
 		return m, nil
 	}
 	if row.Kind == treeKindProject {
-		project := row.Project
-		return m, func() tea.Msg { return projectPickedMsg{project: project} }
+		project, host := row.Project, row.Host
+		return m, func() tea.Msg { return projectPickedMsg{project: project, host: host} }
+	}
+
+	key := nodeKey(row)
+
+	if row.Kind == treeKindHost {
+		if _, has := m.access[row.Host]; !has {
+			if m.pending[key] {
+				return m, nil
+			}
+			m.pending[key] = true
+			host := row.Host
+			return m, func() tea.Msg { return needHostMsg{host: host} }
+		}
 	}
 
 	if !row.ChildrenSet {
-		if m.pending[row.FullPath] {
+		if m.pending[key] {
 			return m, nil
 		}
-		m.pending[row.FullPath] = true
+		m.pending[key] = true
 		m.loading = true
 		return m, m.loadChildren(row, false)
 	}
 
-	m.setExpanded(row.FullPath, !row.Expanded)
+	m.setExpanded(key, !row.Expanded)
 	m.rebuild()
 	return m, nil
 }
 
 // refreshCursor — обновление узла под курсором, минуя кэш; зажатая клавиша
-// не превращается в очередь запросов.
+// не превращается в очередь запросов. Ветвь «узел не найден — обновляем
+// корень» из проекта ушла вместе с loadRoot (Фаза 14, план 14-02): перечень
+// корней приходит из файла ключей, а не из сети, и обновлять в нём нечего.
+// На строке-хосте без доступа обновление ведёт себя как открытие — просит
+// доступ; с доступом — повторяет запрос его детей.
 func (m treeModel) refreshCursor() (treeModel, tea.Cmd) {
 	row, ok := m.selected()
 	// Строка-объяснение узлом не является: обновление на ней повторяет
-	// запрос того узла, под которым она стоит (путь узла она носит с собой).
-	// Не найден — обновляется корень; узлом с пустым путём строка-объяснение
-	// не притворяется никогда.
+	// запрос того узла, под которым она стоит (её ключ совпадает с ключом
+	// владельца, noteRow выше).
 	if ok && row.Kind == treeKindNote {
-		row, ok = m.findRow(row.FullPath)
+		row, ok = m.findRow(nodeKey(row))
 	}
-	nodeKey := ""
-	if ok {
-		nodeKey = row.FullPath
-	}
-	if m.pending[nodeKey] {
+	if !ok {
 		return m, nil
 	}
-	m.pending[nodeKey] = true
-	m.loading = true
-	if !ok || nodeKey == "" {
-		return m, m.loadRoot(true)
+	key := nodeKey(row)
+	if m.pending[key] {
+		return m, nil
 	}
+	if row.Kind == treeKindHost {
+		if _, has := m.access[row.Host]; !has {
+			m.pending[key] = true
+			host := row.Host
+			return m, func() tea.Msg { return needHostMsg{host: host} }
+		}
+	}
+	m.pending[key] = true
+	m.loading = true
 	return m, m.loadChildren(row, true)
 }
 
-// findRow ищет узел дерева по полному пути среди корней и уже загруженных
-// детей. Строки-объяснения из поиска исключены намеренно: они носят путь
-// СВОЕГО узла, и без исключения поиск нашёл бы саму строку-объяснение вместо
-// узла, про который она говорит.
-func (m treeModel) findRow(path string) (treeRow, bool) {
-	if path == "" {
+// findRow ищет узел дерева по его ключу (nodeKey) среди корней и уже
+// загруженных детей. Строки-объяснения из поиска исключены намеренно: их
+// ключ совпадает с ключом владельца, и без исключения поиск нашёл бы саму
+// строку-объяснение вместо узла, про который она говорит.
+func (m treeModel) findRow(key string) (treeRow, bool) {
+	if key == "" {
 		return treeRow{}, false
 	}
 	for _, r := range m.roots {
-		if r.Kind != treeKindNote && r.FullPath == path {
+		if r.Kind != treeKindNote && nodeKey(r) == key {
 			return r, true
 		}
 	}
 	for _, rows := range m.children {
 		for _, r := range rows {
-			if r.Kind != treeKindNote && r.FullPath == path {
+			if r.Kind != treeKindNote && nodeKey(r) == key {
 				return r, true
 			}
 		}
@@ -562,23 +732,23 @@ func (m treeModel) selected() (treeRow, bool) {
 	return row, ok
 }
 
-// onCursorMoved отдаёт проект под курсором правой панели через
-// projectPickedMsg, когда курсор встал на строку проекта — дребезг и «уже
-// загружен, запроса нет» решает сама панель (setProject).
+// onCursorMoved отдаёт проект под курсором (вместе с его хостом) правой
+// панели через projectPickedMsg, когда курсор встал на строку проекта —
+// дребезг и «уже загружен, запроса нет» решает сама панель (setProject).
 func (m treeModel) onCursorMoved() (treeModel, tea.Cmd) {
 	if row, ok := m.selected(); ok && row.Kind == treeKindProject {
-		project := row.Project
-		return m, func() tea.Msg { return projectPickedMsg{project: project} }
+		project, host := row.Project, row.Host
+		return m, func() tea.Msg { return projectPickedMsg{project: project, host: host} }
 	}
 	return m, nil
 }
 
-func (m *treeModel) setExpanded(path string, expanded bool) {
+func (m *treeModel) setExpanded(key string, expanded bool) {
 	set := func(rows []treeRow) bool {
 		for i := range rows {
-			if rows[i].FullPath == path {
+			if nodeKey(rows[i]) == key {
 				rows[i].Expanded = expanded
-				if _, ok := m.children[path]; ok || rows[i].Kind == treeKindProject {
+				if _, ok := m.children[key]; ok || rows[i].Kind == treeKindProject {
 					rows[i].ChildrenSet = true
 				}
 				return true
@@ -597,11 +767,11 @@ func (m *treeModel) setExpanded(path string, expanded bool) {
 	}
 }
 
-// rebuild собирает плоский список для компонента: корни, а за каждым
-// раскрытым узлом — его дети с глубиной на единицу больше, рекурсивно.
-// Дерево живёт как плоский список именно потому, что компонент списка
-// Bubbles умеет фильтровать и прокручивать плоский список, — своего дерева
-// с прокруткой и фильтром здесь не пишется (D-04).
+// rebuild собирает плоский список для компонента: корни (строки-хосты), а за
+// каждым раскрытым узлом — его дети с глубиной на единицу больше,
+// рекурсивно. Дерево живёт как плоский список именно потому, что компонент
+// списка Bubbles умеет фильтровать и прокручивать плоский список, — своего
+// дерева с прокруткой и фильтром здесь не пишется (D-04).
 func (m *treeModel) rebuild() {
 	var flat []treeRow
 	var walk func(rows []treeRow)
@@ -612,14 +782,16 @@ func (m *treeModel) rebuild() {
 				continue
 			}
 
-			kids, loaded := m.children[r.FullPath]
+			key := nodeKey(r)
+			kids, loaded := m.children[key]
 			walk(kids)
 
 			// Раскрытый узел, под которым ничего нет, обязан сказать, почему
 			// его пусто: отказ источника и честный ноль записей — разные
 			// события, и раньше оба выглядели как пустое место (это и была
-			// половина поломки «список репозиториев пуст»).
-			if reason := m.nodeErr[r.FullPath]; reason != "" {
+			// половина поломки «список репозиториев пуст»). Тот же приём
+			// показывает и отказ доступа к самому хосту (internal/ui/app.go).
+			if reason := m.nodeErr[key]; reason != "" {
 				flat = append(flat, noteRow(r, NoteSourceRefused(reason)))
 				continue
 			}
@@ -639,45 +811,19 @@ func (m *treeModel) rebuild() {
 
 // bodyView собирает тело колонки репозиториев (Фаза 13, план 13-02):
 // заголовок теперь рисует корневая модель (App.columnView) — здесь только
-// тело, которое заменяется честной строкой при первой загрузке, пустом
-// дереве или ошибке. focused решает, показывает ли список курсор инверсией
-// (treeDelegate.isFocused, через m.listFocused): вне фокуса ленты второго
-// курсора на экране быть не должно.
+// тело. Пустой перечень хостов — единственная причина, по которой корень
+// дерева может оказаться пуст (Фаза 14, план 14-02): сеть здесь ни при чём —
+// попасть на этот экран без ключей нельзя, потому что пункт меню недоступен
+// (menuModel.enabled), но честная ветвь остаётся ради самого факта пустого
+// состояния, а не ради достижимого пути. focused решает, показывает ли
+// список курсор инверсией (treeDelegate.isFocused, через m.listFocused): вне
+// фокуса ленты второго курсора на экране быть не должно.
 func (m treeModel) bodyView(width int, focused bool) string {
-	// «Корень ещё не отвечал» — это факт наличия записи о полноте, а не
-	// поднятый где-то признак загрузки: сама загрузка корня запускается
-	// корневой моделью (app.go, browseMsg), и m.loading там не поднимается —
-	// первый кадр из-за этого утверждал «ни одной группы и ни одного
-	// проекта» ещё до первого ответа API.
-	_, rootAnswered := m.complete[""]
-
-	var body string
-	switch {
-	case !rootAnswered && m.loadErr == "":
-		body = "тяну список…"
-	case m.loadErr != "" && len(m.roots) == 0:
-		// Причина замещает тело панели ТОЛЬКО когда дерева нет вовсе. Раньше
-		// любой отказ любого узла стирал уже показанное дерево с экрана —
-		// человек терял и то, что успело загрузиться, и место, где сломалось.
-		body = NoteSourceRefused(m.loadErr)
-	case len(m.roots) == 0:
-		body = NoteSourceEmpty()
-	default:
-		*m.listFocused = focused
-		body = m.list.View()
+	if len(m.roots) == 0 {
+		return NoteSourceEmpty()
 	}
-
-	parts := []string{body}
-	// «Не знаем» и «неполон» — разные вещи: до первого treeLoadedMsg карта
-	// пуста, и голое !m.complete[""] печатало под «тяну список…» строку
-	// «показаны первые 0 записей — список длиннее» (WR-09 обзора v0.3.0).
-	if loaded, known := m.complete[""]; known && !loaded {
-		parts = append(parts, m.theme.Muted.Render(fmt.Sprintf("показаны первые %d записей — список длиннее", len(m.roots))))
-	}
-	if m.cached[""] {
-		parts = append(parts, m.theme.Muted.Render(fmt.Sprintf("из кэша, %s назад", Ago(m.fetchedAt[""]))))
-	}
-	return strings.Join(parts, "\n")
+	*m.listFocused = focused
+	return m.list.View()
 }
 
 // columnView — тело ОДНОЙ колонки дерева без заголовка (Фаза 13, план
@@ -692,24 +838,24 @@ func (m treeModel) columnView(id columnID, width int, focused bool) string {
 }
 
 // cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): номер
-// выбранной строки списка и путь строки под курсором. Путь узла уже
-// уникален и уже используется как ключ во всех картах модели (findRow) —
-// второго ключа здесь не заводится. Пустое дерево (курсор ни на чём не
-// стоит) возвращает нулевые значения: запоминать в этом случае нечего.
+// выбранной строки списка и ключ узла (nodeKey — Фаза 14, план 14-02:
+// единственная формула ключа узла проекта, второй ключ здесь не заводится).
+// Пустое дерево (курсор ни на чём не стоит) возвращает нулевые значения:
+// запоминать в этом случае нечего.
 func (m treeModel) cursorAt() (int, string) {
 	if row, ok := m.selected(); ok {
-		return m.list.Index(), row.FullPath
+		return m.list.Index(), nodeKey(row)
 	}
 	return 0, ""
 }
 
 // withCursor — часть общего контракта колонки (Фаза 13, план 13-03):
-// сначала ищется узел по пути (m.findRow) — если он всё ещё существует,
+// сначала ищется узел по ключу (m.findRow) — если он всё ещё существует,
 // курсор списка встаёт на его позицию в уже пересобранном плоском списке;
 // не найден — курсор встаёт на index, прижатый к границам списка. Порядок
 // обязан быть именно таким: пересборка плоского списка после раскрытия узла
 // и после загрузки детей меняет номера строк, поэтому «помню номер» соврало
-// бы после первого же обновления — путь узла переживает перезагрузку, а
+// бы после первого же обновления — ключ узла переживает перезагрузку, а
 // номер строки нет.
 func (m treeModel) withCursor(index int, key string) treeModel {
 	items := m.list.Items()
@@ -720,7 +866,7 @@ func (m treeModel) withCursor(index int, key string) treeModel {
 	if key != "" {
 		if _, ok := m.findRow(key); ok {
 			for i, it := range items {
-				if row, ok := it.(treeRow); ok && row.Kind != treeKindNote && row.FullPath == key {
+				if row, ok := it.(treeRow); ok && row.Kind != treeKindNote && nodeKey(row) == key {
 					m.list.Select(i)
 					return m
 				}
@@ -738,25 +884,18 @@ func (m treeModel) withCursor(index int, key string) treeModel {
 }
 
 // hintText выбирает строку подсказки: при фокусе на правой панели — из её
-// пяти формулировок; при фокусе на дереве — из восьми формулировок дерева.
-// Подсказка всегда описывает следующий шаг того места, где человек сейчас
-// находится.
+// пяти формулировок; при фокусе на дереве — из формулировок дерева, включая
+// три состояния строки-хоста (Фаза 14, план 14-02).
 func (m treeModel) hintText() string {
 	if m.focus == focusRuns {
 		return m.runs.hintText()
 	}
 
 	switch {
-	case m.loading && len(m.roots) == 0:
-		return HintTreeLoading()
-	case m.loadErr != "":
-		return HintTreeFailed(m.loadErr)
 	case len(m.roots) == 0:
-		return HintTreeEmpty()
+		return HintTreeNoKeys()
 	case m.list.FilterState() == list.FilterApplied || m.list.FilterState() == list.Filtering:
 		return HintTreeFiltered(len(m.list.VisibleItems()))
-	case m.cached[""]:
-		return HintTreeStale(Ago(m.fetchedAt[""]))
 	}
 
 	if row, ok := m.selected(); ok {
@@ -767,6 +906,15 @@ func (m treeModel) hintText() string {
 			return HintTreeNote(row.Name)
 		case treeKindProject:
 			return HintTreeOpenProject(row.Name)
+		case treeKindHost:
+			switch {
+			case m.pending[hostKey(row.Host)]:
+				return HintTreeHostOpening(row.Host)
+			case row.Expanded:
+				return HintTreeHostCollapse(row.Host)
+			default:
+				return HintTreeHostExpand(row.Host)
+			}
 		default:
 			if row.Expanded {
 				return HintTreeCollapse(row.Name)
