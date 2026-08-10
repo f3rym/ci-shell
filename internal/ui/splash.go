@@ -74,17 +74,20 @@ type splashModel struct {
 
 	job provider.Job
 
-	// browsing, host, user, prov, hostsCount — режим обхода (Фаза 10,
-	// BROW-01; с Фазы 14 включается пунктом репозиториев меню, а не пустым
-	// подтверждением поля ввода): newSplashBrowse ставит browsing и host из
-	// перечня, пришедшего от меню, а проверка ответа API вместо метаданных
-	// джобы спрашивает CurrentUser и несёт готовое значение интерфейса
-	// провайдера дальше в browseMsg — второй раз токен не резолвится.
-	browsing   bool
-	host       string
-	user       provider.User
-	prov       provider.Provider
-	hostsCount int
+	// browsing, host, hosts, user, prov — режим обхода (Фаза 10, BROW-01; с
+	// Фазы 14 включается пунктом репозиториев меню, а не пустым
+	// подтверждением поля ввода): newSplashBrowse ставит browsing, host
+	// (первый хост, единственный, для которого идут проверки — опрашивать
+	// все хосты на входе нельзя, это отказ в обслуживании) и hosts (весь
+	// перечень, план 14-02) из перечня, пришедшего от меню, а проверка
+	// ответа API вместо метаданных джобы спрашивает CurrentUser и несёт
+	// готовое значение интерфейса провайдера дальше в browseMsg — второй раз
+	// токен не резолвится.
+	browsing bool
+	host     string
+	hosts    []string
+	user     provider.User
+	prov     provider.Provider
 
 	// failedIndex — индекс провалившейся проверки (Фаза 11): заставка
 	// повторяет ровно её, а не все три заново, после ответа на экране
@@ -127,13 +130,17 @@ type jobRefMsg struct {
 }
 
 // browseMsg — заставка успешно прошла все три проверки в режиме обхода
-// (пустой ввод, Фаза 10, BROW-01): хост, полученный пользователь и уже
-// созданное значение интерфейса провайдера уходят экрану дерева групп и
-// проектов. Второй раз токен здесь не резолвится и в сообщение не попадает —
-// дальше по интерфейсу едет значение, умеющее ходить в API, а не секрет.
+// (пункт репозиториев меню, Фаза 10, BROW-01; Фаза 14, план 14-02): хост
+// проверок, полученный пользователь и уже созданное значение интерфейса
+// провайдера уходят экрану дерева репозиториев вместе со ВСЕМ перечнем
+// хостов Hosts — после этого плана каждый ключ становится корнем дерева, а
+// не только проверенный первым. Второй раз токен здесь не резолвится и в
+// сообщение не попадает — дальше по интерфейсу едет значение, умеющее ходить
+// в API, а не секрет.
 type browseMsg struct {
-	Host     string
-	User     provider.User
+	Hosts []string
+	Host string
+	User provider.User
 	Provider provider.Provider
 }
 
@@ -164,22 +171,21 @@ func quitFromSplash() tea.Cmd {
 	return func() tea.Msg { return quitMsg{} }
 }
 
-// newSplashBrowse — конструктор режима обхода (Фаза 14, MENU-01/MENU-03):
-// принимает перечень хостов, ставит режим обхода, берёт первый хост,
-// запоминает длину перечня, ставит первую проверку в состояние «идёт» и
-// возвращает вместе с моделью команду — тик спиннера и первую проверку.
-// Перечень хостов сюда ПРИХОДИТ, а не читается: решение «ключи есть» уже
-// принято меню (internal/ui/menu.go, enabled), и второго чтения перечня в
-// проекте не появляется — меню зовёт эту функцию, только когда hosts
-// непуст. Приписка про первый хост из файла токенов остаётся до плана
-// 14-02, где все ключи становятся корнями дерева и она перестаёт быть
-// правдой.
+// newSplashBrowse — конструктор режима обхода (Фаза 14, MENU-01/MENU-03,
+// план 14-02): принимает перечень хостов, ставит режим обхода, берёт первый
+// хост для проверок, запоминает ВЕСЬ перечень (Hosts уходит дальше в
+// browseMsg — каждый ключ становится корнем дерева репозиториев), ставит
+// первую проверку в состояние «идёт» и возвращает вместе с моделью команду —
+// тик спиннера и первую проверку. Перечень хостов сюда ПРИХОДИТ, а не
+// читается: решение «ключи есть» уже принято меню (internal/ui/menu.go,
+// enabled), и второго чтения перечня в проекте не появляется — меню зовёт
+// эту функцию, только когда hosts непуст.
 func newSplashBrowse(hosts []string) (splashModel, tea.Cmd) {
 	m := newSplashModel()
 	m.asking = false
 	m.browsing = true
 	m.host = hosts[0]
-	m.hostsCount = len(hosts)
+	m.hosts = hosts
 	m.checks[checkTokenIndex].State = checkRunning
 	return m, tea.Batch(m.spin.Tick, m.checkToken())
 }
@@ -338,9 +344,9 @@ func (m splashModel) applyCheckResult(msg checkResultMsg) (splashModel, tea.Cmd)
 		return m, m.checkDocker()
 	case checkDockerIndex:
 		if m.browsing {
-			host, user, prov := m.host, m.user, m.prov
+			hosts, host, user, prov := m.hosts, m.host, m.user, m.prov
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
-				return browseMsg{Host: host, User: user, Provider: prov}
+				return browseMsg{Hosts: hosts, Host: host, User: user, Provider: prov}
 			})
 		}
 		ref, job := m.ref, m.job
@@ -517,11 +523,6 @@ func (m splashModel) view(t Theme) string {
 
 	for i, c := range m.checks {
 		b.WriteString(m.renderCheck(t, i, c))
-		b.WriteString("\n")
-	}
-
-	if m.browsing && m.hostsCount > 1 {
-		b.WriteString(t.Muted.Render(fmt.Sprintf("хост %s — первый из файла токенов; вставьте ссылку, чтобы открыть другой", m.host)))
 		b.WriteString("\n")
 	}
 

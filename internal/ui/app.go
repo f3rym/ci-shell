@@ -101,10 +101,11 @@ type App struct {
 	tree   treeModel
 	// treeReady — экран дерева собран newTreeModel (browseMsg), и его
 	// компонент списка Bubbles можно трогать. Признак явный, а не выведенный
-	// из browseClient: клиент обхода выставляется и при входе по прямой
-	// ссылке на джобу (jobRefMsg), где newTreeModel не вызывается вовсе, и
-	// вывод из него означал бы SetSize на нулевом list.Model при первом же
-	// изменении размера окна (CR-04 обзора v0.3.0).
+	// из непустоты access: доступ к хосту появляется в карте и при входе по
+	// прямой ссылке на джобу (jobRefMsg), где newTreeModel не вызывается
+	// вовсе, и вывод из одной лишь записи в карте означал бы SetSize на
+	// нулевом list.Model при первом же изменении размера окна (CR-04 обзора
+	// v0.3.0).
 	treeReady bool
 
 	// sessionGen — поколение сессии джобы: растёт на каждое открытие джобы.
@@ -124,14 +125,15 @@ type App struct {
 	// проводника выше — оверлей overlayHelp поверх ленты.
 	help helpModel
 
-	// browseClient, provider, host, user — состояние обхода (Фаза 10):
-	// browse.New вызывается ровно в двух местах этого файла (browseMsg и
-	// jobRefMsg) и нигде больше в пакете — единственное место, знающее, как
-	// собрать клиент обхода поверх значения интерфейса провайдера.
-	browseClient *browse.Client
-	provider     provider.Provider
-	host         string
-	user         provider.User
+	// access — доступ по хосту (Фаза 14, план 14-02): «текущий хост» как
+	// понятие корневой модели больше не существует — в один момент времени
+	// в ленте могут быть открыты проект одного инстанса и джоба другого, и
+	// единственное поле хоста неизбежно назвало бы не тот. Карта создаётся
+	// при сборке модели (Run ниже). browse.New по-прежнему вызывается ровно
+	// в двух местах этого файла (browseMsg и jobRefMsg через resolveBrowse)
+	// и нигде больше в пакете — единственное место, знающее, как собрать
+	// клиент обхода поверх значения интерфейса провайдера.
+	access map[string]hostAccess
 
 	keys KeyMap
 }
@@ -511,6 +513,28 @@ func resolveBrowse(host string) (provider.Provider, *browse.Client, error) {
 	return p, browse.New(p, host), nil
 }
 
+// openHostCmd — единственная точка открытия хоста (Фаза 14, план 14-02):
+// резолвит доступ поверх единственного сборщика клиента обхода
+// (resolveBrowse выше), спрашивает у API, кто мы (CurrentUser — нужно для
+// строки личного пространства в дереве), и возвращает либо готовый доступ,
+// либо отказ узла с ключом строки-хоста той же формулой, что и у дерева
+// (hostKey, internal/ui/tree.go) — второй формулы ключа здесь не появляется.
+// Запрос «кто мы» идёт именно здесь, а не в дереве: дерево клиента не
+// собирает, а без клиента спросить некого.
+func (a App) openHostCmd(host string) tea.Cmd {
+	return func() tea.Msg {
+		p, b, err := resolveBrowse(host)
+		if err != nil {
+			return treeFailedMsg{key: hostKey(host), reason: provider.SafeText(err.Error())}
+		}
+		user, err := p.CurrentUser(context.Background())
+		if err != nil {
+			return treeFailedMsg{key: hostKey(host), reason: provider.SafeText(err.Error())}
+		}
+		return hostReadyMsg{access: hostAccess{Host: host, Provider: p, Client: b, User: user}}
+	}
+}
+
 // Update — тело обёрнуто единственным перехватом проекта (guard,
 // internal/ui/recover.go, Фаза 12, POL-04). При перехваченной панике
 // возвращается ПРЕЖНЯЯ модель (та, что была до вызова, — половинчатое
@@ -717,12 +741,15 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// splashModel уже разобрал ссылку и получил метаданные джобы; клиент
 		// обхода собирается здесь же (входа с прямой ссылки без обхода не
 		// было в Фазе 9, и второго места сборки клиента заводить незачем).
+		// Доступ кладётся в карту по хосту ссылки (Фаза 14, план 14-02)
+		// вместо прежних четырёх полей; поведение при отказе (строка ошибки
+		// на экране списка джоб) не меняется.
 		loadErr := ""
 		var b *browse.Client
 		if p, bc, err := resolveBrowse(msg.ref.Host); err != nil {
 			loadErr = err.Error()
 		} else {
-			a.provider, a.browseClient, a.host = p, bc, msg.ref.Host
+			a.access[msg.ref.Host] = hostAccess{Host: msg.ref.Host, Provider: p, Client: bc}
 			b = bc
 		}
 		a.jobs = newJobsModel(msg.ref, msg.job, b, loadErr, a.theme, a.keys)
@@ -738,19 +765,37 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.jobs.load()
 
 	case browseMsg:
-		// Вход в браузер без ссылки (Фаза 10, BROW-01): значение интерфейса
-		// провайдера уже создано заставкой (CurrentUser), клиент обхода
-		// собирается здесь же поверх него.
-		a.provider = msg.Provider
-		a.host = msg.Host
-		a.user = msg.User
-		a.browseClient = browse.New(msg.Provider, msg.Host)
-		a.tree = newTreeModel(a.browseClient, a.host, a.user, a.theme, a.keys)
+		// Вход в браузер без ссылки (Фаза 10, BROW-01; Фаза 14, план 14-02):
+		// значение интерфейса провайдера первого хоста уже создано заставкой
+		// (CurrentUser), клиент обхода собирается здесь же поверх него и
+		// кладётся в карту доступа; дерево собирается ВСЕМ перечнем хостов
+		// сообщения (заставка проверяла только первый — опрашивать все хосты
+		// на входе нельзя, это отказ в обслуживании самому себе и чужим
+		// серверам), остальные корни раскрываются по требованию.
+		access := hostAccess{Host: msg.Host, Provider: msg.Provider, Client: browse.New(msg.Provider, msg.Host), User: msg.User}
+		a.access[msg.Host] = access
+		var cmd tea.Cmd
+		a.tree, cmd = newTreeModel(msg.Hosts, access, a.theme, a.keys)
 		a.treeReady = true
 		a.tree = a.tree.setSize(a.width, a.height)
 		a.ribbon = a.ribbon.reset(colRepos, "")
 		a.overlay = overlayNone
-		return a, a.tree.loadRoot(false)
+		return a, cmd
+
+	case needHostMsg:
+		// Дерево просит открыть хост (Фаза 14, план 14-02): собирать
+		// клиента обхода умеет только эта команда (openHostCmd выше).
+		return a, a.openHostCmd(msg.host)
+
+	case hostReadyMsg:
+		// Готовый доступ кладётся в карту корневой модели и НЕ перехватывает
+		// сообщение (нет return): оно обязано дойти и до treeModel.update
+		// тем же диспетчером, каким доезжает ответ проводника до открывшего
+		// его экрана. Доступ хранится в двух местах намеренно — корневой
+		// модели он нужен, чтобы открывать пайплайны, джобы и сессию,
+		// дереву — чтобы спрашивать узлы, а передавать его сообщением
+		// дешевле, чем заводить общую изменяемую карту на две модели.
+		a.access[msg.access.Host] = msg.access
 
 	case projectPickedMsg:
 		// Курсор дерева встал на проект: колонка пайплайнов открывается в
@@ -775,10 +820,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a = a.focusColumn()
 
 	case openPipelineMsg:
-		// Открытие пайплайна с правой панели экрана дерева (BROW-03):
-		// экрана джоб второго в проекте не появляется — тот же jobsModel,
-		// второй конструктор.
-		a.jobs = newJobsModelFromPipeline(a.browseClient, a.host, msg.project, msg.pipeline, a.theme, a.keys)
+		// Открытие пайплайна с правой панели экрана дерева (BROW-03; Фаза
+		// 14, план 14-02): клиент берётся из карты доступа по ХОСТУ
+		// СООБЩЕНИЯ, а не из состояния корневой модели — «текущего хоста»
+		// после этого плана не существует. Экрана джоб второго в проекте не
+		// появляется — тот же jobsModel, второй конструктор.
+		a.jobs = newJobsModelFromPipeline(a.access[msg.host].Client, msg.host, msg.project, msg.pipeline, a.theme, a.keys)
 		var dropped []columnID
 		// Уточнение заголовка — тем же приёмом, что и у входа по прямой
 		// ссылке выше (jobRefMsg): идентификатор пайплайна, ветка и
@@ -815,7 +862,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sessionGen++
 		bridge := NewBridge(a.sessionGen)
 		bridge.Attach(programSend)
-		sess := NewSession(a.jobs.ref, a.provider, msg.job, event.Emitter{Sink: bridge})
+		// Значение интерфейса провайдера берётся из карты доступа по хосту
+		// ссылки экрана списка джоб (Фаза 14, план 14-02) — состояние
+		// «текущий хост» корневой модели не существует.
+		sess := NewSession(a.jobs.ref, a.access[a.jobs.ref.Host].Provider, msg.job, event.Emitter{Sink: bridge})
 		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
 		a.job = a.job.setSize(a.height)
 		a = a.focusColumn()
@@ -1002,7 +1052,11 @@ func (a App) viewInner() string {
 			keybar = a.job.keyBar()
 			hintText = a.job.hintText()
 		case screenTree:
-			title = title + "  " + a.theme.Muted.Render(a.host+" · "+a.user.Name)
+			// Уточнение заголовка именем хоста и пользователя снято (Фаза
+			// 14, план 14-02): их место теперь в корневой строке своего
+			// хоста (internal/ui/tree.go, treeRow.Meta) — заголовок один на
+			// кадр, а хостов несколько, и любой выбранный им хост врал бы
+			// про остальные корни.
 			keybar = a.tree.keyBar()
 			hintText = a.tree.hintText()
 		}
@@ -1086,6 +1140,9 @@ func Run(ctx context.Context) error {
 		keys:   keys,
 		splash: newSplashModel(),
 		menu:   newMenuModel(theme, keys),
+		// access — доступ по хосту (Фаза 14, план 14-02): карта заводится
+		// пустой здесь, единственной точкой сборки корневой модели.
+		access: map[string]hostAccess{},
 		// Стартовый оверлей — меню (Фаза 14, MENU-01): единственная точка
 		// входа интерфейса. Меню стоит ПЕРЕД лентой ровно как заставка
 		// (Фаза 13, лента ещё пуста), но заставка теперь открывается из
