@@ -315,7 +315,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		steps := runner.Steps(jobCfg)
 		var outcome runner.Outcome
 		if len(steps) > 0 {
-			o, err := runner.RunSteps(cctx, c, steps, logBuf, logBuf, s.em)
+			o, err := runner.RunSteps(cctx, c, steps, stepMarkWriter{logBuf, 0}, logBuf, s.em)
 			if err != nil {
 				return fail(err)
 			}
@@ -442,12 +442,26 @@ func (s *Session) RetryStepCmd(ctx context.Context) tea.Cmd {
 		offset := s.outcome.FailedIndex - 1
 		slice := s.steps[offset : offset+1]
 
+		lb := s.logBuf()
+		// Граница перезапускаемого шага метится СРАЗУ здесь, до строк с
+		// cctx/cancel — не дожидаясь, пока RunSteps реально начнёт исполнение
+		// в контейнере и маркер долетит до markerScanner. Окно между
+		// нажатием R и первым маркером могло бы быть заметным (запуск docker
+		// exec, старт оболочки), и всё это время старый сегмент того же шага
+		// иначе оставался бы виден (LOG-06). s.outcome.FailedIndex —
+		// абсолютный номер перезапускаемого шага, проверка s.outcome.Failed
+		// == nil уже прошла строкой выше. Крючок stepBoundary, сработавший
+		// чуть позже изнутри RunSteps через обёртку с тем же offset ниже,
+		// пометит ТУ ЖЕ границу практически тем же значением ещё раз — это не
+		// гонка и не двойная работа: markStep — идемпотентная запись «текущая
+		// длина буфера», а не накопление.
+		lb.markStep(s.outcome.FailedIndex)
+
 		cctx, cancel := context.WithCancel(ctx)
 		s.setCancel(cancel)
 		defer s.clearCancel()
 
-		lb := s.logBuf()
-		outcome, err := runner.RunSteps(cctx, c, slice, lb, lb, s.em)
+		outcome, err := runner.RunSteps(cctx, c, slice, stepMarkWriter{lb, offset}, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runRetry, err: context.Canceled}
@@ -485,7 +499,11 @@ func (s *Session) RestCmd(ctx context.Context) tea.Cmd {
 		defer s.clearCancel()
 
 		lb := s.logBuf()
-		outcome, err := runner.RunSteps(cctx, c, slice, lb, lb, s.em)
+		// :rest продвигается по ещё не начинавшимся шагам — крючок
+		// stepBoundary расставляет им свежие границы по мере того, как
+		// RunSteps реально доходит до каждого маркера; отдельной опережающей
+		// пометки, как у R (RetryStepCmd), здесь не требуется.
+		outcome, err := runner.RunSteps(cctx, c, slice, stepMarkWriter{lb, offset}, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runRest, err: context.Canceled}
@@ -538,7 +556,11 @@ func (s *Session) CleanCmd(ctx context.Context) tea.Cmd {
 		}
 
 		lb := s.logBuf()
-		outcome, err := runner.CleanRun(cctx, s.d, s.spec, s.steps, s.owner, lb, lb, s.em)
+		// :clean, как и :rest, продвигается по шагам без опережающей
+		// пометки — свежие границы всех шагов расставляет крючок
+		// stepBoundary по мере того, как CleanRun доходит до каждого
+		// маркера в новом контейнере.
+		outcome, err := runner.CleanRun(cctx, s.d, s.spec, s.steps, s.owner, stepMarkWriter{lb, 0}, lb, s.em)
 		if err != nil {
 			if cctx.Err() != nil {
 				return runFinishedMsg{kind: runClean, err: context.Canceled}
@@ -1130,6 +1152,17 @@ func (s *Session) Log() []string {
 	return l.Lines()
 }
 
+// StepLog отдаёт сегмент лога, принадлежащий абсолютному номеру шага джобы
+// index — единственная публичная точка чтения лога одного шага (Фаза 15,
+// план 15-03, LOG-05/LOG-06). Пусто, пока PrepareCmd ещё не собрал буфер.
+func (s *Session) StepLog(index int) (lines []string, tail bool, started bool) {
+	l := s.logBuf()
+	if l == nil {
+		return nil, false, false
+	}
+	return l.stepLines(index)
+}
+
 // logBufferLines — предел ограниченного буфера лога джобы: сколько
 // последних строк вывода шагов и тяги образа он хранит.
 const logBufferLines = 4000
@@ -1149,11 +1182,48 @@ type logBuffer struct {
 	// строки в память — единственный маскировщик проекта (internal/ui/mask.go,
 	// Фаза 10), общий с панелью лога настоящего прогона.
 	mask secretMask
+	// stepStarts/stepClipped — границы шагов джобы в этом же буфере (Фаза 15,
+	// план 15-03, LOG-05/LOG-06). stepStarts[index] — номер строки в l.lines
+	// (та же единица измерения, что и у самих строк), с которой начинается
+	// вывод АБСОЛЮТНОГО номера шага джобы index, считая от единицы.
+	// stepClipped[index] — какие из этих границ уже теряли свои самые ранние
+	// строки вытеснением буфера (appendLine).
+	//
+	// Перезапуск шага (R) переписывает СВОЮ границу новым, более поздним
+	// значением — старая граница просто перестаёт упоминаться никаким
+	// чтением, и старый вывод того же шага перестаёт быть виден, хотя
+	// физически строки ещё могут лежать в буфере до вытеснения.
+	stepStarts  map[int]int
+	stepClipped map[int]bool
 }
 
 // newLogBuffer строит буфер с пределом limit и маской mask.
 func newLogBuffer(limit int, mask secretMask) *logBuffer {
 	return &logBuffer{limit: limit, mask: mask}
+}
+
+// stepMarkWriter — обёртка *logBuffer, переводящая ОТНОСИТЕЛЬНЫЙ номер
+// маркера шага (event.StepStarted.Index, считая от начала среза, переданного
+// в конкретный вызов RunSteps) в АБСОЛЮТНЫЙ номер шага джобы через offset
+// (Фаза 15, план 15-03, LOG-05/LOG-06). *logBuffer встраивается анонимным
+// полем — Write и вся остальная поверхность *logBuffer наследуются без
+// переопределения.
+//
+// Обёртка, а не метод прямо на *logBuffer: *logBuffer используется в
+// ЧЕТЫРЁХ разных вызовах RunSteps/CleanRun этого файла с РАЗНЫМ offset (0
+// для первого прогона и чистого прогона, s.outcome.FailedIndex-1 для
+// перезапуска шага, s.LastStep() для догона оставшихся) — сам буфер offset
+// не знает и знать не должен, это знание вызывающего кода на каждый
+// конкретный запуск.
+type stepMarkWriter struct {
+	*logBuffer
+	offset int
+}
+
+// MarkStep реализует runner.stepBoundary — единственное место перевода
+// относительного номера маркера в абсолютный номер шага джобы.
+func (w stepMarkWriter) MarkStep(relIndex int) {
+	w.logBuffer.markStep(w.offset + relIndex)
 }
 
 // Write реализует io.Writer: маскирует известные значения, копит неполные
@@ -1195,11 +1265,94 @@ func (l *logBuffer) note(line string) {
 // кадр и строку подсказки. Построчно, а не над всем куском, потому что
 // Plain заменяет перевод строки пробелом, а разбиение на строки уже сделано
 // вызывающим (WR-03 обзора v0.3.0).
+//
+// Вытеснение (len(l.lines) > l.limit) сдвигает ВСЕ сохранённые границы шагов
+// (l.stepStarts) на то же число вытесненных строк — тот же приём, что уже
+// применён к SectionLine GitLab-лога (internal/provider/gitlab/log.go,
+// cleanTrace, план 15-01). Граница, ушедшая в минус после сдвига,
+// прижимается к нулю (часть строк шага в буфере ещё есть — только не с
+// самого начала), а не отбрасывается, и соответствующий ключ помечается
+// истиной в l.stepClipped. stepClipped — отдельная карта, а не производная
+// от нулевой границы: нулевая граница получается и естественным образом
+// (шаг стартовал ровно с начала текущего содержимого буфера), и вытеснением
+// — различить эти два случая без отдельного признака нечем, а путать «шаг
+// начался с начала» с «шаг лишился начала» значило бы врать про хвост там,
+// где его нет (тот же принцип, что уже назван в internal/ui/logview.go,
+// statusLine).
 func (l *logBuffer) appendLine(line string) {
 	l.lines = append(l.lines, Plain(line))
 	if len(l.lines) > l.limit {
-		l.lines = l.lines[len(l.lines)-l.limit:]
+		evicted := len(l.lines) - l.limit
+		l.lines = l.lines[evicted:]
+		for idx, start := range l.stepStarts {
+			start -= evicted
+			if start < 0 {
+				start = 0
+				if l.stepClipped == nil {
+					l.stepClipped = make(map[int]bool)
+				}
+				l.stepClipped[idx] = true
+			}
+			l.stepStarts[idx] = start
+		}
 	}
+}
+
+// markStep запоминает, что вывод абсолютного номера шага джобы index
+// начинается с текущей длины буфера. Два вызывающих места:
+//  1. изнутри пакета runner — через структурное соответствие интерфейсу
+//     stepBoundary (internal/runner/steps.go), когда обёртка stepMarkWriter
+//     ниже передана в RunSteps вместо голого *logBuffer;
+//  2. заранее, из RetryStepCmd этого же файла, ДО вызова RunSteps —
+//     граница перезапускаемого шага обязана смениться раньше первой строки
+//     его нового вывода, иначе между нажатием R и первым маркером на
+//     экране ещё оставался бы виден старый сегмент того же шага (LOG-06).
+//
+// Идемпотентна: повторный вызов с тем же index просто перезаписывает
+// границу текущей длиной — не гонка и не двойная работа.
+func (l *logBuffer) markStep(index int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stepStarts == nil {
+		l.stepStarts = make(map[int]int)
+	}
+	l.stepStarts[index] = len(l.lines)
+}
+
+// stepLines отдаёт сегмент лога, принадлежащий абсолютному номеру шага
+// джобы index: строки от его границы (markStep) до начала границы
+// следующего шага, если та ЕСТЬ и НЕ МЕНЬШЕ текущей (next >= start), иначе —
+// до конца буфера. Условие next >= start, а не просто «следующая граница
+// как конец»: после перезапуска шага его новая граница может оказаться
+// БОЛЬШЕ, чем всё ещё хранящаяся в карте граница следующего шага, оставшаяся
+// от прошлого прогона (тот следующий шаг после этого перезапуска ещё не
+// переехал на новую границу) — использование такой устаревшей границы
+// обрезало бы свежий вывод перезапущенного шага пустым или укороченным
+// срезом; условие next >= start отбрасывает устаревшую границу и честно
+// показывает всё до текущего конца буфера.
+//
+// started=false, если index ещё ни разу не помечался markStep — шаг ещё не
+// запускался, показывать нечего, и это не то же самое, что «шаг запускался
+// и не вывел ни строки».
+func (l *logBuffer) stepLines(index int) (lines []string, tail bool, started bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	start, ok := l.stepStarts[index]
+	if !ok {
+		return nil, false, false
+	}
+	end := len(l.lines)
+	if next, ok := l.stepStarts[index+1]; ok && next >= start {
+		end = next
+	}
+	if start > end {
+		// Защита от любого не предусмотренного здесь состояния: пустой, а не
+		// паникующий срез.
+		start = end
+	}
+	out := make([]string, end-start)
+	copy(out, l.lines[start:end])
+	return out, l.stepClipped[index], true
 }
 
 // Lines отдаёт содержимое буфера целиком, копией — вызывающий код не должен
