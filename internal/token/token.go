@@ -59,7 +59,7 @@ func Resolve(host string) (Token, error) {
 // gitlab.com. This deliberately warns instead of failing: self-hosted
 // users with only an env token exported must keep working.
 func warnEnvTokenHostMismatch(name, host string) {
-	expected := normalizeHost(os.Getenv("GITLAB_HOST"))
+	expected := NormalizeHost(os.Getenv("GITLAB_HOST"))
 	if expected == "" {
 		expected = "gitlab.com"
 	}

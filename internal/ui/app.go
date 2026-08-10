@@ -777,8 +777,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.tree, cmd = newTreeModel(msg.Hosts, access, a.theme, a.keys)
 		a.treeReady = true
-		a.tree = a.tree.setSize(a.width, a.height)
 		a.ribbon = a.ribbon.reset(colRepos, "")
+		// Размер дерева берётся ПОСЛЕ сброса ленты и тем же расчётом, что и
+		// на tea.WindowSizeMsg (columnWidthFor на каждую из двух колонок):
+		// до сброса лента ещё держит колонки прошлой ветки, и ширины
+		// пришли бы от них.
+		a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), a.height)
 		a.overlay = overlayNone
 		return a, cmd
 
@@ -818,6 +822,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.ribbon, dropped = a.ribbon.open(colPipelines, label)
 		a, _ = a.dropped(dropped)
 		a = a.focusColumn()
+		// Колонка пайплайнов только что появилась в ленте: ширины видимых
+		// колонок изменились обе, а list.Model и table.Model внутри дерева
+		// держат размер состоянием — без этой строки правая панель осталась
+		// бы нулевой ширины до следующего tea.WindowSizeMsg.
+		a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), a.height)
 
 	case openPipelineMsg:
 		// Открытие пайплайна с правой панели экрана дерева (BROW-03; Фаза
