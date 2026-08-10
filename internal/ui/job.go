@@ -78,9 +78,45 @@ type shellHandoffMsg struct{}
 // (internal/ui/app.go, openDeeper).
 type openDetailMsg struct{}
 
-// logPanelLines — сколько последних строк ограниченного буфера лога сессии
-// показывает панель лога.
-const logPanelLines = 14
+// detailView — вид правой колонки экрана джобы: окружение, секреты, лог
+// шага, ровно в порядке idea-0.3.1 §6.
+type detailView int
+
+const (
+	detailEnv detailView = iota
+	detailSecrets
+	detailLog
+)
+
+// nextDetail — следующий вид по кольцу (Фаза 15, план 15-02). Назад по
+// видам ведёт то же самое кольцо: стрелка влево принадлежит ленте и уводит
+// в колонку шагов (закон Фазы 13), и заводить ей второй смысл внутри
+// колонки значило бы вернуть ровно ту путаницу, которую Фаза 13 убирала.
+func nextDetail(v detailView) detailView {
+	switch v {
+	case detailEnv:
+		return detailSecrets
+	case detailSecrets:
+		return detailLog
+	default:
+		return detailEnv
+	}
+}
+
+// detailName — имя вида строчными буквами для строки клавиш и заголовка
+// колонки; имена видов берутся ровно отсюда, второго перечня имён в файле
+// не заводится.
+func detailName(v detailView) string {
+	switch v {
+	case detailEnv:
+		return "окружение"
+	case detailSecrets:
+		return "секреты"
+	case detailLog:
+		return "лог шага"
+	}
+	return ""
+}
 
 // jobModel — экран джобы: панели шагов, окружения и лога, вход в шелл, петля
 // фикса.
@@ -95,14 +131,14 @@ type jobModel struct {
 
 	stepRows []stepRow
 	envRows  []envRow
+	// secretRows — строки вида «секреты» правой колонки (Фаза 15, план
+	// 15-02): пересобираются там же, где envRows — вторым местом сборки не
+	// заводится.
+	secretRows []secretRow
 
 	// cursor — номер выбранного шага (считая от нуля), общий для панели
-	// шагов и заголовка панели лога; двигают его ↑↓/jk. -1 — шаг ещё не
-	// выбирали (лог не открыт). Полноценный Bubbles viewport (постраничная
-	// прокрутка длинных логов) здесь не заведён: панель лога показывает
-	// последние logPanelLines строк ограниченного буфера сессии — этого
-	// достаточно для «хвоста упавшего шага» контракта, а постраничная
-	// навигация по длинным логам принадлежит Фазе 10 (BROW-02).
+	// шагов; двигают его ↑↓/jk. -1 — шаг ещё не выбирали (встроенный
+	// предпросмотр лога пуст).
 	cursor int
 
 	// pane — какая из двух колонок экрана джобы сейчас в фокусе ленты (шаги
@@ -111,14 +147,21 @@ type jobModel struct {
 	// не на то, какая панель отрисована — фокус раздаёт лента, а не сам
 	// экран.
 	pane columnID
-	// envCursor — курсор строки в колонке окружения, по умолчанию ноль,
-	// прижимается к границам списка строк окружения. Видимой пользы от него
-	// в этой фазе нет — заполнение незаполненных скрытых переменных прямо на
-	// строке принадлежит Фазе 15, и заводить второй курсор туда было бы
-	// вторым правилом навигации в той же колонке; курсор появляется уже
-	// сейчас, чтобы Фаза 15 не переизобретала навигацию внутри уже
-	// существующей колонки.
+	// detail — какой из трёх видов правой колонки сейчас показан (Фаза 15,
+	// план 15-02, idea-0.3.1 §6): по умолчанию окружение. Переключается
+	// стрелкой вправо, пока фокус в правой колонке (openDeeper).
+	detail detailView
+	// envCursor — курсор ОДНОЙ правой колонки (Фаза 13, план 13-01; Фаза 15,
+	// план 15-02): в виде окружения ходит по envRows, в виде секретов — по
+	// secretRows, в виде лога курсора нет вовсе. Колонка одна, а вид — это
+	// то, что в ней сейчас показано; второй курсор в той же колонке был бы
+	// вторым правилом навигации там, где Фаза 13 оставила одно. Прижимается
+	// к длине списка при переключении вида и при движении.
 	envCursor int
+	// logv — встроенный предпросмотр лога шага (просмотрщик плана 15-01) в
+	// виде «лог шага» правой колонки: строки обновляются только там, где лог
+	// мог вырасти (refreshLog), а не на каждом кадре.
+	logv logView
 
 	phase loopPhase
 	// pulling/pullImage — идёт тяга образа (для preparingView и hintText).
@@ -225,16 +268,41 @@ func (m jobModel) setColumnFocus(id columnID) jobModel {
 	return m
 }
 
-// openDeeper — часть общего контракта колонки (Фаза 13): из колонки шагов
-// возвращается команда, шлющая openDetailMsg; из колонки
-// окружения·секретов·лога — ничего, потому что правее в этой фазе ничего
-// нет (переключение видов окружение → секреты → лог внутри колонки
-// принадлежит Фазе 15).
+// openDeeper — часть общего контракта колонки (Фаза 13; наполнена Фазой 15,
+// план 15-02): из колонки шагов возвращается команда, шлющая openDetailMsg —
+// ровно как раньше; в правой колонке — переключает вид на следующий по
+// кольцу (idea-0.3.1 §6: «по → правая панель переключает вид»). Это и есть
+// углубление внутри колонки — тот же случай, что раскрытие ветки дерева,
+// названный планом 13-01. Курсор прижимается к длине списка нового вида
+// сразу же — второго места прижатия при переключении не заводится.
 func (m jobModel) openDeeper() (jobModel, tea.Cmd) {
 	if m.pane == colSteps {
 		return m, func() tea.Msg { return openDetailMsg{} }
 	}
-	return m, nil
+	m.detail = nextDetail(m.detail)
+	return m.clampDetailCursor(), nil
+}
+
+// clampDetailCursor прижимает курсор правой колонки к длине списка текущего
+// вида — единственное место прижатия, зовётся и при переключении вида
+// (openDeeper), и при движении (updateKey).
+func (m jobModel) clampDetailCursor() jobModel {
+	var n int
+	switch m.detail {
+	case detailEnv:
+		n = len(m.envRows)
+	case detailSecrets:
+		n = len(m.secretRows)
+	default:
+		return m
+	}
+	if m.envCursor >= n {
+		m.envCursor = n - 1
+	}
+	if m.envCursor < 0 {
+		m.envCursor = 0
+	}
+	return m
 }
 
 // update обрабатывает сообщения экрана джобы: тик спиннера, готовность или
@@ -245,6 +313,17 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// Встроенный предпросмотр лога шага обновляется тиком спиннера,
+		// ПОКА идёт долгая операция (прогон, тяга образа, произвольная
+		// команда, подмена) — та же точка, где может расти вывод шага без
+		// отдельного дискретного события на каждую строку. Копировать буфер
+		// на каждый тик вне долгой операции значило бы копировать тысячи
+		// строк ради кадра, в котором ничего не изменилось.
+		if m.pulling || m.phase == phaseRunning || m.execRunning || m.swapping {
+			lines, tail := m.logGrowthSource()
+			m.logv = m.logv.setSource(tail, -1, "")
+			m.logv = m.logv.setLines(lines)
+		}
 		return m, cmd
 
 	case sessionReadyMsg:
@@ -256,6 +335,15 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		m.swapping = false
 		m.stepRows = stepRowsFromSession(m.session)
 		m.envRows = envRowsFromSession(m.session)
+		// Строки секретов пересобираются там же, где строки окружения
+		// (Фаза 15, план 15-02) — второго места сборки не появляется.
+		m.secretRows = secretRowsFromSession(m.session)
+		// Готовность сессии — одна из точек, где встроенный предпросмотр
+		// лога шага мог вырасти (Фаза 15, план 15-02): маска уже собрана к
+		// первой строке тяги образа (internal/ui/session.go).
+		readyLines, readyTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(readyTail, -1, "")
+		m.logv = m.logv.setLines(readyLines)
 		if msg.outcome.Failed != nil {
 			m.cursor = msg.outcome.FailedIndex - 1
 		}
@@ -296,7 +384,14 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		if msg.Gen != m.sessionGen {
 			return m, nil
 		}
-		return m.applyEvent(msg.Event), nil
+		// Событие фазы 8 — одна из точек, где лог мог вырасти (Фаза 15,
+		// план 15-02): приходит реже, чем перерисовка кадра, и как раз
+		// тогда, когда в буфере действительно что-то новое.
+		m = m.applyEvent(msg.Event)
+		eventLines, eventTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(eventTail, -1, "")
+		m.logv = m.logv.setLines(eventLines)
+		return m, nil
 
 	case shellHandoffMsg:
 		return m, m.session.ShellCmd(context.Background())
@@ -314,7 +409,13 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case runFinishedMsg:
-		return m.applyRunFinished(msg), nil
+		// Итог прогона — одна из точек, где лог мог вырасти (Фаза 15, план
+		// 15-02).
+		m = m.applyRunFinished(msg)
+		runLines, runTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(runTail, -1, "")
+		m.logv = m.logv.setLines(runLines)
+		return m, nil
 
 	case captureDoneMsg:
 		m.apply = newApplyState(msg.patch, msg.stats, msg.ahead, msg.aheadKnown)
@@ -381,6 +482,11 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case execDoneMsg:
 		m.execRunning = false
 		m.execCode = msg.code
+		// Конец произвольной команды — одна из точек, где лог мог вырасти
+		// (Фаза 15, план 15-02).
+		execLines, execTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(execTail, -1, "")
+		m.logv = m.logv.setLines(execLines)
 		return m, nil
 
 	case imageSwappedMsg:
@@ -395,6 +501,11 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 		}
 		m.cursor = -1
 		m.phase = phaseImageReady
+		// Подмена образа — одна из точек, где лог мог вырасти (Фаза 15,
+		// план 15-02): новый контейнер уже писал в буфер во время подъёма.
+		swapLines, swapTail := m.logGrowthSource()
+		m.logv = m.logv.setSource(swapTail, -1, "")
+		m.logv = m.logv.setLines(swapLines)
 		return m, nil
 
 	case imageSwapFailedMsg:
@@ -868,11 +979,21 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 		// зовут тот же startRun.
 		return m.startRun(runRetry)
 
+	case key.Matches(msg, m.keys.Log) && m.pane == colDetail && m.detail == detailLog:
+		// Клавиша открытия полноэкранного просмотрщика (Фаза 15, план
+		// 15-02, JOB-04) — работает только в виде «лог шага»; второго места
+		// сборки openLogMsg на экране джобы не появляется.
+		return m, m.openLogCmd()
+
 	case key.Matches(msg, m.keys.Up):
-		// Движение смотрит на m.pane (Фаза 13): в колонке
-		// окружения·секретов·лога двигает envCursor, в колонке шагов —
-		// cursor, ровно как раньше.
+		// Движение смотрит на m.pane (Фаза 13) и, внутри правой колонки, на
+		// m.detail (Фаза 15, план 15-02): курсор один на все виды, в виде
+		// окружения он ходит по envRows, в виде секретов — по secretRows, в
+		// виде лога курсора нет вовсе.
 		if m.pane == colDetail {
+			if m.detail == detailLog {
+				return m, nil
+			}
 			if m.envCursor > 0 {
 				m.envCursor--
 			}
@@ -888,7 +1009,14 @@ func (m jobModel) updateKey(msg tea.KeyPressMsg) (jobModel, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Down):
 		if m.pane == colDetail {
-			if m.envCursor < len(m.envRows)-1 {
+			if m.detail == detailLog {
+				return m, nil
+			}
+			n := len(m.envRows)
+			if m.detail == detailSecrets {
+				n = len(m.secretRows)
+			}
+			if m.envCursor < n-1 {
 				m.envCursor++
 			}
 			return m, nil
@@ -1106,44 +1234,96 @@ func (m jobModel) envPanel(width int, focused bool) string {
 	return lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.String(), "\n"))
 }
 
-// logPanel рисует панель лога локального прогона внутри колонки
-// окружения·секретов·лога: по умолчанию (после готовности сессии, когда
-// упавший шаг известен) открыт хвост упавшего шага; пока шаг не выбран —
-// честная строка ожидания. Отдельного состояния обрыва чтения у панели нет:
-// буфер лога живёт только в памяти и не читает файлов, обрываться нечему —
-// поле под него не заводится, пока не появится реальный источник обрыва.
-// Пока идёт или только что закончилась произвольная команда :!
-// (execView, задача 3), заголовок панели меняется на «ВЫВОД КОМАНДЫ» — тот
-// же буфер лога, что и у шагов, только заголовок называет, что сейчас в
-// нём. Ширина приходит аргументом от колонки (Фаза 13, план 13-02), а не
-// считается от кадра целиком; собственный подзаголовок панели остаётся —
-// он называет, лог какого шага показан, — заголовок колонки называет её
-// целиком, но не то, какой шаг сейчас открыт.
-func (m jobModel) logPanel(width int) string {
-	if width < 1 {
-		width = 1
+// secretsPanel рисует тело вида «секреты» правой колонки (Фаза 15, план
+// 15-02): строки секретов (secretRow.line), под ними приглушённая строка с
+// путём файла секретов и напоминанием, что его по-прежнему можно открыть в
+// редакторе (Фаза 11 не отменяется); при пустом списке — одна честная
+// строка «у этой джобы нет скрытых переменных».
+func (m jobModel) secretsPanel(width int, focused bool) string {
+	var b strings.Builder
+	if len(m.secretRows) == 0 {
+		b.WriteString(HintSecretsNone())
+	} else {
+		for i, r := range m.secretRows {
+			b.WriteString(r.line(m.theme, width, i == m.envCursor && focused))
+			b.WriteString("\n")
+		}
 	}
-	titleText := fmt.Sprintf("ЛОГ ШАГА %d", m.cursor+1)
-	if m.execView {
-		titleText = "ВЫВОД КОМАНДЫ"
-	}
-	title := m.theme.PanelTitle.Render(titleText)
-
-	if m.cursor < 0 {
-		return title + "\n" + m.theme.Muted.Render("лог появится, когда вы выберете шаг")
-	}
-
-	lines := lastLines(m.session.Log(), logPanelLines)
-	body := strings.Join(lines, "\n")
-	return title + "\n" + lipgloss.NewStyle().Width(width).Render(body)
+	b.WriteString(m.theme.Muted.Render(HintSecretsFile(m.session.environment.SecretsPath)))
+	return lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.String(), "\n"))
 }
 
-// lastLines возвращает последние n строк lines.
-func lastLines(lines []string, n int) []string {
-	if len(lines) <= n {
-		return lines
+// logDetailPanel рисует тело вида «лог шага» правой колонки: окно строк
+// встроенного предпросмотра и под ним его строка положения — тот же
+// просмотрщик (internal/ui/logview.go, план 15-01), что и у полноэкранного
+// оверлея, второй прокрутки в проекте не заводится (LOG-01). Ширина
+// приходит аргументом от колонки на каждый кадр, тем же приёмом, что и у
+// остальных видов; setSize здесь безопасен даже когда поле пустое —
+// logView простое значение без компонентов Bubbles.
+func (m jobModel) logDetailPanel(width int) string {
+	lv := m.logv.setSize(width, m.logDetailHeight())
+	return lv.view(m.theme) + "\n" + lv.statusLine(m.theme)
+}
+
+// logDetailHeight — высота встроенного предпросмотра лога шага: высота
+// колонки минус одна строка его собственной строки положения (LOG-04).
+func (m jobModel) logDetailHeight() int {
+	h := m.height - 1
+	if h < 0 {
+		h = 0
 	}
-	return lines[len(lines)-n:]
+	return h
+}
+
+// logGrowthSource — строки ограниченного буфера лога сессии и признак
+// «буфер уперся в свой предел» для точки роста лога (Фаза 15, план 15-02).
+// Метка упавшего шага у встроенного предпросмотра нет: конец локального
+// лога и есть упавший шаг (план 15-01, toFailed), и подпись «чем дотянуть»
+// пуста — у локального буфера начала уже нет, и предлагать команду было бы
+// враньём. Формула общая, а сами вызовы m.logv.setSource/setLines
+// инлайнятся в каждой точке роста отдельно — там, где лог мог вырасти, а не
+// на каждом кадре.
+func (m jobModel) logGrowthSource() (lines []string, tail bool) {
+	lines = m.session.Log()
+	return lines, len(lines) >= logBufferLines
+}
+
+// currentSecretRow — строка вида «секреты» под курсором, если она есть.
+func (m jobModel) currentSecretRow() (secretRow, bool) {
+	if m.envCursor < 0 || m.envCursor >= len(m.secretRows) {
+		return secretRow{}, false
+	}
+	return m.secretRows[m.envCursor], true
+}
+
+// openLogCmd собирает команду открытия полноэкранного просмотрщика (план
+// 15-01) из вида «лог шага» правой колонки: тот же источник, что и у
+// встроенного предпросмотра — второго места сборки openLogMsg на экране
+// джобы не появляется.
+func (m jobModel) openLogCmd() tea.Cmd {
+	title := fmt.Sprintf("ЛОГ ШАГА %d", m.cursor+1)
+	lines, tail := m.logGrowthSource()
+	return func() tea.Msg {
+		return openLogMsg{title: title, lines: lines, tail: tail, mark: -1, pull: ""}
+	}
+}
+
+// detailHeading — заголовок правой колонки ровно как в мокапе (idea-0.3.1
+// §6): текущий вид ВЕРХНИМ РЕГИСТРОМ стилем заголовка панели, остальные —
+// строчными приглушёнными, через разделитель; имена видов берутся из
+// единственной функции имён (detailName).
+func (m jobModel) detailHeading(t Theme) string {
+	views := []detailView{detailEnv, detailSecrets, detailLog}
+	parts := make([]string, 0, len(views))
+	for _, v := range views {
+		name := detailName(v)
+		if v == m.detail {
+			parts = append(parts, t.PanelTitle.Render(strings.ToUpper(name)))
+		} else {
+			parts = append(parts, t.Muted.Render(name))
+		}
+	}
+	return strings.Join(parts, t.Muted.Render(" · "))
 }
 
 // preparingView — тело экрана, пока сессия готовится (до sessionReadyMsg):
@@ -1163,31 +1343,51 @@ func (m jobModel) preparingView() string {
 // 13-02): id называет, какая из двух колонок сейчас рисуется. Особые
 // состояния, занимающие ЛЕНТУ целиком (подготовка, перенос правок), сюда
 // не заходят вовсе — их рисует fullFrame ниже, и корневая модель спрашивает
-// его ДО сборки ленты, а не веткой внутри тела колонки. Видов внутри правой
-// колонки три по замыслу (idea-0.3.1 §6: окружение, секреты, лог), но
-// переключение между ними — Фаза 15: сейчас колонка показывает окружение и
-// лог сразу, а не переключается.
+// его ДО сборки ленты, а не веткой внутри тела колонки. Правая колонка
+// показывает РОВНО ОДИН вид из трёх (Фаза 15, план 15-02, idea-0.3.1 §6):
+// теперь в колонке один вид, а не окружение и лог сразу — высота колонки,
+// освободившаяся от второй панели, и есть то, ради чего лог наконец стало
+// можно листать.
 func (m jobModel) columnView(id columnID, width int, focused bool) string {
 	if id == colDetail {
-		return m.envPanel(width, focused) + "\n\n" + m.logPanel(width)
+		switch m.detail {
+		case detailSecrets:
+			return m.secretsPanel(width, focused)
+		case detailLog:
+			return m.logDetailPanel(width)
+		default:
+			return m.envPanel(width, focused)
+		}
 	}
 	return m.stepsPanel(width, focused)
 }
 
-// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03): экран
-// джобы держит две колонки, и id называет, чью позицию читать. Для колонки
-// шагов — номер выбранного шага (индекс в m.stepRows) и его номер строкой
-// (stepRow.Index стабилен в пределах джобы — шаги не переставляются и не
-// удаляются между перезагрузками). Для колонки окружения·секретов·лога —
-// номер выбранной строки и имя переменной под ней (envRow.Key — второго
-// ключа заводить незачем, имя переменной и так уникально в списке). Пустой
-// список любой из двух колонок возвращает нулевые значения.
+// cursorAt — часть общего контракта колонки (Фаза 13, план 13-03; Фаза 15,
+// план 15-02): экран джобы держит две колонки, и id называет, чью позицию
+// читать. Для колонки шагов — номер выбранного шага (индекс в m.stepRows) и
+// его номер строкой (stepRow.Index стабилен в пределах джобы — шаги не
+// переставляются и не удаляются между перезагрузками). Для правой колонки —
+// номер выбранной строки и её ключ ПО ТЕКУЩЕМУ ВИДУ: envRow.Key в виде
+// окружения, secretRow.Key в виде секретов (память курсора работает по
+// имени переменной — ключ у обоих списков одной природы); в виде лога
+// курсора нет, возвращаются нулевые значения. Пустой список любой из
+// колонок тоже возвращает нулевые значения.
 func (m jobModel) cursorAt(id columnID) (int, string) {
 	if id == colDetail {
-		if m.envCursor < 0 || m.envCursor >= len(m.envRows) {
+		switch m.detail {
+		case detailSecrets:
+			if m.envCursor < 0 || m.envCursor >= len(m.secretRows) {
+				return 0, ""
+			}
+			return m.envCursor, m.secretRows[m.envCursor].Key
+		case detailLog:
 			return 0, ""
+		default:
+			if m.envCursor < 0 || m.envCursor >= len(m.envRows) {
+				return 0, ""
+			}
+			return m.envCursor, m.envRows[m.envCursor].Key
 		}
-		return m.envCursor, m.envRows[m.envCursor].Key
 	}
 	if m.cursor < 0 || m.cursor >= len(m.stepRows) {
 		return 0, ""
@@ -1195,32 +1395,50 @@ func (m jobModel) cursorAt(id columnID) (int, string) {
 	return m.cursor, fmt.Sprintf("%d", m.stepRows[m.cursor].Index)
 }
 
-// withCursor — часть общего контракта колонки (Фаза 13, план 13-03): тот же
-// порядок «сначала ключ, затем прижатый номер», что и у остальных трёх
-// моделей колонок. Колонка шагов ищет строку с тем же stepRow.Index, колонка
-// окружения — строку с тем же envRow.Key; не найдена — index прижимается к
-// границам списка; список пуст — курсор обнуляется. Метод не возвращает
-// команду: постановка позиции — чтение и запись поля, а не поход в сеть.
+// withCursor — часть общего контракта колонки (Фаза 13, план 13-03; Фаза
+// 15, план 15-02): тот же порядок «сначала ключ, затем прижатый номер», что
+// и у остальных трёх моделей колонок. Правая колонка ищет строку ПО
+// ТЕКУЩЕМУ ВИДУ — envRow.Key в виде окружения, secretRow.Key в виде
+// секретов, в виде лога курсора нет и правка ничего не делает; не найдена —
+// index прижимается к границам списка; список пуст — курсор обнуляется.
+// Метод не возвращает команду: постановка позиции — чтение и запись поля, а
+// не поход в сеть.
 func (m jobModel) withCursor(id columnID, index int, key string) jobModel {
 	switch id {
 	case colDetail:
-		if len(m.envRows) == 0 {
+		if m.detail == detailLog {
+			return m
+		}
+		rows := len(m.envRows)
+		if m.detail == detailSecrets {
+			rows = len(m.secretRows)
+		}
+		if rows == 0 {
 			m.envCursor = 0
 			return m
 		}
 		if key != "" {
-			for i, r := range m.envRows {
-				if r.Key == key {
-					m.envCursor = i
-					return m
+			if m.detail == detailSecrets {
+				for i, r := range m.secretRows {
+					if r.Key == key {
+						m.envCursor = i
+						return m
+					}
+				}
+			} else {
+				for i, r := range m.envRows {
+					if r.Key == key {
+						m.envCursor = i
+						return m
+					}
 				}
 			}
 		}
 		idx := index
 		if idx < 0 {
 			idx = 0
-		} else if idx >= len(m.envRows) {
-			idx = len(m.envRows) - 1
+		} else if idx >= rows {
+			idx = rows - 1
 		}
 		m.envCursor = idx
 		return m
@@ -1287,17 +1505,24 @@ func (m jobModel) bannerLine() (string, bool) {
 	return style.Render(m.banner), true
 }
 
-// keyBar собирает строку клавиш экрана джобы из короткой формы помощи
-// раскладки (Фаза 12, POL-03) — шелл, повторить шаг, перенести правки и
-// командный режим перечислены полностью на экране помощи (`?`), а не
-// здесь. Пока строка команды активна, на её месте — само поле ввода, а
-// последняя ошибка разбора (если есть) показывается строкой НАД ним тем же
-// приёмом, что и строка подсказки (RenderHint) — контракт требует, чтобы
-// отказ не закрывал поле, и чтобы настоящая строка подсказки внизу экрана
-// осталась на месте без исключений (она рисуется отдельно, в App.View).
-// Стадия applyMessage экрана переноса занимает то же место тем же приёмом —
-// commandBar и applyState.msgInput никогда не активны одновременно
-// (applyIdle-проверка в updateKey).
+// keyBar собирает СВОЮ строку клавиш экрана джобы (Фаза 15, план 15-02,
+// JOB-04): шелл, перезапуск шага, перенос правок и запись клавиши
+// углубления с ЖИВОЙ подписью — в колонке шагов она называет правую
+// колонку, в правой колонке — следующий вид; в виде «лог шага» к ним
+// добавляется клавиша открытия полноэкранного просмотрщика. Клавиша во
+// всех записях читается из раскладки (Hint/HintAs), а не пишется литералом.
+// Ширина: "s шелл"(6) + "R повторить шаг"(15) + "A перенести правки"(18) +
+// "→ секреты"(9, самая длинная живая подпись среди трёх видов — «секреты»
+// длиннее «окружения» и «лог шага» не в счёт, потому что заменяется
+// клавишей лога) + хвост закона (NavHints, без Right — уже назван выше) и
+// пара помощь/выход (MetaHints); KeyBar сама отбрасывает записи закона по
+// приоритету, если сумма не укладывается в 78 ячеек (keys.go, KeyBarOf) —
+// собственные записи этой строки короче их суммы и укладываются всегда.
+// Пока строка команды активна, на её месте — само поле ввода, а последняя
+// ошибка разбора (если есть) показывается строкой НАД ним тем же приёмом,
+// что и строка подсказки (RenderHint). Стадия applyMessage экрана переноса
+// занимает то же место тем же приёмом — commandBar и applyState.msgInput
+// никогда не активны одновременно (applyIdle-проверка в updateKey).
 func (m jobModel) keyBar() string {
 	if m.cmd.active {
 		var b strings.Builder
@@ -1311,7 +1536,17 @@ func (m jobModel) keyBar() string {
 	if m.apply.stage == applyMessage {
 		return m.apply.messageView(m.theme)
 	}
-	return KeyBar(m.theme, m.keys)
+
+	extra := []KeyHint{Hint(m.keys.Shell), Hint(m.keys.Retry), Hint(m.keys.Apply)}
+	if m.pane == colSteps {
+		extra = append(extra, HintAs(m.keys.Right, columnTitle(colDetail)))
+	} else {
+		extra = append(extra, HintAs(m.keys.Right, detailName(nextDetail(m.detail))))
+		if m.detail == detailLog {
+			extra = append(extra, Hint(m.keys.Log))
+		}
+	}
+	return KeyBar(m.theme, m.keys, extra...)
 }
 
 // hintText — (jobModel) hintText() string, единственная функция отображения
@@ -1384,11 +1619,21 @@ func (m jobModel) hintText() string {
 	// закон ленты по колонке в фокусе (Фаза 13, план 13-03), а не молчит:
 	// «подсказка присутствует ВСЕГДА» держится тем, что здесь никогда не
 	// возвращается пустая строка, а не тем, что этот фолбэк недостижим
-	// сегодня. Колонка окружения·секретов·лога — последняя в цепочке
-	// (idea-0.3.1 §3): правее нет ничего, → не делает ничего (openDeeper
-	// выше), поэтому её формулировка называет ←, а не →.
+	// сегодня. Порядок веток обязателен: долгие операции и отказы остаются
+	// выше в switch — они про то, что происходит прямо сейчас, — состояния
+	// петли фикса тоже выше, а правая колонка — самый нижний, самый общий
+	// уровень: незаполненная переменная и есть причина, по которой петля не
+	// сдвинется (Фаза 15, план 15-02).
 	if m.pane == colDetail {
-		return HintColumnDeepest()
+		if m.detail == detailSecrets {
+			if row, ok := m.currentSecretRow(); ok {
+				if row.Filled {
+					return HintSecretFilled(row.Key, m.keys.Open.Help().Key)
+				}
+				return HintSecretMissing(row.Key, m.keys.Open.Help().Key)
+			}
+		}
+		return HintDetailNext(m.keys.Right.Help().Key, detailName(nextDetail(m.detail)))
 	}
 	return HintColumnDeeper(columnTitle(colDetail))
 }

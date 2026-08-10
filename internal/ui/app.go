@@ -434,8 +434,28 @@ func (a App) ribbonView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
-// columnView — одна колонка ленты: заголовок ВЕРХНИМ РЕГИСТРОМ
-// (columnTitle(col.id), плюс уточнение col.label, если оно непусто) и тело,
+// columnHeading — единственное место, где колонка получает заголовок в
+// кадре (Фаза 15, план 15-02): для правой колонки экрана джобы заголовок
+// даёт сама модель экрана (jobModel.detailHeading) — он переключатель,
+// зависящий от состояния m.job.detail (Фаза 15, idea-0.3.1 §6: текущий вид
+// ВЕРХНИМ РЕГИСТРОМ, остальные строчными приглушёнными); для всех остальных
+// колонок — прежняя формула (columnTitle плюс уточнение col.label),
+// обрезанная по ширине графемной мерой и стилем заголовка панели.
+// Исключение ровно одно и живёт здесь, а не в columnTitle: заголовок правой
+// колонки — переключатель, зависящий от состояния модели, а columnTitle
+// обязана остаться чистой функцией от идентификатора колонки.
+func (a App) columnHeading(col column, width int) string {
+	if col.id == colDetail {
+		return a.job.detailHeading(a.theme)
+	}
+	title := columnTitle(col.id)
+	if col.label != "" {
+		title = title + " " + col.label
+	}
+	return a.theme.PanelTitle.Render(Truncate(title, width))
+}
+
+// columnView — одна колонка ленты: заголовок (columnHeading выше) и тело,
 // взятое у модели-владельца по идентификатору колонки. Признак фокуса
 // передаётся моделям — колонка вне фокуса не рисует курсор инверсией, иначе
 // на экране было бы два курсора сразу и ни один не был бы настоящим. Вся
@@ -447,11 +467,7 @@ func (a App) ribbonView() string {
 // методом columnView, принимающим ширину и признак фокуса (план 13-02,
 // задача 2) — второй отрисовки той же самой модели в пакете не заводится.
 func (a App) columnView(col column, width int, focused bool) string {
-	title := columnTitle(col.id)
-	if col.label != "" {
-		title = title + " " + col.label
-	}
-	header := a.theme.PanelTitle.Render(Truncate(title, width))
+	header := a.columnHeading(col, width)
 
 	var body string
 	switch col.id {

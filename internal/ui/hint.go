@@ -650,3 +650,39 @@ func HintMenuKeySaved(host string) string {
 func HintMenuKeyNotSaved(reason string) string {
 	return fmt.Sprintf("ключ не сохранён: %s", reason)
 }
+
+// Формулировки правой колонки экрана джобы (Фаза 15, план 15-02,
+// JOB-01…JOB-04): по одной именованной функции на состояние, тем же
+// приёмом, что и весь остальной файл. Клавиши приходят параметрами,
+// прочитанными из раскладки вызывающим — литералов клавиш здесь нет (тот же
+// приём, что ввёл план 13-03).
+
+// HintDetailNext — что сделает стрелка вправо в правой колонке: переключит
+// вид на next.
+func HintDetailNext(key, next string) string {
+	return fmt.Sprintf("%s переключит вид на «%s»", key, next)
+}
+
+// HintSecretMissing — курсор на незаполненной скрытой переменной name: key
+// впишет значение.
+func HintSecretMissing(name, key string) string {
+	return fmt.Sprintf("%s не задана — %s впишет значение", name, key)
+}
+
+// HintSecretFilled — курсор на уже заполненной переменной name: key
+// перезапишет значение.
+func HintSecretFilled(name, key string) string {
+	return fmt.Sprintf("%s задана — %s перезапишет значение", name, key)
+}
+
+// HintSecretsNone — у этой джобы нет ни одной скрытой переменной.
+func HintSecretsNone() string {
+	return "у этой джобы нет скрытых переменных"
+}
+
+// HintSecretsFile — приглушённая строка под списком секретов: путь файла и
+// напоминание, что его по-прежнему можно открыть в редакторе (Фаза 11,
+// GUIDE-03 не отменяется).
+func HintSecretsFile(path string) string {
+	return fmt.Sprintf("файл: %s — тот же редактор командой :secrets", path)
+}
