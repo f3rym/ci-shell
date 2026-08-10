@@ -86,11 +86,13 @@ type logFailedMsg struct {
 	reason     string
 }
 
-// newLogPanel собирает панель со вьюпортом высотой в строках панели из
-// темы. Клиент обхода b — тот же, что у списка джоб: второго клиента в
-// интерфейсе не появляется.
+// newLogPanel собирает панель со вьюпортом; высота — временная, первый
+// setSize (ниже) пересчитает её от высоты, оставшейся под списком джоб
+// (Фаза 13, план 13-02, jobsModel.setSize) — второго расчёта здесь не
+// заводится. Клиент обхода b — тот же, что у списка джоб: второго клиента
+// в интерфейсе не появляется.
 func newLogPanel(b *browse.Client, projectPath string) logPanel {
-	vp := viewport.New(viewport.WithHeight(LogPanelLines))
+	vp := viewport.New(viewport.WithHeight(2))
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return logPanel{
@@ -100,10 +102,20 @@ func newLogPanel(b *browse.Client, projectPath string) logPanel {
 	}
 }
 
+// setSize принимает ширину и высоту КОЛОНКИ джоб (Фаза 13, план 13-02), а
+// не ширину кадра целиком и не константу темы, задававшую число строк
+// раньше (она удалена вместе с отдельной сеткой экрана джоб) — число
+// видимых строк лога считает вызывающий (jobsModel.setSize) от высоты,
+// оставшейся под списком джоб; здесь остаётся только защита от
+// отрицательного или совсем крохотного значения — разумный минимум в две
+// строки, ниже которого панель лога перестала бы что-либо показывать.
 func (p logPanel) setSize(width, height int) logPanel {
 	p.width = width
+	if height < 2 {
+		height = 2
+	}
 	p.viewport.SetWidth(width)
-	p.viewport.SetHeight(LogPanelLines)
+	p.viewport.SetHeight(height)
 	return p
 }
 

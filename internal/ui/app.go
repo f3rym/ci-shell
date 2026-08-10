@@ -305,10 +305,9 @@ func (a App) ribbonView() string {
 // колонка начиналась ровно там, где должна, чем бы ни было содержимое.
 //
 // Репозитории и пайплайны рисует модель дерева, джобы — модель списка джоб,
-// шаги и окружение·секреты·лог — модель экрана джобы (план 13-02, задача
-// 2); до задачи 2 последние две ветви возвращают то, что модель уже умеет
-// рисовать целиком (её прежний bodyView), а не колонку — второй отрисовки
-// той же самой модели задача 2 заменит одним методом columnView.
+// шаги и окружение·секреты·лог — модель экрана джобы: каждая колонка своим
+// методом columnView, принимающим ширину и признак фокуса (план 13-02,
+// задача 2) — второй отрисовки той же самой модели в пакете не заводится.
 func (a App) columnView(col column, width int, focused bool) string {
 	title := columnTitle(col.id)
 	if col.label != "" {
@@ -323,9 +322,9 @@ func (a App) columnView(col column, width int, focused bool) string {
 			body = a.tree.columnView(col.id, width, focused)
 		}
 	case colJobs:
-		body = a.jobs.bodyView()
+		body = a.jobs.columnView(width, focused)
 	case colSteps, colDetail:
-		body = a.job.bodyView()
+		body = a.job.columnView(col.id, width, focused)
 	}
 
 	return lipgloss.NewStyle().Width(width).Render(header + "\n" + body)
@@ -424,8 +423,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// моделям колонок ниже: они читают ровно этот расчёт
 		// (columnWidthFor), а не делят ширину кадра сами.
 		a.ribbon = a.ribbon.setSize(msg.Width, msg.Height)
-		a.jobs = a.jobs.setSize(msg.Width, msg.Height)
-		a.job = a.job.setSize(msg.Width, msg.Height)
+		// Колонка джоб получает свою ширину от ленты (план 13-02, задача 2,
+		// пункт 1) — тем же приёмом, что и колонки дерева ниже; колонка
+		// джобы (шаги, окружение·секреты·лог) хранит только высоту —
+		// ширина панелей больше не поле модели (пункт 7), она приходит
+		// аргументом в columnView на каждый кадр.
+		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), msg.Height)
+		a.job = a.job.setSize(msg.Height)
 		if a.treeReady {
 			// Дерево держит настоящие компоненты Bubbles (list.Model,
 			// table.Model внутри pipelinePanel) — до первого browseMsg они
@@ -567,10 +571,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			b = bc
 		}
 		a.jobs = newJobsModel(msg.ref, msg.job, b, loadErr, a.theme, a.keys)
-		a.jobs = a.jobs.setSize(a.width, a.height)
 		// По прямой ссылке репозиториев и пайплайнов слева нет — самая
 		// левая колонка ленты становится колонка джоб, и esc из неё выходит.
-		a.ribbon = a.ribbon.reset(colJobs, "")
+		// Уточнение заголовка — идентификатор пайплайна, ветка и
+		// сокращённый коммит (Фаза 13, план 13-02, задача 2): раньше это
+		// печатала собственная шапка панели, теперь её ставит корневая
+		// модель при открытии колонки.
+		a.ribbon = a.ribbon.reset(colJobs, a.jobs.columnLabel())
+		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), a.height)
 		a.overlay = overlayNone
 		return a, a.jobs.load()
 
@@ -616,9 +624,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// экрана джоб второго в проекте не появляется — тот же jobsModel,
 		// второй конструктор.
 		a.jobs = newJobsModelFromPipeline(a.browseClient, a.host, msg.project, msg.pipeline, a.theme, a.keys)
-		a.jobs = a.jobs.setSize(a.width, a.height)
 		var dropped []columnID
-		a.ribbon, dropped = a.ribbon.open(colJobs, Plain(fmt.Sprintf("#%d · %s", msg.pipeline.IID, msg.pipeline.Ref)))
+		// Уточнение заголовка — тем же приёмом, что и у входа по прямой
+		// ссылке выше (jobRefMsg): идентификатор пайплайна, ветка и
+		// сокращённый коммит, а не только номер и ветка, как раньше.
+		a.ribbon, dropped = a.ribbon.open(colJobs, a.jobs.columnLabel())
+		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), a.height)
 		var cleanup tea.Cmd
 		a, cleanup = a.dropped(dropped)
 		a = a.focusColumn()
@@ -651,7 +662,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		bridge.Attach(programSend)
 		sess := NewSession(a.jobs.ref, a.provider, msg.job, event.Emitter{Sink: bridge})
 		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
-		a.job = a.job.setSize(a.width, a.height)
+		a.job = a.job.setSize(a.height)
 		a = a.focusColumn()
 		return a, tea.Batch(cleanup, a.job.init())
 
@@ -776,11 +787,38 @@ func (a App) viewInner() string {
 		hint = RenderHint(a.theme, a.help.hintText())
 	default:
 		// Оверлея нет — тело кадра рисует лента (NAV-03 держится её
-		// инвариантом, отрисовка только читает его). Заголовок, строка
-		// клавиш и строка подсказки по-прежнему выбираются по ЭКРАНУ
-		// КОЛОНКИ В ФОКУСЕ (a.screen()) — ровно тем же способом, каким
-		// выбирались по текущему экрану до этой фазы.
-		body = a.ribbonView()
+		// инвариантом, отрисовка только читает его), кроме особых кадров
+		// экрана джобы (подготовка, перенос правок), которые занимают ЛЕНТУ
+		// целиком через явный вызов fullFrame (Фаза 13, план 13-02, пункт
+		// 6) — корневая модель спрашивает его ДО сборки ленты. Спрашивается
+		// он только когда джоба вообще есть в ленте (колонка шагов либо
+		// окружения·секретов·лога): на нулевом значении a.job (до первого
+		// openJobMsg) фаза по умолчанию равна phasePreparing, и без этой
+		// защиты кадр захватывался бы им же на заставке, дереве и списке
+		// джоб, которых джоба ещё не касалась.
+		hasJobColumn := a.ribbon.has(colSteps) || a.ribbon.has(colDetail)
+		full, showFull := "", false
+		if hasJobColumn {
+			full, showFull = a.job.fullFrame()
+		}
+		switch {
+		case showFull:
+			body = full
+		case hasJobColumn:
+			body = a.ribbonView()
+			// Баннер отказа — под лентой, а не внутри колонки (пункт 8):
+			// иначе он уезжал бы вместе с колонкой за край при узком окне,
+			// а баннер обязан оставаться на виду независимо от того, какая
+			// колонка сейчас в кадре.
+			if line, ok := a.job.bannerLine(); ok {
+				body += "\n\n" + line
+			}
+		default:
+			body = a.ribbonView()
+		}
+		// Заголовок, строка клавиш и строка подсказки по-прежнему
+		// выбираются по ЭКРАНУ КОЛОНКИ В ФОКУСЕ (a.screen()) — ровно тем же
+		// способом, каким выбирались по текущему экрану до этой фазы.
 		switch a.screen() {
 		case screenJobs:
 			title = title + "  " + a.theme.Muted.Render(a.jobs.ref.Host)

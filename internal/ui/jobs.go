@@ -12,6 +12,7 @@ import (
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/joburl"
 	"github.com/f3rym/ci-shell/internal/provider"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // jobsModel — экран списка джоб пайплайна (TUI-03): таблица джоб сверху,
@@ -25,7 +26,7 @@ type jobsModel struct {
 	b *browse.Client
 	// job — метаданные открывающей джобы (вход по ссылке) либо синтетическая
 	// запись с полями пайплайна (вход из дерева, newJobsModelFromPipeline):
-	// в обоих случаях panelTitle и load() читают только PipelineID/Ref/
+	// в обоих случаях columnLabel и load() читают только PipelineID/Ref/
 	// CommitSHA — второй ветки для этих двух полей не заводится.
 	job provider.Job
 
@@ -103,10 +104,20 @@ func newJobsModelFromPipeline(b *browse.Client, host string, project provider.Pr
 	return newJobsModelCommon(ref, job, b, "", theme, keys)
 }
 
+// setSize передаёт колонке джоб ширину и высоту (Фаза 13, план 13-02):
+// ширина приходит от ленты (App.columnWidthFor), а не от кадра целиком.
+// Панель лога настоящего прогона (BROW-04) получает ту же ширину колонки и
+// число строк, посчитанное от высоты, оставшейся под списком джоб — рамка
+// кадра (заголовок, отступы, строка клавиш, строка подсказки) вычитается
+// тем же приёмом, что и у treeModel.setSize, список джоб не ограничен
+// числом видимых строк (BROW-02); минимум в две строки держит сама панель
+// лога (logPanel.setSize) — отдельной константы темы под число строк
+// больше нет.
 func (m jobsModel) setSize(width, height int) jobsModel {
 	m.width = width
 	m.height = height
-	m.log = m.log.setSize(width-2*OuterMargin, LogPanelLines)
+	logHeight := height - 8 - len(m.jobs) - 1
+	m.log = m.log.setSize(width, logHeight)
 	return m
 }
 
@@ -310,24 +321,36 @@ func (m jobsModel) keyBar() string {
 	return KeyBar(m.theme, m.keys)
 }
 
-// panelTitle собирает заголовок панели: идентификатор пайплайна, ветку и
-// сокращённый до восьми символов коммит — верхним регистром и приглушённым
-// жирным, как требует контракт.
-func (m jobsModel) panelTitle() string {
+// columnLabel собирает уточнение заголовка колонки джоб (Фаза 13, план
+// 13-02): идентификатор пайплайна, ветку и сокращённый до восьми символов
+// коммит — ровно то же самое, что раньше печатала собственная шапка панели.
+// Корневая модель ставит его в column.label при открытии колонки джоб
+// (internal/ui/app.go, jobRefMsg/openPipelineMsg), а рисует лента
+// (columnTitle(colJobs) + label) — второго заголовка внутри тела колонки не
+// заводится.
+func (m jobsModel) columnLabel() string {
 	sha := m.job.CommitSHA
 	if len(sha) > 8 {
 		sha = sha[:8]
 	}
-	title := fmt.Sprintf("ПАЙПЛАЙН #%d · %s · %s", m.job.PipelineID, Plain(m.job.Ref), sha)
-	return m.theme.PanelTitle.Render(title)
+	return fmt.Sprintf("#%d · %s · %s", m.job.PipelineID, Plain(m.job.Ref), sha)
 }
 
 // rowLine отрисовывает одну строку списка: символ статуса из единственной
 // таблицы соответствия, зазор RowIconGap, имя джобы, статус словом ровно
 // как в API (не переводится), приглушённое относительное время. Строка под
 // курсором получает GlyphCursor справа и инверсию на всю строку — курсор и
-// статус сосуществуют.
-func (m jobsModel) rowLine(j provider.Job, selected bool) string {
+// статус сосуществуют, но инверсией рисуется только при selected (её решает
+// вызывающий: i == m.cursor && focused — вне фокуса ленты второго курсора
+// на экране быть не должно, Фаза 13, план 13-02).
+//
+// Имя джобы подгоняется к ширине КОЛОНКИ width, а не к фиксированным 24
+// ячейкам: остаток считается после символа состояния (1 ячейка, замкнутый
+// набор символов темы), зазора, слова статуса, пометки ручного запуска и
+// относительного времени — той же графемной мерой (internal/textwidth), что
+// и везде; ручного выравнивания форматным глаголом на пользовательской
+// строке (имя джобы) здесь нет.
+func (m jobsModel) rowLine(j provider.Job, selected bool, width int) string {
 	var glyph string
 	if j.Status == "running" {
 		// running — единственная анимированная строка: вместо символа
@@ -337,41 +360,53 @@ func (m jobsModel) rowLine(j provider.Job, selected bool) string {
 		glyph = m.theme.StatusStyle(j.Status).Render(StatusGlyph(j.Status))
 	}
 
-	name := Fit(j.Name, 24)
+	statusText := Plain(j.Status)
+	noteWidth := 0
 	note := ""
 	if j.Status == "manual" {
+		noteWidth = 1 + textwidth.Of(ManualNote)
 		note = " " + m.theme.Muted.Render(ManualNote)
 	}
-	ago := m.theme.Muted.Render(Ago(j.FinishedAt))
+	agoText := Ago(j.FinishedAt)
+	ago := m.theme.Muted.Render(agoText)
+
+	reserved := 1 + RowIconGap + 2 + textwidth.Of(statusText) + noteWidth + 2 + textwidth.Of(agoText)
+	nameWidth := width - reserved
+	if nameWidth < 1 {
+		nameWidth = 1
+	}
+	name := Fit(j.Name, nameWidth)
 
 	line := fmt.Sprintf("%s%s%s  %s%s  %s",
-		glyph, strings.Repeat(" ", RowIconGap), name, Plain(j.Status), note, ago)
+		glyph, strings.Repeat(" ", RowIconGap), name, statusText, note, ago)
 	if selected {
 		line = m.theme.Selected.Render(line + " " + GlyphCursor)
 	}
 	return line
 }
 
-// bodyView собирает тело экрана: таблица джоб сверху (заголовок панели
-// остаётся всегда, тело заменяется одной честной строкой при пустом списке
+// columnView собирает тело КОЛОНКИ джоб без заголовка (Фаза 13, план
+// 13-02): список джоб заменяется одной честной строкой при пустом списке
 // или ошибке загрузки; неполный список и список из кэша называются
-// отдельными приглушёнными строками под таблицей — BROW-02), панель лога
-// под ней.
-func (m jobsModel) bodyView() string {
-	header := m.panelTitle()
-
+// отдельными приглушёнными строками под ним (BROW-02); панель лога
+// упавшего шага настоящего прогона (BROW-04) остаётся ПОД списком внутри
+// ТОЙ ЖЕ колонки и получает ширину колонки — решение, а не умолчание:
+// колонка окружения·секретов·лога правее принадлежит уже поднятой
+// локальной сессии, а лог настоящего прогона GitLab читается без всякой
+// сессии — это разные источники, и складывать их в одну колонку значило бы
+// соврать про то, что человек видит. Полноценный просмотрщик лога — Фаза
+// 15, и она же решает судьбу этого предпросмотра.
+func (m jobsModel) columnView(width int, focused bool) string {
 	var jobsBody string
 	switch {
 	case m.loadErr != "":
-		jobsBody = header + "\n" + fmt.Sprintf("не удалось получить список джоб: %s", m.loadErr)
+		jobsBody = fmt.Sprintf("не удалось получить список джоб: %s", m.loadErr)
 	case !m.loading && len(m.jobs) == 0:
-		jobsBody = header + "\n" + "нет джоб"
+		jobsBody = "нет джоб"
 	default:
 		var b strings.Builder
-		b.WriteString(header)
-		b.WriteString("\n")
 		for i, j := range m.jobs {
-			b.WriteString(m.rowLine(j, i == m.cursor))
+			b.WriteString(m.rowLine(j, i == m.cursor && focused, width))
 			b.WriteString("\n")
 		}
 		if !m.complete {
@@ -381,7 +416,7 @@ func (m jobsModel) bodyView() string {
 		if m.cached {
 			b.WriteString(m.theme.Muted.Render(fmt.Sprintf("из кэша, %s назад", m.fetched)))
 		}
-		jobsBody = b.String()
+		jobsBody = strings.TrimRight(b.String(), "\n")
 	}
 
 	var out strings.Builder

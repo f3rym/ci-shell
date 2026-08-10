@@ -181,7 +181,11 @@ type jobModel struct {
 	execView    bool
 	execCode    int
 
-	width, height int
+	// height — единственное, что хранит поле размера экрана джобы (Фаза 13,
+	// план 13-02, пункт 7): ширина панелей больше не поле модели, а аргумент
+	// columnView, посчитанный лентой (App.columnWidthFor) — второго расчёта
+	// ширины здесь не заводится (panelWidths удалён).
+	height int
 }
 
 // newJobModel строит модель экрана джобы поверх уже собранной сессии.
@@ -205,8 +209,11 @@ func (m jobModel) init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, m.session.PrepareCmd(context.Background()))
 }
 
-func (m jobModel) setSize(width, height int) jobModel {
-	m.width = width
+// setSize передаёт модели экрана джобы только высоту (Фаза 13, план 13-02,
+// пункт 7): ширина панелей больше не хранится полем — она приходит
+// аргументом от ленты прямо в columnView на каждый кадр, тем же приёмом,
+// что и у остальных моделей-колонок.
+func (m jobModel) setSize(height int) jobModel {
 	m.height = height
 	return m
 }
@@ -313,8 +320,9 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 	case captureDoneMsg:
 		m.apply = newApplyState(msg.patch, msg.stats, msg.ahead, msg.aheadKnown)
 		m.phase = phaseApplyConfirm
-		// Список файлов занимает тело целиком (bodyView) — устаревший вывод
-		// последней команды :! не должен маячить в подсказке позади него.
+		// Список файлов занимает ленту целиком (fullFrame) — устаревший
+		// вывод последней команды :! не должен маячить в подсказке позади
+		// него.
 		m.execView = false
 		return m, nil
 
@@ -1020,39 +1028,18 @@ func envRowsFromSession(s *Session) []envRow {
 	return rows
 }
 
-// panelWidths считает ширины левой (шаги) и правой (окружение) панелей по
-// формуле контракта: доступная ширина за вычетом отступов и зазора делится в
-// долю StepsSharePercent, но левая не меньше StepsPanelMin, правая не меньше
-// EnvPanelMin, а вся лишняя ширина при росте окна уходит в правую панель.
-func (m jobModel) panelWidths() (left, right int) {
-	avail := m.width - 2*OuterMargin - PanelGap
-	if avail < StepsPanelMin+EnvPanelMin {
-		avail = StepsPanelMin + EnvPanelMin
-	}
-	left = avail * StepsSharePercent / 100
-	if left < StepsPanelMin {
-		left = StepsPanelMin
-	}
-	right = avail - left
-	if right < EnvPanelMin {
-		right = EnvPanelMin
-	}
-	return left, right
-}
-
-// stepsPanel рисует панель шагов: заголовок верхним регистром приглушённым
-// жирным, затем по строке на шаг.
-func (m jobModel) stepsPanel() string {
-	left, _ := m.panelWidths()
-	title := m.theme.PanelTitle.Render("ШАГИ")
+// stepsPanel рисует тело КОЛОНКИ шагов без заголовка (Фаза 13, план 13-02):
+// заголовок «ШАГИ» рисует теперь корневая модель (App.columnView) уточнением
+// заголовка колонки — второй заголовок здесь был бы мусором. Курсор
+// инверсией — только при focused, иначе на экране был бы курсор сразу в
+// двух колонках (шаги и окружение·секреты·лог).
+func (m jobModel) stepsPanel(width int, focused bool) string {
 	var b strings.Builder
-	b.WriteString(title)
-	b.WriteString("\n")
 	for i, r := range m.stepRows {
-		b.WriteString(m.stepLine(r, i == m.cursor, left))
+		b.WriteString(m.stepLine(r, i == m.cursor && focused, width))
 		b.WriteString("\n")
 	}
-	return lipgloss.NewStyle().Width(left).Render(strings.TrimRight(b.String(), "\n"))
+	return lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.String(), "\n"))
 }
 
 // stepLine отрисовывает одну строку шага: символ состояния из единственной
@@ -1082,24 +1069,28 @@ func (m jobModel) stepGlyph(r stepRow) string {
 	return m.theme.StatusStyle(r.Status).Render(StatusGlyph(r.Status))
 }
 
-// envPanel рисует панель окружения: заголовок с числом переменных,
-// значение — через уже принятое решение о показе (envRow.Display, посчитано
-// render.DisplayValue при сборке), под таблицей — приглушённые строки о
-// недостающих значениях и первой оговорке сборки окружения.
-func (m jobModel) envPanel() string {
-	_, right := m.panelWidths()
-	title := m.theme.PanelTitle.Render(fmt.Sprintf("ОКРУЖЕНИЕ (%d)", len(m.envRows)))
-
+// envPanel рисует тело КОЛОНКИ окружения без собственного заголовка (Фаза
+// 13, план 13-02): заголовок «ОКРУЖЕНИЕ (N)» рисовала панель раньше, теперь
+// его место заняла лента (App.columnView) — второй заголовок здесь был бы
+// мусором. Значение — через уже принятое решение о показе (envRow.Display,
+// посчитано render.DisplayValue при сборке envRowsFromSession) — второй
+// точки решения о печати значения здесь нет (T-13-06). Курсор строки
+// (envCursor, заведён планом 13-01) рисуется инверсией только при focused —
+// вне фокуса ленты второго курсора на экране быть не должно; заполнение
+// незаполненных скрытых значений прямо на строке — Фаза 15, здесь курсор
+// только виден.
+func (m jobModel) envPanel(width int, focused bool) string {
 	if len(m.envRows) == 0 {
-		return title + "\n" + fmt.Sprintf("не удалось собрать окружение: %s", "переменных нет")
+		return fmt.Sprintf("не удалось собрать окружение: %s", "переменных нет")
 	}
 
 	var b strings.Builder
-	b.WriteString(title)
-	b.WriteString("\n")
-	for _, r := range m.envRows {
-		line := fmt.Sprintf("%s=%s", r.Key, r.Display)
-		b.WriteString(Truncate(line, right))
+	for i, r := range m.envRows {
+		line := Truncate(fmt.Sprintf("%s=%s", r.Key, r.Display), width)
+		if i == m.envCursor && focused {
+			line = m.theme.Selected.Render(line + " " + GlyphCursor)
+		}
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	if missing := len(m.session.environment.Missing); missing > 0 {
@@ -1110,19 +1101,23 @@ func (m jobModel) envPanel() string {
 		b.WriteString(m.theme.Muted.Render(m.session.environment.Notices[0]))
 		b.WriteString("\n")
 	}
-	return lipgloss.NewStyle().Width(right).Render(strings.TrimRight(b.String(), "\n"))
+	return lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.String(), "\n"))
 }
 
-// logPanel рисует панель лога: по умолчанию (после готовности сессии, когда
+// logPanel рисует панель лога локального прогона внутри колонки
+// окружения·секретов·лога: по умолчанию (после готовности сессии, когда
 // упавший шаг известен) открыт хвост упавшего шага; пока шаг не выбран —
 // честная строка ожидания. Отдельного состояния обрыва чтения у панели нет:
 // буфер лога живёт только в памяти и не читает файлов, обрываться нечему —
 // поле под него не заводится, пока не появится реальный источник обрыва.
 // Пока идёт или только что закончилась произвольная команда :!
 // (execView, задача 3), заголовок панели меняется на «ВЫВОД КОМАНДЫ» — тот
-// же буфер лога, что и у шагов, только заголовок называет, что сейчас в нём.
-func (m jobModel) logPanel() string {
-	width := m.width - 2*OuterMargin
+// же буфер лога, что и у шагов, только заголовок называет, что сейчас в
+// нём. Ширина приходит аргументом от колонки (Фаза 13, план 13-02), а не
+// считается от кадра целиком; собственный подзаголовок панели остаётся —
+// он называет, лог какого шага показан, — заголовок колонки называет её
+// целиком, но не то, какой шаг сейчас открыт.
+func (m jobModel) logPanel(width int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -1162,36 +1157,56 @@ func (m jobModel) preparingView() string {
 	return m.spin.View() + " " + m.theme.Text.Render(label)
 }
 
-// bodyView собирает тело экрана джобы: две панели рядом (шаги, окружение),
-// под ними панель лога на всю ширину минус отступ от краёв, и однострочный
-// баннер над строкой подсказки при отказе. Пока экран переноса правок
-// открыт (apply.stage != applyIdle) — список изменённых файлов занимает
-// тело целиком: человек должен видеть ровно то, что будет записано, до
-// любого согласия (FIXUI-03), а не гадать по шагам и окружению позади него.
-func (m jobModel) bodyView() string {
-	if m.phase == phasePreparing {
-		return m.preparingView()
+// columnView — тело ОДНОЙ колонки экрана джобы без заголовка (Фаза 13, план
+// 13-02): id называет, какая из двух колонок сейчас рисуется. Особые
+// состояния, занимающие ЛЕНТУ целиком (подготовка, перенос правок), сюда
+// не заходят вовсе — их рисует fullFrame ниже, и корневая модель спрашивает
+// его ДО сборки ленты, а не веткой внутри тела колонки. Видов внутри правой
+// колонки три по замыслу (idea-0.3.1 §6: окружение, секреты, лог), но
+// переключение между ними — Фаза 15: сейчас колонка показывает окружение и
+// лог сразу, а не переключается.
+func (m jobModel) columnView(id columnID, width int, focused bool) string {
+	if id == colDetail {
+		return m.envPanel(width, focused) + "\n\n" + m.logPanel(width)
 	}
+	return m.stepsPanel(width, focused)
+}
 
-	if m.apply.stage != applyIdle {
-		return m.apply.filesPanel(m.theme)
+// fullFrame — кадр, занимающий ЛЕНТУ целиком вместо колонок (Фаза 13, план
+// 13-02, пункт 6): вид подготовки (спиннер и текст тяги образа) и экран
+// переноса правок со списком изменённых файлов. Оба и раньше занимали тело
+// целиком — с этого плана они занимают ленту, а не одну колонку: подтверждение
+// записи в чужой репозиторий не должно ужиматься до трети экрана (FIXUI-03
+// требует, чтобы человек видел ровно то, что будет записано, до любого
+// согласия). Корневая модель спрашивает fullFrame перед сборкой ленты и,
+// получив истину, рисует его вместо ribbonView().
+func (m jobModel) fullFrame() (string, bool) {
+	switch {
+	case m.phase == phasePreparing:
+		return m.preparingView(), true
+	case m.apply.stage != applyIdle:
+		return m.apply.filesPanel(m.theme), true
 	}
+	return "", false
+}
 
-	left := m.stepsPanel()
-	right := m.envPanel()
-	top := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", PanelGap), right)
-	body := top + "\n\n" + m.logPanel()
-
-	if m.banner != "" {
-		style := m.theme.Danger
-		if m.blockedCanceled {
-			// Отменённая человеком операция не помечается цветом отказа —
-			// это осознанное действие, а не поломка.
-			style = m.theme.Muted
-		}
-		body += "\n\n" + style.Render(m.banner)
+// bannerLine — однострочный баннер отказа (Фаза 13, план 13-02, пункт 8):
+// он больше не часть тела колонки — внутри узкой колонки он уезжал бы за
+// край вместе с ней при прокрутке ленты, а баннер обязан оставаться видимым
+// независимо от того, какая колонка сейчас в кадре. Корневая модель рисует
+// его под ribbonView(), тем же местом вертикального ритма, где он рисовался
+// раньше (App.viewInner).
+func (m jobModel) bannerLine() (string, bool) {
+	if m.banner == "" {
+		return "", false
 	}
-	return body
+	style := m.theme.Danger
+	if m.blockedCanceled {
+		// Отменённая человеком операция не помечается цветом отказа — это
+		// осознанное действие, а не поломка.
+		style = m.theme.Muted
+	}
+	return style.Render(m.banner), true
 }
 
 // keyBar собирает строку клавиш экрана джобы из короткой формы помощи
