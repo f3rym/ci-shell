@@ -64,13 +64,15 @@ func HintJobFailedUnknownStep(name string) string {
 }
 
 // HintNoFailedJob — ни одна джоба не упала (всё зелёное/ещё выполняется).
+// Клавиша читается из раскладки (LOOK-04), а не литералом.
 func HintNoFailedJob() string {
-	return "ни одна джоба не упала — нажмите g, чтобы обновить список"
+	return fmt.Sprintf("ни одна джоба не упала — нажмите %s, чтобы обновить список", DefaultKeys().Refresh.Help().Key)
 }
 
-// HintPipelineRunning — пайплайн выполняется, есть running-джобы.
+// HintPipelineRunning — пайплайн выполняется, есть running-джобы. Клавиша
+// читается из раскладки (LOOK-04), а не литералом.
 func HintPipelineRunning() string {
-	return "пайплайн ещё выполняется — g обновит список"
+	return fmt.Sprintf("пайплайн ещё выполняется — %s обновит список", DefaultKeys().Refresh.Help().Key)
 }
 
 // HintPipelineEmpty — список джоб пуст (0 джоб в пайплайне).
@@ -78,9 +80,10 @@ func HintPipelineEmpty() string {
 	return "в этом пайплайне нет джоб"
 }
 
-// HintRetryJobs — загрузка списка джоб провалилась.
+// HintRetryJobs — загрузка списка джоб провалилась. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintRetryJobs() string {
-	return "g повторит запрос"
+	return fmt.Sprintf("%s повторит запрос", DefaultKeys().Refresh.Help().Key)
 }
 
 // HintBlocked — минимальный честный фолбэк для ошибки/блокировки.
@@ -96,13 +99,15 @@ func HintBlocked(reason string) string {
 // HintImageReady — образ готов, шелл ещё не открывали. Ссылка на образ
 // приходит из конфига джобы (.gitlab-ci.yml) и чистится здесь: переноса
 // ответа API, который сделал бы это раньше, у неё нет (CR-06).
+// Клавиша читается из раскладки (LOOK-04), а не литералом.
 func HintImageReady(image string) string {
-	return fmt.Sprintf("образ %s готов — нажмите s, чтобы войти в контейнер", Plain(image))
+	return fmt.Sprintf("образ %s готов — нажмите %s, чтобы войти в контейнер", Plain(image), DefaultKeys().Shell.Help().Key)
 }
 
-// HintLeftShell — вышли из шелла (после возврата терминала), R ещё не нажимали.
+// HintLeftShell — вышли из шелла (после возврата терминала), R ещё не
+// нажимали. Клавиша читается из раскладки (LOOK-04), а не литералом.
 func HintLeftShell() string {
-	return "вышли из шелла — нажмите R, чтобы проверить починку на упавшем шаге"
+	return fmt.Sprintf("вышли из шелла — нажмите %s, чтобы проверить починку на упавшем шаге", DefaultKeys().Retry.Help().Key)
 }
 
 // HintHandingTerminal — терминал передаётся контейнеру: последний полный
@@ -147,9 +152,10 @@ func HintRestFailed(step int) string {
 	return fmt.Sprintf("шаг %d упал при прогоне оставшихся — вернитесь в контейнер (s)", step)
 }
 
-// HintCleanGreen — :clean — чистый прогон зелёный.
+// HintCleanGreen — :clean — чистый прогон зелёный. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintCleanGreen() string {
-	return "чистый прогон зелёный — нажмите A, чтобы перенести правки в свой репозиторий"
+	return fmt.Sprintf("чистый прогон зелёный — нажмите %s, чтобы перенести правки в свой репозиторий", DefaultKeys().Apply.Help().Key)
 }
 
 // HintCleanFails — :clean — чистый прогон падает.
@@ -194,9 +200,10 @@ func HintCommitMessage() string {
 	return "введите сообщение коммита и нажмите " + confirmKey()
 }
 
-// HintCommitted — :commit выполнен успешно.
+// HintCommitted — :commit выполнен успешно. Клавиша читается из раскладки
+// (LOOK-04), а не литералом.
 func HintCommitted() string {
-	return "зафиксировано — q для выхода или продолжайте чинить следующий шаг"
+	return fmt.Sprintf("зафиксировано — %s для выхода или продолжайте чинить следующий шаг", DefaultKeys().Quit.Help().Key)
 }
 
 // HintNoChanges — A/:A нажаты, но в воспроизведённом чекауте нет правок.
@@ -256,19 +263,22 @@ func HintTreeEmpty() string {
 	return "токену не видно ни одной группы и ни одного проекта"
 }
 
-// HintTreeFailed — загрузка дерева провалилась.
+// HintTreeFailed — загрузка дерева провалилась. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintTreeFailed(reason string) string {
-	return fmt.Sprintf("не удалось получить список: %s — g повторит запрос", reason)
+	return fmt.Sprintf("не удалось получить список: %s — %s повторит запрос", reason, DefaultKeys().Refresh.Help().Key)
 }
 
-// HintTreeFiltered — включён фильтр по дереву.
+// HintTreeFiltered — включён фильтр по дереву. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintTreeFiltered(n int) string {
-	return fmt.Sprintf("подходит записей: %d — esc снимет фильтр", n)
+	return fmt.Sprintf("подходит записей: %d — %s снимет фильтр", n, DefaultKeys().Back.Help().Key)
 }
 
-// HintTreeStale — показанный список дерева взят из кэша.
+// HintTreeStale — показанный список дерева взят из кэша. Клавиша читается
+// из раскладки (LOOK-04), а не литералом.
 func HintTreeStale(age string) string {
-	return fmt.Sprintf("список из кэша, %s назад — g обновит", age)
+	return fmt.Sprintf("список из кэша, %s назад — %s обновит", age, DefaultKeys().Refresh.Help().Key)
 }
 
 // Формулировки корня-хоста дерева репозиториев (Фаза 14, план 14-02,
@@ -299,8 +309,9 @@ func HintTreeHostOpening(host string) string {
 // не ради достижимого пути. esc с самой левой колонки ленты завершает
 // программу (закон ленты, Фаза 13) — формулировка называет это прямо, а не
 // обещает возврат в меню, которого отсюда нет.
+// Клавиша читается из раскладки (LOOK-04), а не литералом.
 func HintTreeNoKeys() string {
-	return "ключей пока нет — esc выйдет из утилиты"
+	return fmt.Sprintf("ключей пока нет — %s выйдет из утилиты", DefaultKeys().Back.Help().Key)
 }
 
 // NoteSourceEmpty и NoteSourceRefused — две формулировки, ради которых
@@ -330,13 +341,18 @@ func NoteSourceRefused(reason string) string {
 // единственная точка входа, вернуться отсюда есть куда; выход по-прежнему
 // живёт на клавише выхода и на Ctrl-C, которую перехватывает корневая
 // модель.
+// Клавиши читаются из раскладки (LOOK-04), а не литералом.
 func HintSplashExit() string {
-	return "esc снимет набранное, ещё раз — в меню; q и ctrl+c выходят сразу"
+	return fmt.Sprintf(
+		"%s снимет набранное, ещё раз — в меню; %s и %s выходят сразу",
+		DefaultKeys().Back.Help().Key, DefaultKeys().Quit.Help().Key, DefaultKeys().Cancel.Help().Key,
+	)
 }
 
-// HintTreeNote — курсор стоит на строке-объяснении.
+// HintTreeNote — курсор стоит на строке-объяснении. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintTreeNote(text string) string {
-	return fmt.Sprintf("%s — g повторит запрос", text)
+	return fmt.Sprintf("%s — %s повторит запрос", text, DefaultKeys().Refresh.Help().Key)
 }
 
 // Формулировки правой панели пайплайнов экрана дерева (Фаза 10, BROW-03).
@@ -356,9 +372,10 @@ func HintPipelinesEmpty(project string) string {
 	return fmt.Sprintf("в проекте %s ещё не было пайплайнов", project)
 }
 
-// HintPipelinesFailed — загрузка пайплайнов провалилась.
+// HintPipelinesFailed — загрузка пайплайнов провалилась. Клавиша читается
+// из раскладки (LOOK-04), а не литералом.
 func HintPipelinesFailed(reason string) string {
-	return fmt.Sprintf("не удалось получить пайплайны: %s — g повторит запрос", reason)
+	return fmt.Sprintf("не удалось получить пайплайны: %s — %s повторит запрос", reason, DefaultKeys().Refresh.Help().Key)
 }
 
 // HintPipelineOpen — курсор на строке пайплайна iid: → откроет колонку джоб
@@ -388,12 +405,13 @@ func HintLogTail(section string) string {
 // групп и проектов кладёт репозитории левее него), и старая формулировка
 // после ленты стала бы враньём в этом случае.
 func HintLogFull() string {
-	return "лог целиком — ↑↓ прокрутит его, esc уйдёт в начало ленты"
+	return fmt.Sprintf("лог целиком — ↑↓ прокрутит его, %s уйдёт в начало ленты", DefaultKeys().Back.Help().Key)
 }
 
-// HintLogUnavailable — запрос лога провалился.
+// HintLogUnavailable — запрос лога провалился. Клавиша читается из
+// раскладки (LOOK-04), а не литералом.
 func HintLogUnavailable(reason string) string {
-	return fmt.Sprintf("лог джобы недоступен: %s — g повторит запрос", reason)
+	return fmt.Sprintf("лог джобы недоступен: %s — %s повторит запрос", reason, DefaultKeys().Refresh.Help().Key)
 }
 
 // Формулировки полноэкранного просмотрщика лога (Фаза 15, план 15-01,
@@ -412,7 +430,7 @@ func HintLogViewing(searchKey, failedKey string) string {
 // HintLogSearching — поле поиска открыто: подтверждение покажет совпадения,
 // возврат снимет поиск целиком.
 func HintLogSearching() string {
-	return "введите запрос и нажмите " + confirmKey() + " — esc снимет поиск"
+	return "введите запрос и нажмите " + confirmKey() + " — " + DefaultKeys().Back.Help().Key + " снимет поиск"
 }
 
 // HintLogFound — поиск задан, совпадения есть: nextKey переходит к
@@ -550,7 +568,7 @@ func HintNoPatchYet() string {
 
 // HintEnvScreen — полноэкранное окружение джобы (:env), n переменных.
 func HintEnvScreen(n int) string {
-	return fmt.Sprintf("окружение джобы, %d переменных — esc вернёт на экран джобы", n)
+	return fmt.Sprintf("окружение джобы, %d переменных — %s вернёт на экран джобы", n, DefaultKeys().Back.Help().Key)
 }
 
 // Формулировки закона ленты колонок (Фаза 13, NAV-01…NAV-02): по одной
@@ -570,7 +588,7 @@ func HintColumnDeeper(what string) string {
 // выходит из утилиты — единственное место, где esc завершает программу, и
 // формулировка обязана назвать это прямо.
 func HintColumnLeftmost() string {
-	return "esc выйдет из утилиты"
+	return DefaultKeys().Back.Help().Key + " выйдет из утилиты"
 }
 
 // HintColumnDeepest — правее фокуса в ленте ничего нет, ← вернёт назад.
