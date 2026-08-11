@@ -15,9 +15,11 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/browse"
+	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/provider/gitlab"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 	"github.com/f3rym/ci-shell/internal/token"
 )
 
@@ -153,6 +155,12 @@ type App struct {
 	access map[string]hostAccess
 
 	keys KeyMap
+
+	// toy — «игрушка» (Фаза 16, план 16-04, TOY-01…04): украшение в правом
+	// углу строки заголовка кадра. Что рисовать и когда тикать — знает
+	// сама модель (internal/ui/toy.go); видна ли она СЕЙЧАС — решает ровно
+	// одна функция корневой модели, toyVisible() ниже.
+	toy toyModel
 }
 
 // quitMsg — просьба экрана завершить программу. Экраны НЕ зовут tea.Quit
@@ -704,6 +712,54 @@ func (a App) cancelsRun() bool {
 	return a.screen() == screenJob && !a.inputActive() && a.job.cancelable()
 }
 
+// toyVisible — ЕДИНСТВЕННАЯ точка решения «видна ли игрушка прямо сейчас»
+// (Фаза 16, план 16-04). Первая проверка — a.toy.off, настройка "off"
+// (TOY-01, не список мест TOY-02: выключенная игрушка не показывается нигде
+// по определению). Дальше — ровно шесть условий TOY-02/idea-0.3.1 §1.1 и
+// ничего сверх них — второго места, решающего этот вопрос, в пакете нет и
+// не появится: список мест, где игрушки нет, обязан быть узнаваемым
+// правилом, а не разбросанными условиями (idea-0.3.1 §8, «игрушка против
+// читаемости»).
+//
+//  1. !a.caps.Colored() — отключён цвет (internal/ui/color.go): игрушка не
+//     несёт состояния, которое обязано пережить монохром, — только
+//     украшает, и в монохроме не нужна.
+//  2. a.width > 0 && a.width < 100 — узкий терминал (порог дословно из
+//     idea-0.3.1 §1.1); проверка > 0 не даёт скрыть игрушку до первого
+//     tea.WindowSizeMsg, когда a.width ещё нулевой.
+//  3. a.height > 0 && a.height < 30 — низкий терминал, тем же порогом и той
+//     же защитой от преждевременного нуля.
+//  4. a.overlay == overlayLog — полноэкранный просмотрщик лога.
+//  5. a.overlay == overlayHelp — полноэкранный экран помощи.
+//  6. a.overlay == overlayGuide && a.guide.Guide.Kind == guideInput —
+//     экран-проводник С ПОЛЕМ ВВОДА (не любой проводник вообще).
+//  7. (a.ribbon.has(colSteps) || a.ribbon.has(colDetail)) && !a.job.idle() —
+//     идёт долгая операция экрана джобы (тяга образа, прогон шагов).
+func (a App) toyVisible() bool {
+	if a.toy.off {
+		return false
+	}
+	if !a.caps.Colored() {
+		return false
+	}
+	if a.width > 0 && a.width < 100 {
+		return false
+	}
+	if a.height > 0 && a.height < 30 {
+		return false
+	}
+	if a.overlay == overlayLog || a.overlay == overlayHelp {
+		return false
+	}
+	if a.overlay == overlayGuide && a.guide.Guide.Kind == guideInput {
+		return false
+	}
+	if (a.ribbon.has(colSteps) || a.ribbon.has(colDetail)) && !a.job.idle() {
+		return false
+	}
+	return true
+}
+
 // resolveBrowse резолвит токен хоста и собирает и значение интерфейса
 // провайдера, и клиент обхода поверх него — browse.New вызывается ровно
 // здесь и в обработке browseMsg ниже, больше нигде в пакете.
@@ -753,10 +809,43 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
-// updateInner обрабатывает сообщения программы. Общие для всех экранов
-// случаи (размер окна, цвет фона, выход, закон ленты) разбираются здесь один
-// раз; остальное уходит подмодели текущего экрана.
+// updateInner — тонкая обёртка над updateInnerScreens (Фаза 16, план 16-04,
+// TOY-03): продвигает кадр игрушки по её собственному тику и решает заново
+// на КАЖДОЕ сообщение программы, тикать ли игрушке дальше, — прежде чем
+// отдать сообщение остальной обработке.
+//
+// toyTickMsg разбирается ЗДЕСЬ, а не внутри updateInnerScreens: тот отдаёт
+// сообщение подмодели текущего экрана диспетчером в самом низу функции —
+// toyTickMsg там не опознала бы ни одна подмодель, и сообщение просто
+// исчезло бы, ничего не сломав, но и не продвинув кадр.
+//
+// a.toy.ensure(a.toyVisible()) зовётся на КАЖДОЕ сообщение — это дёшево
+// (несколько сравнений, без обращения к сети или диску) и гарантирует, что
+// цепочка тика возобновится на СЛЕДУЮЩЕМ же сообщении программы после того,
+// как видимость игрушки перестала быть ложной (открылось окно шире 100
+// колонок, закрылся просмотрщик лога, кончилась долгая операция) — без
+// явного перечисления всех переходов, которые могли бы это вызвать. Пока
+// игрушка скрыта и никаких других сообщений не приходит (пустой терминал,
+// ничего не нажато), новый тик НЕ планируется — TOY-03 держится ровно на
+// этом: toyModel.ensure не возвращает команду, когда видимость ложна.
 func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(toyTickMsg); ok {
+		a.toy = a.toy.advance()
+	}
+	var toyCmd tea.Cmd
+	a.toy, toyCmd = a.toy.ensure(a.toyVisible())
+	model, cmd := a.updateInnerScreens(msg)
+	return model, tea.Batch(toyCmd, cmd)
+}
+
+// updateInnerScreens обрабатывает сообщения программы. Общие для всех
+// экранов случаи (размер окна, цвет фона, выход, закон ленты) разбираются
+// здесь один раз; остальное уходит подмодели текущего экрана. Тело функции
+// — прежний updateInner (Фаза 16, план 16-04 переименовал функцию, не
+// тронув ни одной строки внутри веток): игрушка в этот разбор не
+// вмешивается, её тик и решение о видимости обёрнуты снаружи, в updateInner
+// выше.
+func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -1300,7 +1389,18 @@ func (a App) viewInner() string {
 		return TooSmall(a.width, a.height)
 	}
 
-	title := a.theme.ScreenTitle.Render("ci-shell")
+	// Стиль заголовка проходит через toy.titleStyle ДО рендера (Фаза 16,
+	// план 16-04, TOY-01): дыхание — единственный вариант игрушки, меняющий
+	// яркость самого слова «ci-shell» вместо отдельной полосы (см. вставку
+	// полосы в самом конце сборки заголовка, ниже). showToy решается один
+	// раз здесь же и переиспользуется там — второго вызова toyVisible() в
+	// этой функции не заводится.
+	titleStyle := a.theme.ScreenTitle
+	showToy := a.toyVisible()
+	if showToy {
+		titleStyle = a.toy.titleStyle(titleStyle)
+	}
+	title := titleStyle.Render("ci-shell")
 	body := ""
 	keybar := ""
 	hint := ""
@@ -1412,6 +1512,24 @@ func (a App) viewInner() string {
 		}
 	}
 
+	// Полоса игрушки (Фаза 16, план 16-04, TOY-01/TOY-04) — ПОСЛЕДНЯЯ правка
+	// title, той же формулой отступа, что уже применяет signatureTitle
+	// (internal/ui/menu.go) для подписи «by F3»: измерение УЖЕ отрисованной
+	// (ANSI-стилизованной) строки через textwidth.Of безопасно и уже
+	// применяется этим же файлом ровно так же. Полоса встаёт ПОСЛЕ всего,
+	// что уже дописано в title (подпись автора, имя хоста) — самым правым
+	// элементом строки заголовка — и не встаёт вовсе, если для неё не
+	// осталось ни одной ячейки (gap < 1): узкий кадр молча остаётся без
+	// полосы, а не наезжает на уже написанный текст.
+	if showToy {
+		if strip := a.toy.strip(a.theme); strip != "" {
+			avail := a.width - 2*OuterMargin - textwidth.Of(title)
+			if gap := avail - textwidth.Of(strip); gap >= 1 {
+				title = title + strings.Repeat(" ", gap) + strip
+			}
+		}
+	}
+
 	margin := strings.Repeat(" ", OuterMargin)
 	var b strings.Builder
 	b.WriteString(margin)
@@ -1470,6 +1588,13 @@ func Run(ctx context.Context) error {
 	caps := DetectCaps()
 	theme := NewTheme(caps)
 	keys := DefaultKeys()
+	// Настройка игрушки читается ровно здесь, тем же приёмом, что уже читает
+	// internal/ui/session.go (Фаза 16, план 16-04): ошибка чтения
+	// намеренно отбрасывается — сломанный или недоступный файл настроек не
+	// должен мешать запуску интерфейса, игрушка просто получит случайный
+	// вариант тем же путём, что и пустая настройка (parseToyKind,
+	// internal/ui/toy.go).
+	settings, _, _ := config.Load()
 	app := App{
 		caps:   caps,
 		theme:  theme,
@@ -1484,6 +1609,7 @@ func Run(ctx context.Context) error {
 		// (Фаза 13, лента ещё пуста), но заставка теперь открывается из
 		// меню, а не наоборот.
 		overlay: overlayMenu,
+		toy:     newToyModel(settings.Animation),
 	}
 	p := tea.NewProgram(app, tea.WithContext(ctx))
 	// Функция отправки существует только теперь — раньше программы не
