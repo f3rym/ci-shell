@@ -422,7 +422,23 @@ func (a App) ribbonView() string {
 	}
 	widths := a.ribbon.layout()
 	gap := strings.Repeat(" ", PanelGap)
-	parts := make([]string, 0, count*2-1)
+	collapsed := a.ribbon.collapsed()
+	parts := make([]string, 0, (len(collapsed)+count)*2-1)
+	// Свёрнутые колонки (Фаза 16, LOOK-03) рисуются ПЕРЕД видимым окном
+	// полных колонок, слева направо, тем же зазором PanelGap, что уже
+	// разделяет полные колонки между собой — второго зазора не изобретается.
+	// Они остаются на экране узкой полосой вместо того, чтобы полностью
+	// исчезнуть за краем, как до этого плана (ribbon.window() отдавал только
+	// видимый срез).
+	for i := range collapsed {
+		if i > 0 {
+			parts = append(parts, gap)
+		}
+		parts = append(parts, a.collapsedColumnView(CollapsedColumnWidth, a.ribbon.columnBoxHeight()))
+	}
+	if len(collapsed) > 0 {
+		parts = append(parts, gap)
+	}
 	for i := 0; i < count; i++ {
 		if i > 0 {
 			parts = append(parts, gap)
@@ -492,13 +508,6 @@ func (a App) columnView(col column, width int, focused bool) string {
 		body = a.job.columnView(col.id, width, focused)
 	}
 
-	// Ширина содержимого рамки: Lip Gloss рисует рамку СВЕРХ Width/Height, а
-	// не считает её их частью (Width(w).Border(...) даёт блок шириной w+2) —
-	// вычитаем 2 ячейки рамки (лево+право), прижимая к минимуму 1.
-	boxWidth := width - 2
-	if boxWidth < 1 {
-		boxWidth = 1
-	}
 	// Высота содержимого рамки: columnBoxHeight() — высота заголовок+рамка
 	// целиком, минус 1 строка заголовка колонки (она остаётся НАД рамкой, а
 	// не внутри неё) и минус 2 строки самой рамки (верх+низ), прижатая к
@@ -508,18 +517,64 @@ func (a App) columnView(col column, width int, focused bool) string {
 		boxHeight = 1
 	}
 
+	return lipgloss.NewStyle().Width(width).Render(header + "\n" + a.boxed(width, boxHeight, focused, body))
+}
+
+// boxed — общий приём рамки колонки (Фаза 16, план 16-01), вынесенный из
+// columnView выше: прижимает ширину/высоту к минимуму, выбирает цвет рамки
+// по focused и оборачивает content ровно одним
+// lipgloss.NewStyle().Width().Height().Border(lipgloss.RoundedBorder()).
+// BorderForeground(...).Render(content). Свёрнутая колонка (LOOK-03,
+// collapsedColumnView ниже) рисуется ТЕМ ЖЕ приёмом — второй формулы рамки
+// колонки в файле не появляется, LOOK-01 и LOOK-03 обязаны выглядеть одним и
+// тем же языком, а не двумя похожими.
+func (a App) boxed(width, height int, focused bool, content string) string {
+	// Ширина содержимого рамки: Lip Gloss рисует рамку СВЕРХ Width/Height, а
+	// не считает её их частью (Width(w).Border(...) даёт блок шириной w+2) —
+	// вычитаем 2 ячейки рамки (лево+право), прижимая к минимуму 1.
+	boxWidth := width - 2
+	if boxWidth < 1 {
+		boxWidth = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
 	borderColor := a.theme.Border.GetForeground()
 	if focused {
 		borderColor = a.theme.Accent.GetForeground()
 	}
-	boxed := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Width(boxWidth).
-		Height(boxHeight).
+		Height(height).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Render(body)
+		Render(content)
+}
 
-	return lipgloss.NewStyle().Width(width).Render(header + "\n" + boxed)
+// collapsedColumnView — тело свёрнутой колонки (Фаза 16, LOOK-03): пустая
+// строка содержимого, обёрнутая тем же boxed(width, height, focused=false,
+// "") — свёрнутая колонка НИКОГДА не в фокусе по построению (фокус всегда на
+// одной из полных колонок окна, ribbon.window()), поэтому focused здесь
+// буквальный false, а не переменная. Высота — та же
+// a.ribbon.columnBoxHeight() - 1 - 2 (минус строка заголовка НАД рамкой,
+// минус верх/низ рамки), что и у полных колонок: свёрнутая колонка обязана
+// заканчиваться на той же нижней границе, что и соседние (LOOK-02 не
+// отменяется свёрнутой колонкой). Заголовка НАД полосой нет — заголовок
+// несёт СМЫСЛ («РЕПОЗИТОРИИ», номер пайплайна), а полоса шириной в 3 ячейки
+// не может показать ни одной графемы этого смысла без обрезки до
+// бессмысленного символа; пустая строка вместо заголовка честнее подписи из
+// одной обрубленной буквы.
+func (a App) collapsedColumnView(width, height int) string {
+	// height приходит от вызывающего (ribbonView, ниже) равным
+	// a.ribbon.columnBoxHeight() — той же величине, что columnView() выше
+	// уже вычитает на 1 (заголовок) и 2 (верх+низ рамки) для полных колонок;
+	// свёрнутая колонка обязана дотянуться до того же пола кадра.
+	boxHeight := height - 1 - 2
+	if boxHeight < 1 {
+		boxHeight = 1
+	}
+	return a.boxed(width, boxHeight, false, "")
 }
 
 // dropped разбирает колонки, отброшенные лентой при открытии другого пути
