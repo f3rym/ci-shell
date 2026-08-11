@@ -212,10 +212,40 @@ func (r ribbon) setSize(width, height int) ribbon {
 	return r.reflow()
 }
 
+// collapsedFor сообщает, сколько колонок окажется свёрнуто (левее видимого
+// окна), ЕСЛИ показать n полных колонок: та же формула первого элемента
+// окна, что уже считает window() (first := r.focus - n + 1, прижатое к
+// [0, len(r.cols)-n]), но БЕЗ памяти r.first — чистая функция от n и
+// текущего фокуса. window() при выборе first помнит, откуда лента уже
+// показывала (гистерезис Фазы 13, план 13-02) — collapsedFor этой памяти не
+// держит, ей нужно только число колонок, оставшихся левее, для оценки
+// бюджета ширины кандидата n, а не само окно.
+func (r ribbon) collapsedFor(n int) int {
+	if n <= 0 || r.empty() {
+		return 0
+	}
+	first := r.focus - n + 1
+	if first < 0 {
+		first = 0
+	}
+	if first > len(r.cols)-n {
+		first = len(r.cols) - n
+	}
+	if first < 0 {
+		first = 0
+	}
+	return first
+}
+
 // visibleCount — сколько колонок помещается одновременно: наибольшее n от
 // одного до ColumnsVisibleMax, для которого n*ColumnMin + (n-1)*PanelGap
 // укладывается в ширину за вычетом отступов от обоих краёв, но не больше
-// числа колонок в самой ленте.
+// числа колонок в самой ленте. Ширина, зарезервированная под свёрнутые
+// колонки (collapsedFor(c), Фаза 16, LOOK-03), вычитается из бюджета ДО
+// сравнения с avail: без этого вычета лента заняла бы больше ширины
+// терминала, чем есть на самом деле, как только слева появляется хотя бы
+// одна свёрнутая колонка — переполнение вправо, а не «прижаты к краям»
+// (LOOK-02, план 16-01).
 func (r ribbon) visibleCount() int {
 	if r.empty() {
 		return 0
@@ -223,7 +253,11 @@ func (r ribbon) visibleCount() int {
 	avail := r.width - 2*OuterMargin
 	n := 1
 	for c := 2; c <= ColumnsVisibleMax; c++ {
-		if c*ColumnMin+(c-1)*PanelGap > avail {
+		budget := c*ColumnMin + (c-1)*PanelGap
+		if collapsed := r.collapsedFor(c); collapsed > 0 {
+			budget += collapsed * (CollapsedColumnWidth + PanelGap)
+		}
+		if budget > avail {
 			break
 		}
 		n = c
@@ -277,6 +311,12 @@ func (r ribbon) layout() []int {
 		return nil
 	}
 	avail := r.width - 2*OuterMargin - (count-1)*PanelGap
+	// Колонки [0, first) — все свёрнутые (Фаза 16, LOOK-03): их ширина
+	// вычитается из бюджета ДО деления на count той же поправкой, что
+	// visibleCount() уже применяет к своей оценке бюджета выше.
+	if collapsedN := first; collapsedN > 0 {
+		avail -= collapsedN * (CollapsedColumnWidth + PanelGap)
+	}
 	base := avail / count
 	rem := avail % count
 	widths := make([]int, count)
@@ -300,6 +340,83 @@ func (r ribbon) columnBoxHeight() int {
 		h = 0
 	}
 	return h
+}
+
+// collapsed возвращает колонки левее видимого окна (Фаза 16, LOOK-03): те же
+// колонки, что раньше просто уезжали за край и переставали существовать в
+// кадре вовсе (Фаза 13) — теперь они остаются на экране, просто уже, а не
+// исчезают. Пустой срез (nil), если свёрнутых колонок нет.
+func (r ribbon) collapsed() []column {
+	first, _ := r.window()
+	if first == 0 {
+		return nil
+	}
+	return r.cols[:first]
+}
+
+// focusOn переводит фокус на колонку id, если она есть в ленте, и
+// пересчитывает окно видимых колонок (r.reflow()). Одношаговые
+// deeper()/shallower()/leftmost() выше двигают фокус НА ОДНУ позицию или в
+// начало; клику мыши (Фаза 16, LOOK-05, internal/ui/app.go, clickRow) нужно
+// попасть на ПРОИЗВОЛЬНУЮ уже открытую колонку одним вызовом — второго
+// способа задать фокус в проекте не появляется, focusOn встаёт в тот же ряд
+// методов, что и три перечисленных.
+func (r ribbon) focusOn(id columnID) ribbon {
+	for i, c := range r.cols {
+		if c.id == id {
+			r.focus = i
+			break
+		}
+	}
+	return r.reflow()
+}
+
+// hitTest переводит координату клика терминала (x, y, обе с нуля, как отдаёт
+// tea.Mouse) в колонку и номер строки внутри её списка (Фаза 16, LOOK-05).
+// contentTop — номер строки (считая с нуля от верха кадра), с которой
+// начинается ПЕРВАЯ строка содержимого ВНУТРИ рамки первой колонки
+// (заголовок колонки и верхняя граница рамки уже позади) — значение
+// приходит от вызывающего (App.contentTop, internal/ui/app.go), потому что
+// ленте по контракту файла ничего не известно про заголовок кадра и рамку
+// сверх собственной геометрии колонок.
+//
+// Позиция X = 0 для самой левой колонки, а не OuterMargin: тело кадра
+// (App.viewInner, internal/ui/app.go) пишет ribbonView() без отступа слева —
+// отступ учтён только в бюджете ширины (visibleCount()/layout() выше вычитают
+// 2*OuterMargin из доступной ширины терминала), но не в самих печатаемых
+// строках тела. hitTest обязан мерить ту же геометрию, что печатает
+// ribbonView, а не декларативный отступ, иначе клик по первой колонке не
+// совпал бы с тем, что человек реально видит на экране.
+func (r ribbon) hitTest(x, y, contentTop int) (id columnID, row int, ok bool) {
+	col := 0
+	for _, c := range r.collapsed() {
+		if x >= col && x < col+CollapsedColumnWidth {
+			id = c.id
+			row = -1
+			ok = true
+			return
+		}
+		col += CollapsedColumnWidth + PanelGap
+	}
+
+	first, count := r.window()
+	widths := r.layout()
+	for i := 0; i < count; i++ {
+		w := widths[i]
+		if x >= col && x < col+w {
+			id = r.cols[first+i].id
+			if y < contentTop {
+				row = -1
+			} else {
+				row = y - contentTop
+			}
+			ok = true
+			return
+		}
+		col += w + PanelGap
+	}
+
+	return
 }
 
 // navAction — что означает нажатие в терминах ленты.
