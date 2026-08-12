@@ -275,8 +275,17 @@ func mapEntry(m *yaml.Node, name string) (keyNode, valueNode *yaml.Node, ok bool
 // правкой одной строки: простой скаляр (не якорь, не ссылка — Kind !=
 // ScalarNode отсекает алиас), не блочный (literal/folded — они всегда
 // начинаются со следующей строки, что уже ловит проверка Line), на той же
-// строке, что и его ключ keyNode.
-func editableScalar(val, keyNode *yaml.Node) bool {
+// строке, что и его ключ keyNode. parent — карта, СОДЕРЖАЩАЯ значение (для
+// случая 1 — конкретный проект, projVal), а не сам узел значения. Валидный
+// YAML допускает gitlab.com/proj: {FOO: "a", BAR: "b"} — обе пары на одной
+// физической строке; без проверки стиля родителя editableScalar считал бы
+// FOO редактируемым (он простой скаляр на строке своего ключа), а
+// построчная правка стёрла бы всю строку целиком, включая BAR — соседнюю
+// переменную того же проекта (CR-03 обзора v0.3.1).
+func editableScalar(val, keyNode, parent *yaml.Node) bool {
+	if parent.Style == yaml.FlowStyle {
+		return false
+	}
 	if val.Kind != yaml.ScalarNode {
 		return false
 	}
@@ -453,6 +462,12 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 			// строки раздела вставляются две строки: ключ проекта и
 			// переменная под ним, с отступами на два и на четыре больше
 			// колонки раздела.
+			if projectsVal.Style == yaml.FlowStyle {
+				return path, fmt.Errorf(
+					"env: раздел projects в файле %s записан в форме, которую точечная правка не переписывает (flow-запись {...} на строке %d): %w",
+					path, projectsKeyNode.Line, ErrSecretNotEditable,
+				)
+			}
 			indent := projectsKeyNode.Column - 1
 			lines = insertLines(lines, projectsKeyNode.Line,
 				strings.Repeat(" ", indent+2)+projectKey+":",
@@ -469,6 +484,12 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 				// не гадая, кому принадлежат идущие следом комментарии, а
 				// вставка первой строкой не может присвоить себе чужой
 				// комментарий.
+				if projVal.Style == yaml.FlowStyle {
+					return path, fmt.Errorf(
+						"env: проект %s в файле %s записан в форме, которую точечная правка не переписывает (flow-запись {...} на строке %d): %w",
+						projectKey, path, projKeyNode.Line, ErrSecretNotEditable,
+					)
+				}
 				indent := projKeyNode.Column - 1
 				lines = insertLines(lines, projKeyNode.Line,
 					strings.Repeat(" ", indent+2)+key+": "+scalar,
@@ -478,7 +499,7 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 				// Случай 1: переменная найдена — правится её собственная
 				// строка целиком; отступ берётся из КОЛОНКИ узла ключа, а
 				// не выдумывается.
-				if !editableScalar(varValNode, varKeyNode) {
+				if !editableScalar(varValNode, varKeyNode, projVal) {
 					return path, fmt.Errorf(
 						"env: значение переменной %s в файле %s записано в форме, которую точечная правка не переписывает (строка %d): %w",
 						key, path, varKeyNode.Line, ErrSecretNotEditable,
