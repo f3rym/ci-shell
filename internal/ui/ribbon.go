@@ -131,7 +131,9 @@ func (r ribbon) has(id columnID) bool {
 
 // reset возвращает ленту из одной колонки id с уточнением заголовка label —
 // вход по прямой ссылке на джобу и вход в браузер, где колонок левее нет:
-// самая левая колонка становится id, и esc из неё выходит.
+// самая левая колонка становится id. С Фазы 18 (KEYS-02) esc/q из неё больше
+// не выходят — leftmost()/shallower() на уже самой левой колонке не делают
+// ничего (см. их комментарии ниже), выход остался на Cancel и на :q.
 func (r ribbon) reset(id columnID, label string) ribbon {
 	r.cols = []column{{id: id, label: label}}
 	r.focus = 0
@@ -170,7 +172,8 @@ func (r ribbon) deeper() ribbon {
 }
 
 // shallower переводит фокус на колонку левее; на самой левой ничего не
-// делает — выход из самой левой колонки это esc, а не стрелка.
+// делает — с Фазы 18 (KEYS-02) выхода из самой левой колонки по esc/q
+// больше нет вовсе, выход остался на Cancel (ctrl+c) и на :q.
 func (r ribbon) shallower() ribbon {
 	if r.focus > 0 {
 		r.focus--
@@ -501,11 +504,17 @@ const (
 // — navShallower, esc — navLeftmost, всё остальное — navNone. Второе место
 // толкования стрелки и есть та поломка, которую фаза чинит — закон живёт
 // ровно здесь, а не веткой внутри разбора клавиш каждого экрана.
+//
+// q матчится в ту же ветку, что и стрелка влево (Фаза 18, KEYS-02): с этой
+// фазы q — ровно то же движение по ленте, что и ←, той же самой веткой —
+// второй реализации «шага назад» здесь не появляется, q не получает своего
+// navAction. Выход по q убран (internal/ui/app.go) — единственный оставшийся
+// путь выхода это Cancel (ctrl+c) и команда :q.
 func navFor(msg tea.KeyPressMsg, k KeyMap) navAction {
 	switch {
 	case key.Matches(msg, k.Right), key.Matches(msg, k.Open):
 		return navDeeper
-	case key.Matches(msg, k.Left):
+	case key.Matches(msg, k.Left), key.Matches(msg, k.Quit):
 		return navShallower
 	case key.Matches(msg, k.Back):
 		return navLeftmost

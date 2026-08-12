@@ -584,11 +584,12 @@ func HintColumnDeeper(what string) string {
 	return fmt.Sprintf(GlyphRight+" откроет %s", what)
 }
 
-// HintColumnLeftmost — человек в самой левой колонке ленты: esc отсюда
-// выходит из утилиты — единственное место, где esc завершает программу, и
-// формулировка обязана назвать это прямо.
+// HintColumnLeftmost — человек в самой левой колонке ленты: с Фазы 18
+// (KEYS-02) esc/q отсюда больше не выходят из утилиты — они синонимы и
+// дальше ленту не двигают. Формулировка называет настоящий путь выхода
+// (Cancel, :q), а не клавишу, которая перестала выходить.
 func HintColumnLeftmost() string {
-	return DefaultKeys().Back.Help().Key + " выйдет из утилиты"
+	return DefaultKeys().Cancel.Help().Key + " или :q выйдет из утилиты"
 }
 
 // HintColumnDeepest — правее фокуса в ленте ничего нет, ← вернёт назад.
