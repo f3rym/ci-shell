@@ -323,6 +323,7 @@ func (a App) focusColumn() App {
 	}
 	a.jobs = a.jobs.setColumnFocus(id)
 	a.job = a.job.setColumnFocus(id)
+	a = a.syncColumnSizes()
 	return a.restoreCursor()
 }
 
@@ -383,37 +384,75 @@ func (a App) restoreCursor() App {
 	return a
 }
 
-// columnWidthFor — ширина, которую модель колонки id получает при изменении
-// размера окна (Фаза 13, план 13-02): для видимой колонки — из
-// a.ribbon.layout() по её позиции в текущем окне; для колонки, которая уже
-// есть в ленте, но сейчас не видна, — базовая ширина без остатка фокуса
-// (тот же расчёт, каким a.ribbon.layout() делит доступную ширину поровну),
-// чтобы при въезде в кадр колонка не ждала следующего сообщения о размере;
-// для колонки, которой в ленте нет вовсе, — ноль, потому что рисовать её
-// сейчас некому. Второго расчёта ширины колонки в пакете не заводится:
-// отрисовка (columnView ниже) берёт её же, свежую на каждый кадр, из
-// a.ribbon.layout() напрямую.
-func (a App) columnWidthFor(id columnID) int {
-	idx := -1
-	for i, c := range a.ribbon.cols {
-		if c.id == id {
-			idx = i
-			break
+// visibleLayout — единственное место, где содержимое видимых колонок
+// превращается в их фактические ширины (Фаза 17, FIT-02): собирает
+// желаемую ширину каждой видимой колонки одним диспетчером
+// (naturalWidthFor) и отдаёт её ленте (ribbon.layout) для окончательного
+// распределения. Три потребителя — отрисовка (ribbonView), клик мыши
+// (hitTest) и пересинхронизация подмоделей (syncColumnSizes) — обязаны
+// увидеть ОДНИ И ТЕ ЖЕ ширины в пределах одного кадра, второго места
+// этого расчёта в пакете не появляется.
+func (a App) visibleLayout() (first, count int, widths []int) {
+	first, count = a.ribbon.window()
+	if count == 0 {
+		return first, count, nil
+	}
+	desired := make([]int, count)
+	for i := 0; i < count; i++ {
+		desired[i] = a.naturalWidthFor(a.ribbon.cols[first+i].id)
+	}
+	return first, count, a.ribbon.layout(desired)
+}
+
+// naturalWidthFor — диспетчер желаемой ширины колонки id по её реальному
+// содержимому: разбор по идентификатору, тем же приёмом, что уже
+// применяют rememberCursor/restoreCursor выше в файле — общего
+// интерфейса у четырёх моделей-колонок нет (см. их комментарий).
+func (a App) naturalWidthFor(id columnID) int {
+	switch id {
+	case colRepos, colPipelines:
+		if a.treeReady {
+			return a.tree.naturalWidth(id)
+		}
+		return ColumnMin
+	case colJobs:
+		return a.jobs.naturalWidth()
+	case colSteps, colDetail:
+		return a.job.naturalWidth(id)
+	}
+	return ColumnMin
+}
+
+// syncColumnSizes — единственная точка пересчёта размеров ВСЕХ подмоделей
+// колонок ленты (Фаза 17, чинит CR-01 обзора v0.3.1): вызывается из
+// focusColumn() — единственной точки, через которую проходят ВСЕ
+// переходы фокуса и состава ленты (открытие новой колонки, переход по
+// уже существующей, возврат назад, клик мышью), а не только открытие
+// новой колонки и tea.WindowSizeMsg, как было раньше у columnWidthFor.
+// Колонка вне текущего окна (свёрнутая либо ещё не открытая) размер не
+// получает вовсе: она получит верный размер на следующий переход,
+// который вернёт её в окно, — второй, спекулятивной формулы ширины для
+// невидимых колонок здесь не заводится (WR-01 обзора v0.3.1 была ровно
+// такой формулой, разошедшейся с ribbon.layout).
+func (a App) syncColumnSizes() App {
+	first, count, widths := a.visibleLayout()
+	reposWidth, pipelinesWidth, jobsWidth := 0, 0, 0
+	for i := 0; i < count; i++ {
+		switch a.ribbon.cols[first+i].id {
+		case colRepos:
+			reposWidth = widths[i]
+		case colPipelines:
+			pipelinesWidth = widths[i]
+		case colJobs:
+			jobsWidth = widths[i]
 		}
 	}
-	if idx < 0 {
-		return 0
+	if a.treeReady {
+		a.tree = a.tree.setSize(reposWidth, pipelinesWidth, a.height)
 	}
-	first, count := a.ribbon.window()
-	if count > 0 && idx >= first && idx < first+count {
-		return a.ribbon.layout()[idx-first]
-	}
-	n := a.ribbon.visibleCount()
-	if n == 0 {
-		return 0
-	}
-	avail := a.width - 2*OuterMargin - (n-1)*PanelGap
-	return avail / n
+	a.jobs = a.jobs.setSize(jobsWidth, a.height)
+	a.job = a.job.setSize(a.height)
+	return a
 }
 
 // ribbonView — единственное место сборки кадра из ВИДИМЫХ колонок ленты
@@ -424,11 +463,10 @@ func (a App) columnWidthFor(id columnID) int {
 // internal/ui/ribbon.go) — здесь он не проверяется повторно, только
 // читается через window()/layout().
 func (a App) ribbonView() string {
-	first, count := a.ribbon.window()
+	first, count, widths := a.visibleLayout()
 	if count == 0 {
 		return ""
 	}
-	widths := a.ribbon.layout()
 	gap := strings.Repeat(" ", PanelGap)
 	collapsed := a.ribbon.collapsed()
 	parts := make([]string, 0, (len(collapsed)+count)*2-1)
@@ -859,29 +897,15 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Окно видимых колонок ленты и их ширины пересчитываются на том же
 		// сообщении, что и всё остальное (Фаза 13) — ДО передачи размера
 		// моделям колонок ниже: они читают ровно этот расчёт
-		// (columnWidthFor), а не делят ширину кадра сами.
+		// (App.visibleLayout, Фаза 17), а не делят ширину кадра сами.
 		a.ribbon = a.ribbon.setSize(msg.Width, msg.Height)
-		// Колонка джоб получает свою ширину от ленты (план 13-02, задача 2,
-		// пункт 1) — тем же приёмом, что и колонки дерева ниже; колонка
-		// джобы (шаги, окружение·секреты·лог) хранит только высоту —
-		// ширина панелей больше не поле модели (пункт 7), она приходит
-		// аргументом в columnView на каждый кадр.
-		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), msg.Height)
-		a.job = a.job.setSize(msg.Height)
-		if a.treeReady {
-			// Дерево держит настоящие компоненты Bubbles (list.Model,
-			// table.Model внутри pipelinePanel) — до первого browseMsg они
-			// ещё не собраны newTreeModel, и SetSize на нулевом значении
-			// небезопасен, в отличие от jobsModel/jobModel, которые
-			// обходятся простыми полями. Условие проверяет ровно тот факт,
-			// который декларирует: собран ли экран дерева, а не собран ли
-			// клиент обхода (CR-04). Ширина каждой из двух колонок дерева —
-			// своя (план 13-02, задача 1, пункт 7): список получает ширину
-			// колонки репозиториев, панель пайплайнов — ширину колонки
-			// пайплайнов, а не долю одной общей ширины, посчитанную самим
-			// деревом.
-			a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), msg.Height)
-		}
+		// Единая пересинхронизация размеров ВСЕХ подмоделей колонок (Фаза
+		// 17, focusColumn/syncColumnSizes) заменяет три отдельных вызова
+		// setSize, что были здесь до этой фазы — второго места, задающего
+		// размер подмоделям на изменение размера окна, не остаётся. treeReady
+		// охраняет дерево тем же способом, что и раньше (CR-04 обзора
+		// v0.3.0): syncColumnSizes сама проверяет это поле.
+		a = a.focusColumn()
 		if a.overlay == overlayHelp {
 			// Тот же приём, что и у дерева выше: область просмотра экрана
 			// помощи (viewport.Model) собрана newHelpModel только при
@@ -1060,7 +1084,8 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.overlay != overlayNone || a.inputActive() {
 			return a, nil
 		}
-		id, row, ok := a.ribbon.hitTest(m.X, m.Y, a.contentTop())
+		_, _, widths := a.visibleLayout()
+		id, row, ok := a.ribbon.hitTest(widths, m.X, m.Y, a.contentTop())
 		if !ok {
 			// Промах мимо всех колонок (зазор между ними, поля кадра) —
 			// ничего не делает.
@@ -1120,7 +1145,7 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// печатала собственная шапка панели, теперь её ставит корневая
 		// модель при открытии колонки.
 		a.ribbon = a.ribbon.reset(colJobs, a.jobs.columnLabel())
-		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), a.height)
+		a = a.focusColumn()
 		a.overlay = overlayNone
 		return a, a.jobs.load()
 
@@ -1138,11 +1163,11 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tree, cmd = newTreeModel(msg.Hosts, access, a.theme, a.keys)
 		a.treeReady = true
 		a.ribbon = a.ribbon.reset(colRepos, "")
-		// Размер дерева берётся ПОСЛЕ сброса ленты и тем же расчётом, что и
-		// на tea.WindowSizeMsg (columnWidthFor на каждую из двух колонок):
+		// Размер дерева берётся ПОСЛЕ сброса ленты и treeReady=true, тем же
+		// единым переходом, что и любой другой (Фаза 17, focusColumn):
 		// до сброса лента ещё держит колонки прошлой ветки, и ширины
 		// пришли бы от них.
-		a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), a.height)
+		a = a.focusColumn()
 		a.overlay = overlayNone
 		return a, cmd
 
@@ -1182,11 +1207,6 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.ribbon, dropped = a.ribbon.open(colPipelines, label)
 		a, _ = a.dropped(dropped)
 		a = a.focusColumn()
-		// Колонка пайплайнов только что появилась в ленте: ширины видимых
-		// колонок изменились обе, а list.Model и table.Model внутри дерева
-		// держат размер состоянием — без этой строки правая панель осталась
-		// бы нулевой ширины до следующего tea.WindowSizeMsg.
-		a.tree = a.tree.setSize(a.columnWidthFor(colRepos), a.columnWidthFor(colPipelines), a.height)
 
 	case openPipelineMsg:
 		// Открытие пайплайна с правой панели экрана дерева (BROW-03; Фаза
@@ -1200,7 +1220,6 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ссылке выше (jobRefMsg): идентификатор пайплайна, ветка и
 		// сокращённый коммит, а не только номер и ветка, как раньше.
 		a.ribbon, dropped = a.ribbon.open(colJobs, a.jobs.columnLabel())
-		a.jobs = a.jobs.setSize(a.columnWidthFor(colJobs), a.height)
 		var cleanup tea.Cmd
 		a, cleanup = a.dropped(dropped)
 		a = a.focusColumn()
@@ -1236,7 +1255,6 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// «текущий хост» корневой модели не существует.
 		sess := NewSession(a.jobs.ref, a.access[a.jobs.ref.Host].Provider, msg.job, event.Emitter{Sink: bridge})
 		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
-		a.job = a.job.setSize(a.height)
 		a = a.focusColumn()
 		return a, tea.Batch(cleanup, a.job.init())
 
