@@ -88,15 +88,35 @@ type openPipelineMsg struct {
 	pipeline provider.Pipeline
 }
 
+// tableCellPadding, tableColumnCount — надбавка, которую table.DefaultStyles()
+// (charm.land/bubbles/v2/table, не наш код) назначает Header и Cell:
+// Padding(0, 1) — по 1 ячейке слева и справа НА КАЖДУЮ отрисованную колонку
+// таблицы. newPipelinePanel ниже эти стили не переопределяет (переопределён
+// только Selected), поэтому эта надбавка действует. table.headersView и
+// table.renderRow сначала обрезают содержимое ячейки РОВНО до col.Width, а
+// ЗАТЕМ оборачивают его этим стилем — итоговая ширина отрисованной строки
+// таблицы всегда на tableColumnCount*tableCellPadding ячеек БОЛЬШЕ суммы
+// Width всех колонок. pipelineColumns не вычитал эту надбавку (план 17-02,
+// задача 3, объявленный «сумма столбцов равна width») — сумма пяти Width
+// действительно была равна width, но НАСТОЯЩАЯ отрисованная строка получалась
+// шире width на 10 ячеек, и Lip Gloss (App.boxed, internal/ui/app.go)
+// переносил переполнившийся хвост строки словом — «когда» уезжало на вторую
+// строку (FIT-05, живой обзор после плана 17-02: дефект остался, несмотря на
+// объявленное закрытие).
+const (
+	tableCellPadding = 2
+	tableColumnCount = 5
+)
+
 // pipelineColumns считает ширины столбцов таблицы пайплайнов от ширины
 // колонки width (Фаза 13, план 13-02): символ статуса и номер держат свою
 // малую ширину — расширять их от лишней ширины окна незачем, — а весь
 // остаток делится между веткой и коммитом. Заголовки колонок таблицы
 // выключены — заголовок несёт лента (App.columnView), не таблица.
 //
-// Сумма symbolWidth+numberWidth+branch+commit+whenWidth теперь РОВНО width
-// (когда width >= symbolWidth+numberWidth+whenWidth, что план 17-01 уже
-// гарантирует через ColumnMin), а не «не меньше» её, как раньше (Фаза 17,
+// Сумма symbolWidth+numberWidth+branch+commit+whenWidth+tableColumnCount*
+// tableCellPadding (реальная ширина отрисованной строки, а не только сумма
+// Width) теперь РОВНО width, а не «не меньше» её, как раньше (Фаза 17,
 // FIT-05): нижние пороги ширины «ветка»/«коммит» форсировали остаток вверх
 // независимо от реально доступной ширины — при узкой колонке итоговая сумма
 // пяти столбцов превышала переданный width, и Lip Gloss переносил
@@ -110,7 +130,7 @@ func pipelineColumns(width int) []table.Column {
 		numberWidth = 8
 		whenWidth   = 12
 	)
-	rest := width - symbolWidth - numberWidth - whenWidth
+	rest := width - symbolWidth - numberWidth - whenWidth - tableColumnCount*tableCellPadding
 	if rest < 0 {
 		rest = 0
 	}
