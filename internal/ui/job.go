@@ -1317,9 +1317,14 @@ func envRowsFromSession(s *Session) []envRow {
 // инверсией — только при focused, иначе на экране был бы курсор сразу в
 // двух колонках (шаги и окружение·секреты·лог).
 func (m jobModel) stepsPanel(width int, focused bool) string {
+	first, count, hidden := windowWithHint(len(m.stepRows), m.height, m.cursor)
 	var b strings.Builder
-	for i, r := range m.stepRows {
-		b.WriteString(m.stepLine(r, i == m.cursor && focused, width))
+	for i := first; i < first+count; i++ {
+		b.WriteString(m.stepLine(m.stepRows[i], i == m.cursor && focused, width))
+		b.WriteString("\n")
+	}
+	if hidden > 0 {
+		b.WriteString(m.theme.Muted.Render(hiddenNote(count, len(m.stepRows), hidden)))
 		b.WriteString("\n")
 	}
 	return lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.String(), "\n"))
@@ -1367,13 +1372,27 @@ func (m jobModel) envPanel(width int, focused bool) string {
 		return fmt.Sprintf("не удалось собрать окружение: %s", "переменных нет")
 	}
 
+	tailLines := 0
+	if len(m.session.environment.Missing) > 0 {
+		tailLines++
+	}
+	if len(m.session.environment.Notices) > 0 {
+		tailLines++
+	}
+	first, count, hidden := windowWithHint(len(m.envRows), m.height-tailLines, m.envCursor)
+
 	var b strings.Builder
-	for i, r := range m.envRows {
+	for i := first; i < first+count; i++ {
+		r := m.envRows[i]
 		line := Truncate(fmt.Sprintf("%s=%s", r.Key, r.Display), width)
 		if i == m.envCursor && focused {
 			line = m.theme.Selected.Render(line + " " + GlyphCursor)
 		}
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if hidden > 0 {
+		b.WriteString(m.theme.Muted.Render(hiddenNote(count, len(m.envRows), hidden)))
 		b.WriteString("\n")
 	}
 	if missing := len(m.session.environment.Missing); missing > 0 {
@@ -1396,9 +1415,16 @@ func (m jobModel) secretsPanel(width int, focused bool) string {
 	var b strings.Builder
 	if len(m.secretRows) == 0 {
 		b.WriteString(HintSecretsNone())
+		b.WriteString("\n")
 	} else {
-		for i, r := range m.secretRows {
+		first, count, hidden := windowWithHint(len(m.secretRows), m.height-1, m.envCursor)
+		for i := first; i < first+count; i++ {
+			r := m.secretRows[i]
 			b.WriteString(r.line(m.theme, width, i == m.envCursor && focused))
+			b.WriteString("\n")
+		}
+		if hidden > 0 {
+			b.WriteString(m.theme.Muted.Render(hiddenNote(count, len(m.secretRows), hidden)))
 			b.WriteString("\n")
 		}
 	}
