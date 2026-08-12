@@ -93,26 +93,29 @@ type openPipelineMsg struct {
 // малую ширину — расширять их от лишней ширины окна незачем, — а весь
 // остаток делится между веткой и коммитом. Заголовки колонок таблицы
 // выключены — заголовок несёт лента (App.columnView), не таблица.
+//
+// Сумма symbolWidth+numberWidth+branch+commit+whenWidth теперь РОВНО width
+// (когда width >= symbolWidth+numberWidth+whenWidth, что план 17-01 уже
+// гарантирует через ColumnMin), а не «не меньше» её, как раньше (Фаза 17,
+// FIT-05): нижние пороги ширины «ветка»/«коммит» форсировали остаток вверх
+// независимо от реально доступной ширины — при узкой колонке итоговая сумма
+// пяти столбцов превышала переданный width, и Lip Gloss переносил
+// переполнившийся хвост строки словом, из-за чего «когда» уезжало на вторую
+// строку. FIT-05 требует, чтобы ужималось СОДЕРЖИМОЕ столбцов, а не ломался
+// ряд — урезание branch/commit вплоть до нуля вместо навязанного минимума
+// это и делает.
 func pipelineColumns(width int) []table.Column {
 	const (
 		symbolWidth = 1
 		numberWidth = 8
 		whenWidth   = 12
-		minBranch   = 12
-		minCommit   = 8
 	)
 	rest := width - symbolWidth - numberWidth - whenWidth
-	if rest < minBranch+minCommit {
-		rest = minBranch + minCommit
+	if rest < 0 {
+		rest = 0
 	}
 	branch := rest * 2 / 3
-	if branch < minBranch {
-		branch = minBranch
-	}
 	commit := rest - branch
-	if commit < minCommit {
-		commit = minCommit
-	}
 	return []table.Column{
 		{Title: "", Width: symbolWidth},
 		{Title: "#", Width: numberWidth},
@@ -125,25 +128,29 @@ func pipelineColumns(width int) []table.Column {
 // naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02): символ
 // статуса, номер и «когда» держат ту же фиксированную ширину, что и
 // pipelineColumns; «ветка» — по самой длинной строке уже загруженных
-// пайплайнов (не меньше minBranch); «коммит» сокращается до 8 символов
+// пайплайнов (не меньше branchFloor); «коммит» сокращается до 8 символов
 // всегда (rows()), второй меры для него не заводится — это ровно то
 // содержимое, ради которого пайплайны в примере пользователя должны
-// получить БОЛЬШЕ ширины, чем короткое дерево слева.
+// получить БОЛЬШЕ ширины, чем короткое дерево слева. branchFloor/commitWidth
+// — желаемая ширина этой колонки САМОЙ ПО СЕБЕ (сколько ей хотелось бы),
+// а не навязанный пол суммы столбцов при недостатке места — тот пол убран
+// из pipelineColumns задачей 3 плана 17-02 (FIT-05), и константы здесь
+// намеренно переименованы, чтобы не путать эти два разных смысла.
 func (p pipelinePanel) naturalWidth() int {
 	const (
 		symbolWidth = 1
 		numberWidth = 8
 		whenWidth   = 12
-		minBranch   = 12
-		minCommit   = 8
+		branchFloor = 12
+		commitWidth = 8
 	)
-	branch := minBranch
+	branch := branchFloor
 	for _, pl := range p.pipelines {
 		if w := textwidth.Of(pl.Ref); w > branch {
 			branch = w
 		}
 	}
-	return symbolWidth + numberWidth + branch + minCommit + whenWidth
+	return symbolWidth + numberWidth + branch + commitWidth + whenWidth
 }
 
 // newPipelinePanel собирает таблицу Bubbles: символ статуса, номер, ветка,
