@@ -1482,7 +1482,41 @@ func (a App) viewInner() string {
 
 	switch a.overlay {
 	case overlayMenu:
-		body = a.menu.view(a.theme)
+		// Стартовый экран — весь кадр, не текст в углу (Фаза 18, START-01):
+		// рамка растянута на всю доступную ширину и на тот же бюджет высоты,
+		// которым меряется ОДНА полноэкранная коробка кадра
+		// (ribbon.columnBoxHeight(), Фаза 16/17). Содержимое меню (логотип,
+		// подпись, пункты — menuModel.view, задача 1) центрируется внутри
+		// рамки лип-глоссом, а не подгоняется в верхний левый угол.
+		//
+		// boxWidth — полная ширина блока рамки С РАМКОЙ (Фаза 17, живой
+		// обзор после плана 17-02: Lip Gloss v2 считает рамку ЧАСТЬЮ Width,
+		// та же величина, что уже идёт в a.boxed() ниже) — той же формулой,
+		// что уже считает доступную ширину экранов проводника/заставки
+		// (a.width - 2*OuterMargin).
+		//
+		// boxHeight — высота СОДЕРЖИМОГО рамки: columnBoxHeight() — бюджет
+		// высоты одной полноэкранной коробки кадра целиком; у меню, в
+		// отличие от колонки ленты (columnView), нет отдельной строки
+		// заголовка НАД рамкой — заголовок кадра `ci-shell` уже стоит НАД
+		// телом всего экрана, поэтому вычитаются только 2 строки самой
+		// рамки (верх+низ), а не 3, как у columnView.
+		//
+		// innerWidth — ширина содержимого ВНУТРИ рамки (boxWidth минус 2
+		// ячейки рамки), нужна lipgloss.Place ДО вызова a.boxed(), а не
+		// после — та же арифметика, что columnBodyWidth уже применяет к
+		// ширине колонки ленты.
+		boxWidth := a.width - 2*OuterMargin
+		boxHeight := a.ribbon.columnBoxHeight() - 2
+		if boxHeight < 1 {
+			boxHeight = 1
+		}
+		innerWidth := boxWidth - 2
+		if innerWidth < 1 {
+			innerWidth = 1
+		}
+		centered := lipgloss.Place(innerWidth, boxHeight, lipgloss.Center, lipgloss.Center, a.menu.view(a.theme))
+		body = a.boxed(boxWidth, boxHeight, true, centered)
 		keybar = KeyBar(a.theme, a.keys)
 		hint = RenderHint(a.theme, a.menu.hintText())
 	case overlaySplash:
