@@ -16,6 +16,7 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/browse"
 	"github.com/f3rym/ci-shell/internal/provider"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // pipelineDebounce — задержка перед запросом пайплайнов после того, как
@@ -119,6 +120,30 @@ func pipelineColumns(width int) []table.Column {
 		{Title: "коммит", Width: commit},
 		{Title: "когда", Width: whenWidth},
 	}
+}
+
+// naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02): символ
+// статуса, номер и «когда» держат ту же фиксированную ширину, что и
+// pipelineColumns; «ветка» — по самой длинной строке уже загруженных
+// пайплайнов (не меньше minBranch); «коммит» сокращается до 8 символов
+// всегда (rows()), второй меры для него не заводится — это ровно то
+// содержимое, ради которого пайплайны в примере пользователя должны
+// получить БОЛЬШЕ ширины, чем короткое дерево слева.
+func (p pipelinePanel) naturalWidth() int {
+	const (
+		symbolWidth = 1
+		numberWidth = 8
+		whenWidth   = 12
+		minBranch   = 12
+		minCommit   = 8
+	)
+	branch := minBranch
+	for _, pl := range p.pipelines {
+		if w := textwidth.Of(pl.Ref); w > branch {
+			branch = w
+		}
+	}
+	return symbolWidth + numberWidth + branch + minCommit + whenWidth
 }
 
 // newPipelinePanel собирает таблицу Bubbles: символ статуса, номер, ветка,

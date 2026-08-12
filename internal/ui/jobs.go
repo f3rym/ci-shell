@@ -135,6 +135,30 @@ func (m jobsModel) setSize(width, height int) jobsModel {
 	return m
 }
 
+// naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02): та же
+// формула reserved, что уже строит rowLine, сложением вместо вычитания —
+// самая широкая строка джобы без обрезки.
+func (m jobsModel) naturalWidth() int {
+	if len(m.jobs) == 0 {
+		return ColumnMin
+	}
+	max := 0
+	for _, j := range m.jobs {
+		statusText := Plain(j.Status)
+		noteWidth := 0
+		if j.Status == "manual" {
+			noteWidth = 1 + textwidth.Of(ManualNote)
+		}
+		agoText := Ago(j.FinishedAt)
+		reserved := 1 + RowIconGap + 2 + textwidth.Of(statusText) + noteWidth + 2 + textwidth.Of(agoText)
+		w := reserved + textwidth.Of(j.Name)
+		if w > max {
+			max = w
+		}
+	}
+	return max
+}
+
 // load запускает загрузку джоб пайплайна командой в отдельной горутине —
 // контракт запрещает подвешивать интерфейс любой операцией, ходящей в сеть.
 // Список приходит через пакет обхода: обойден постранично целиком и взят из

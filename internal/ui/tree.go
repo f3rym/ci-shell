@@ -415,6 +415,45 @@ func (m treeModel) setSize(reposWidth, pipelinesWidth, height int) treeModel {
 	return m
 }
 
+// naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02), как
+// cursorAt/withCursor: желаемая ширина колонки id по её реальному
+// содержимому, а не доля кадра. Формула repos — сложение тех же слагаемых,
+// что treeDelegate.Render вычитает из ширины при обрезке (indent+glyph+
+// RowIconGap+name+meta+2 ячейки под курсор GlyphCursor): самая широкая
+// строка БЕЗ обрезки и есть желаемая ширина колонки; GlyphExpanded/
+// GlyphCollapsed одной ширины, поэтому мерится один из них. id различает
+// репозитории (список m.list) и пайплайны (делегирует m.runs.naturalWidth())
+// — тот же переключатель, что уже применяет columnView.
+func (m treeModel) naturalWidth(id columnID) int {
+	if id == colPipelines {
+		return m.runs.naturalWidth()
+	}
+	if len(m.roots) == 0 {
+		return ColumnMin
+	}
+	glyphWidth := textwidth.Of(GlyphExpanded)
+	max := 0
+	for _, item := range m.list.Items() {
+		row, ok := item.(treeRow)
+		if !ok {
+			continue
+		}
+		indent := row.Depth * TreeIndent
+		meta := 0
+		if row.Meta != "" {
+			meta = 2 + textwidth.Of(row.Meta)
+		}
+		w := indent + glyphWidth + RowIconGap + textwidth.Of(row.Name) + meta + 2
+		if w > max {
+			max = w
+		}
+	}
+	if max < ColumnMin {
+		max = ColumnMin
+	}
+	return max
+}
+
 // setColumnFocus — часть общего контракта колонки (Фаза 13): колонка
 // репозиториев ставит внутренний фокус на список и снимает фокус с панели
 // пайплайнов, колонка пайплайнов — наоборот. Постановка и снятие фокуса у

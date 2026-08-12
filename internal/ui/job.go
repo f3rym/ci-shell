@@ -14,6 +14,7 @@ import (
 
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/render"
+	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
 // stepRow — одна строка панели шагов: номер, секция, команда и текущее
@@ -270,6 +271,62 @@ func (m jobModel) init() tea.Cmd {
 func (m jobModel) setSize(height int) jobModel {
 	m.height = height
 	return m
+}
+
+// naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02): желаемая
+// ширина колонки id по её реальному содержимому. Шаги — та же формула, что
+// stepLine вычитает при обрезке (RowIconGap+номер+1+команда), сложением, а
+// не вычитанием. Правая колонка разбирает по m.detail: «окружение» и
+// «секреты» — самая широкая строка ключ=значение уже загруженных данных;
+// «лог» — готового содержимого для оценки нет до выбора шага (m.cursor < 0
+// до первого падения), а лог — самая частая причина, по которой человеку
+// нужна ШИРОКАЯ колонка (длинные команды сборки, пути) — фиксированное
+// значение вдвое шире минимума, а не сам минимум, иначе FIT-02 «много —
+// достаётся тому, кто хочет больше» никогда не сработало бы в пользу лога,
+// у которого нет короткого «мало текста» состояния до выбора шага.
+func (m jobModel) naturalWidth(id columnID) int {
+	if id == colSteps {
+		max := 0
+		for _, r := range m.stepRows {
+			w := 1 + RowIconGap + textwidth.Of(fmt.Sprintf("%d", r.Index)) + 1 + textwidth.Of(r.Command)
+			if w > max {
+				max = w
+			}
+		}
+		if max < ColumnMin {
+			max = ColumnMin
+		}
+		return max
+	}
+
+	switch m.detail {
+	case detailSecrets:
+		max := 0
+		for _, r := range m.secretRows {
+			w := textwidth.Of(r.Key) + 3 + textwidth.Of(r.Display)
+			if w > max {
+				max = w
+			}
+		}
+		if max < ColumnMin {
+			max = ColumnMin
+		}
+		return max
+	case detailLog:
+		return ColumnMin * 2
+	default:
+		max := 0
+		for _, r := range m.envRows {
+			w := textwidth.Of(r.Key) + 1 + textwidth.Of(r.Display)
+			if w > max {
+				max = w
+			}
+		}
+		if max < ColumnMin {
+			max = ColumnMin
+		}
+		return max
+	}
 }
 
 // setColumnFocus — часть общего контракта колонки (Фаза 13): записывает,

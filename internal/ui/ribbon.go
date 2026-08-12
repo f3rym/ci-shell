@@ -300,12 +300,24 @@ func (r ribbon) reflow() ribbon {
 	return r
 }
 
-// layout — ширины видимых колонок слева направо: доступная ширина за
-// вычетом зазоров делится поровну, остаток от деления уходит колонке в
-// фокусе. Прежние доли и минимумы были у каждого экрана свои, и именно
-// поэтому «стрелка вправо» значила разное — одна сетка на все колонки и
-// есть содержание этой фазы.
-func (r ribbon) layout() []int {
+// layout — ширины видимых колонок слева направо, по желаемой ширине каждой
+// (Фаза 17, FIT-02/FIT-03): desired[i] — желаемая ширина колонки i, её
+// считает вызывающий (App, единственный диспетчер — см. App.visibleLayout,
+// internal/ui/app.go), лента по-прежнему не знает о содержимом колонок,
+// шапка файла не меняется. Пол каждой колонки — ColumnMin (тот же, что уже
+// держит visibleCount()); потолок каждой — avail-(count-1)*ColumnMin, чтобы
+// одна колонка с очень большим желанием не столкнула соседей ниже пола.
+//
+// Если сумма желаемых ширин (после пола и потолка) укладывается в доступную
+// ширину — каждая колонка получает ровно своё, а остаток уходит колонке(ям)
+// с САМЫМ БОЛЬШИМ желанием: «мало текста слева — правая шире» — у левой
+// желание меньше, у правой больше, весь остаток уходит правой (FIT-02).
+// Если не укладывается — доступная ширина делится поровну с остатком
+// колонке в фокусе, тем же способом, что действовал до этой фазы: «много и
+// там и там — пополам». Оба случая вместе гарантируют, что сумма
+// возвращённых ширин равна avail всегда — пустого места не остаётся ни в
+// одном из них (FIT-03).
+func (r ribbon) layout(desired []int) []int {
 	first, count := r.window()
 	if count == 0 {
 		return nil
@@ -317,9 +329,59 @@ func (r ribbon) layout() []int {
 	if collapsedN := first; collapsedN > 0 {
 		avail -= collapsedN * (CollapsedColumnWidth + PanelGap)
 	}
+	if avail < count*ColumnMin {
+		avail = count * ColumnMin
+	}
+
+	clamped := make([]int, count)
+	total := 0
+	for i, d := range desired {
+		ceil := avail - (count-1)*ColumnMin
+		if ceil < ColumnMin {
+			ceil = ColumnMin
+		}
+		c := d
+		if c < ColumnMin {
+			c = ColumnMin
+		}
+		if c > ceil {
+			c = ceil
+		}
+		clamped[i] = c
+		total += c
+	}
+
+	widths := make([]int, count)
+	if total <= avail {
+		copy(widths, clamped)
+		extra := avail - total
+		if extra > 0 {
+			maxWant := clamped[0]
+			for _, c := range clamped {
+				if c > maxWant {
+					maxWant = c
+				}
+			}
+			var winners []int
+			for i, c := range clamped {
+				if c == maxWant {
+					winners = append(winners, i)
+				}
+			}
+			share := extra / len(winners)
+			rem := extra % len(winners)
+			for k, i := range winners {
+				widths[i] += share
+				if k < rem {
+					widths[i]++
+				}
+			}
+		}
+		return widths
+	}
+
 	base := avail / count
 	rem := avail % count
-	widths := make([]int, count)
 	for i := range widths {
 		widths[i] = base
 	}
@@ -387,7 +449,13 @@ func (r ribbon) focusOn(id columnID) ribbon {
 // строках тела. hitTest обязан мерить ту же геометрию, что печатает
 // ribbonView, а не декларативный отступ, иначе клик по первой колонке не
 // совпал бы с тем, что человек реально видит на экране.
-func (r ribbon) hitTest(x, y, contentTop int) (id columnID, row int, ok bool) {
+//
+// widths — ширины видимых колонок, уже посчитанные вызывающим (Фаза 17,
+// App.visibleLayout): клик мыши обязан видеть ТЕ ЖЕ ширины, что только что
+// нарисовал ribbonView — оба зовут один и тот же расчёт вызывающего кода, а
+// не пересчитывают его дважды с риском разойтись в кадре, где содержимое
+// между двумя вызовами могло уже измениться.
+func (r ribbon) hitTest(widths []int, x, y, contentTop int) (id columnID, row int, ok bool) {
 	col := 0
 	for _, c := range r.collapsed() {
 		if x >= col && x < col+CollapsedColumnWidth {
@@ -400,7 +468,6 @@ func (r ribbon) hitTest(x, y, contentTop int) (id columnID, row int, ok bool) {
 	}
 
 	first, count := r.window()
-	widths := r.layout()
 	for i := 0; i < count; i++ {
 		w := widths[i]
 		if x >= col && x < col+w {
