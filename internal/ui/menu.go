@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	"charm.land/lipgloss/v2"
 
 	"github.com/f3rym/ci-shell/internal/textwidth"
 	"github.com/f3rym/ci-shell/internal/token"
@@ -274,26 +275,38 @@ func (m menuModel) hintText() string {
 	return ""
 }
 
-// view отрисовывает пункты: строка под курсором получает символ подсказки
-// в роли курсора (мокап idea-0.3.1 §2), остальные — отступ той же ширины.
-// Доступная строка под курсором получает инверсию; недоступная строка
-// приглушена всегда и инверсию НЕ получает — приглушённость обязана
-// остаться видимой под курсором, иначе неактивный пункт под курсором
-// перестаёт отличаться от активного. Пометка «скоро» рисуется приглушённым
-// стилем справа от подписи — она входит в приглушённую строку GitHub
-// целиком, второго стиля для неё не заводится. Каждая строка обрезается по
-// доступной ширине графемной мерой проекта; между группами — одна пустая
-// строка.
+// view отрисовывает стартовый экран одним содержимым блоком (Фаза 18,
+// START-01): логотип, приглушённая подпись из Core Value проекта и пункты
+// меню — вместо списка строк без логотипа, каким было меню до этого плана.
+// Курсор, доступность и обрезка пунктов не меняются (см. ниже) — меняется
+// только получатель записи (items вместо общего b), потому что логотип и
+// подпись не участвуют в построчной группировке prevGroup пунктов.
+//
+// Логотип — logoLines, тот же пакетный рисунок, что уже рисует заставку
+// (splash.go) — второго рисунка логотипа в пакете не заводится.
+// lipgloss.JoinVertical(lipgloss.Center, ...) выравнивает КАЖДУЮ строку
+// логотипа по центру относительно самой широкой строки рисунка — без этого
+// центрирование рамкой снаружи (app.go, задача 2) съехало бы вправо на
+// разное число ведущих пробелов каждой строки (они подгонялись под ширину
+// заставки, а не под ширину меню).
+//
+// Подпись — дословная короткая форма Core Value (`.planning/PROJECT.md`),
+// приглушённым стилем — тем же Theme.Muted, каким уже рисуются недоступные
+// пункты ниже.
 func (m menuModel) view(t Theme) string {
 	width := m.width
 	if width <= 0 {
 		width = MinWidth - 2*OuterMargin
 	}
-	var b strings.Builder
+
+	logo := lipgloss.JoinVertical(lipgloss.Center, logoLines...)
+	tagline := t.Muted.Render("машина времени в упавшую CI-джобу")
+
+	var items strings.Builder
 	prevGroup := 0
 	for i, it := range m.items {
 		if i > 0 && it.Group != prevGroup {
-			b.WriteString("\n")
+			items.WriteString("\n")
 		}
 		prevGroup = it.Group
 
@@ -316,10 +329,10 @@ func (m menuModel) view(t Theme) string {
 		default:
 			line = t.Text.Render(line)
 		}
-		b.WriteString(line)
-		b.WriteString("\n")
+		items.WriteString(line)
+		items.WriteString("\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return logo + "\n\n" + tagline + "\n\n" + strings.TrimRight(items.String(), "\n")
 }
 
 // signatureTitle — единственное место сборки подписи автора (MENU-05):
