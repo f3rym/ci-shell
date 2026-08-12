@@ -452,13 +452,19 @@ func (a App) syncColumnSizes() App {
 	first, count, widths := a.visibleLayout()
 	reposWidth, pipelinesWidth, jobsWidth := 0, 0, 0
 	for i := 0; i < count; i++ {
+		// columnBodyWidth (Фаза 17, живой обзор после плана 17-02): подмодели
+		// получают ширину СОДЕРЖИМОГО рамки, а не полную ширину блока
+		// колонки widths[i] — ту же поправку зовёт columnView (тело
+		// колонки) для тех же widths[i] этого же кадра; setSize и
+		// отрисовка обязаны договориться об одном и том же числе.
+		bodyWidth := columnBodyWidth(widths[i])
 		switch a.ribbon.cols[first+i].id {
 		case colRepos:
-			reposWidth = widths[i]
+			reposWidth = bodyWidth
 		case colPipelines:
-			pipelinesWidth = widths[i]
+			pipelinesWidth = bodyWidth
 		case colJobs:
-			jobsWidth = widths[i]
+			jobsWidth = bodyWidth
 		}
 	}
 	if a.treeReady {
@@ -556,16 +562,29 @@ func (a App) columnHeading(col column, width int) string {
 func (a App) columnView(col column, width int, focused bool) string {
 	header := a.columnHeading(col, width)
 
+	// bodyWidth — ширина, которую реально увидит содержимое ВНУТРИ рамки
+	// (Фаза 17, живой обзор после плана 17-02, FIT-01/FIT-03/FIT-05): width
+	// здесь — полная ширина блока колонки С РАМКОЙ (та же величина, что уже
+	// идёт в a.boxed(width, ...) и во внешний Style.Width(width) ниже) — её
+	// сумму лента (ribbon.layout) держит равной доступной ширине терминала.
+	// Тело колонки рисуется ВНУТРИ рамки, которая по 1 ячейке с каждой
+	// стороны меньше заявленной Width (columnBodyWidth, реализация и
+	// пояснение — рядом с boxed ниже) — до этой правки сюда шла полная
+	// width без вычета рамки, и модели-колонки (список джоб/пайплайнов,
+	// панели джобы) готовили содержимое на 2 ячейки шире, чем реально
+	// помещается в рамку.
+	bodyWidth := columnBodyWidth(width)
+
 	var body string
 	switch col.id {
 	case colRepos, colPipelines:
 		if a.treeReady {
-			body = a.tree.columnView(col.id, width, focused)
+			body = a.tree.columnView(col.id, bodyWidth, focused)
 		}
 	case colJobs:
-		body = a.jobs.columnView(width, focused)
+		body = a.jobs.columnView(bodyWidth, focused)
 	case colSteps, colDetail:
-		body = a.job.columnView(col.id, width, focused)
+		body = a.job.columnView(col.id, bodyWidth, focused)
 	}
 
 	// Высота содержимого рамки: columnBoxHeight() — высота заголовок+рамка
@@ -580,6 +599,22 @@ func (a App) columnView(col column, width int, focused bool) string {
 	return lipgloss.NewStyle().Width(width).Render(header + "\n" + a.boxed(width, boxHeight, focused, body))
 }
 
+// columnBodyWidth — ширина СОДЕРЖИМОГО внутри рамки колонки шириной width
+// (Фаза 17, живой обзор после плана 17-02): рамка Lip Gloss забирает по 1
+// ячейке слева и справа ИЗ заявленной width (см. boxed ниже, тот же расчёт,
+// проверенный отдельным прогоном charm.land/lipgloss/v2), поэтому
+// содержимому остаётся width-2, прижатое к минимуму 1. Единственная точка
+// этого вычитания на файл — columnView (тело колонки) и syncColumnSizes
+// (предварительный setSize подмоделей) обязаны видеть ОДНО И ТО ЖЕ число,
+// иначе setSize подготовит содержимое одной ширины, а рамка примет другую.
+func columnBodyWidth(width int) int {
+	w := width - 2
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
 // boxed — общий приём рамки колонки (Фаза 16, план 16-01), вынесенный из
 // columnView выше: прижимает ширину/высоту к минимуму, выбирает цвет рамки
 // по focused и оборачивает content ровно одним
@@ -589,10 +624,21 @@ func (a App) columnView(col column, width int, focused bool) string {
 // колонки в файле не появляется, LOOK-01 и LOOK-03 обязаны выглядеть одним и
 // тем же языком, а не двумя похожими.
 func (a App) boxed(width, height int, focused bool, content string) string {
-	// Ширина содержимого рамки: Lip Gloss рисует рамку СВЕРХ Width/Height, а
-	// не считает её их частью (Width(w).Border(...) даёт блок шириной w+2) —
-	// вычитаем 2 ячейки рамки (лево+право), прижимая к минимуму 1.
-	boxWidth := width - 2
+	// Ширина блока рамки: вопреки прежнему комментарию здесь (и вопреки
+	// прежнему коду, вычитавшему рамку ЕЩЁ РАЗ), Lip Gloss v2 считает рамку
+	// ЧАСТЬЮ заявленной Width — Style{}.Width(N).Border(...).Render(...)
+	// отдаёт блок шириной РОВНО N (граница вписана в N, а не добавлена
+	// сверх неё), проверено отдельным прогоном на charm.land/lipgloss/v2 —
+	// поэтому box-width передаётся В width КАК ЕСТЬ, без вычитания.
+	// Прежний код вычитал 2 ячейки здесь ВТОРОЙ раз (columnBodyWidth ниже
+	// уже вычитает их один раз для содержимого) — блок рамки оказывался на
+	// 2 ячейки уже, чем отвела лента, а модели-колонки готовили содержимое
+	// НЕ под эту урезанную ширину, а под полную width (до правки этого же
+	// коммита) — двойная ошибка суммарно давала минус 4 ячейки настоящей
+	// внутренней ширины рамки, из-за чего таблица пайплайнов переносила
+	// «когда» на вторую строку (FIT-05), а строки заворачивались, раздувая
+	// высоту колонки за нижний край кадра (FIT-01, FIT-03).
+	boxWidth := width
 	if boxWidth < 1 {
 		boxWidth = 1
 	}
