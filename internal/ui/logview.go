@@ -442,7 +442,10 @@ func (v logView) update(msg tea.Msg, k KeyMap) (logView, tea.Cmd) {
 		return v.prevMatch(), nil
 	case key.Matches(keyMsg, k.Failed):
 		return v.toFailed(), nil
-	case key.Matches(keyMsg, k.Back):
+	// k.Quit («q») с Фазы 18 (KEYS-02) синоним esc и здесь — оба закрывают
+	// просмотрщик; второго способа выйти из утилиты отсюда не появляется
+	// (просмотрщик и раньше не завершал программу сам).
+	case key.Matches(keyMsg, k.Back), key.Matches(keyMsg, k.Quit):
 		return v, func() tea.Msg { return logDismissMsg{} }
 	}
 	return v, nil
