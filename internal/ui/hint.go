@@ -201,9 +201,10 @@ func HintCommitMessage() string {
 }
 
 // HintCommitted — :commit выполнен успешно. Клавиша читается из раскладки
-// (LOOK-04), а не литералом.
+// (LOOK-04), а не литералом. Cancel вместо Quit (Фаза 18, KEYS-02) — q
+// больше не выход.
 func HintCommitted() string {
-	return fmt.Sprintf("зафиксировано — %s для выхода или продолжайте чинить следующий шаг", DefaultKeys().Quit.Help().Key)
+	return fmt.Sprintf("зафиксировано — %s для выхода или продолжайте чинить следующий шаг", DefaultKeys().Cancel.Help().Key)
 }
 
 // HintNoChanges — A/:A нажаты, но в воспроизведённом чекауте нет правок.
