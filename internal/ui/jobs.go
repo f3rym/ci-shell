@@ -15,6 +15,12 @@ import (
 	"github.com/f3rym/ci-shell/internal/textwidth"
 )
 
+// logMinPanelLines — минимум строк, ниже которого панель лога переставала
+// бы что-либо показывать (Фаза 17, FIT-04): заголовок панели + минимум 2
+// строки её тела (logPanel.setSize уже держит пол в 2, internal/ui/joblog.go)
+// + строка положения.
+const logMinPanelLines = 4
+
 // jobsModel — экран списка джоб пайплайна (TUI-03): таблица джоб сверху,
 // панель лога упавшего шага под ней (Фаза 10, BROW-04), строка команды по
 // двоеточию.
@@ -128,10 +134,37 @@ func (m jobsModel) setSize(width, height int) jobsModel {
 	// treeModel.setSize (Фаза 17, ColumnBodyOverhead, internal/ui/theme.go).
 	// Минимум панели лога держит сама logPanel.setSize (internal/ui/joblog.go,
 	// не трогается этим планом) — маленький или отрицательный logHeight не
-	// ломает вызов, только сокращает число видимых строк лога.
-	logHeight := height - ColumnBodyOverhead - len(m.jobs) - 1
+	// ломает вызов, только сокращает число видимых строк лога. Список джоб
+	// теперь ограничен m.visibleRows() (Фаза 17, FIT-04) — остаток высоты
+	// уходит панели лога, а не бесконечному списку.
+	bodyHeight := height - ColumnBodyOverhead
+	if bodyHeight < 0 {
+		bodyHeight = 0
+	}
+	logHeight := bodyHeight - m.visibleRows() - 1
 	m.log = m.log.setSize(width, logHeight)
 	return m
+}
+
+// visibleRows — часть FIT-04: сколько строк списка джоб уместится в
+// колонку при её текущей высоте, если оставить панели лога минимум
+// logMinPanelLines строк и одну пустую строку-разделитель. Метод, а не
+// поле, посчитанное один раз в setSize: список джоб грузится ПОСЛЕ
+// setSize (jobsLoadedMsg приходит позже, асинхронно), и поле, посчитанное
+// по ещё пустому m.jobs, никогда не увидело бы настоящую длину списка.
+func (m jobsModel) visibleRows() int {
+	bodyHeight := m.height - ColumnBodyOverhead
+	if bodyHeight < 0 {
+		bodyHeight = 0
+	}
+	n := bodyHeight - logMinPanelLines - 1
+	if n < 0 {
+		n = 0
+	}
+	if n > len(m.jobs) {
+		n = len(m.jobs)
+	}
+	return n
 }
 
 // naturalWidth — часть общего контракта колонки (Фаза 17, FIT-02): та же
@@ -286,6 +319,12 @@ func (m jobsModel) update(msg tea.Msg) (jobsModel, tea.Cmd) {
 		m.complete = msg.complete
 		m.cached = msg.cached
 		m.fetched = msg.fetched
+		// Панель лога пересчитывается ПОСЛЕ замены списка (Фаза 17,
+		// FIT-04): при первом setSize (до загрузки) m.jobs был пуст, и
+		// logHeight занял всю высоту — без пересчёта список джоб рисовался
+		// бы выше отведённого, а лог ниже, той же поломкой, которую эта
+		// задача чинит, только отложенной на один кадр.
+		m = m.setSize(m.width, m.height)
 		if m.cursorPinned {
 			// Возврат туда, откуда ушёл, сильнее правила первого показа —
 			// курсор ищет прежнюю джобу по имени, а не сбрасывается на
@@ -529,8 +568,13 @@ func (m jobsModel) columnView(width int, focused bool) string {
 		jobsBody = "нет джоб"
 	default:
 		var b strings.Builder
-		for i, j := range m.jobs {
-			b.WriteString(m.rowLine(j, i == m.cursor && focused, width))
+		first, count, hidden := windowWithHint(len(m.jobs), m.visibleRows(), m.cursor)
+		for i := first; i < first+count; i++ {
+			b.WriteString(m.rowLine(m.jobs[i], i == m.cursor && focused, width))
+			b.WriteString("\n")
+		}
+		if hidden > 0 {
+			b.WriteString(m.theme.Muted.Render(hiddenNote(count, len(m.jobs), hidden)))
 			b.WriteString("\n")
 		}
 		if !m.complete {

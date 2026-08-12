@@ -338,6 +338,58 @@ func Fit(s string, width int) string {
 	return textwidth.Fit(s, width)
 }
 
+// windowWithHint — окно списка длиной total, следующее за курсором cursor,
+// в пределах budget строк (Фаза 17, FIT-04): если весь список умещается в
+// budget, окно — список целиком и hidden равен нулю; иначе бюджет
+// уменьшается на одну строку под подсказку «скрыто N», а окно
+// подстраивается так, чтобы курсор всегда оставался внутри него. Четыре
+// места, что рисуют список строкой вместо компонента Bubbles (jobsModel —
+// джобы, jobModel — шаги, окружение, секреты), зовут эту единственную
+// функцию — второй формулы окна списка в пакете не появляется, тем же
+// приёмом, что уже применяет logView.window() для лога.
+func windowWithHint(total, budget, cursor int) (first, count, hidden int) {
+	if budget < 0 {
+		budget = 0
+	}
+	if total > budget {
+		budget--
+		if budget < 0 {
+			budget = 0
+		}
+	}
+	count = budget
+	if count > total {
+		count = total
+	}
+	if count < 0 {
+		count = 0
+	}
+	first = cursor - count + 1
+	if first < 0 {
+		first = 0
+	}
+	if count > 0 && first > total-count {
+		first = total - count
+	}
+	if first < 0 {
+		first = 0
+	}
+	hidden = total - count
+	if hidden < 0 {
+		hidden = 0
+	}
+	return first, count, hidden
+}
+
+// hiddenNote — единственная формулировка строки «часть списка скрыта»
+// (Фаза 17, FIT-04): второй формулировки того же смысла в пакете не
+// появляется — тем же приёмом, что уже применяют «показаны первые N
+// записей» (internal/ui/jobs.go, internal/ui/pipelines.go) для отдельного
+// случая нехватки данных С СЕРВЕРА, а не нехватки высоты кадра.
+func hiddenNote(shown, total, hidden int) string {
+	return fmt.Sprintf("показаны %d из %d — %d скрыто, курсор откроет остальные", shown, total, hidden)
+}
+
 // TooSmall возвращает единственную строку, которая рисуется вместо
 // панелей, когда окно меньше пола 80×24 — отцентрированную по доступной
 // ширине средствами Lip Gloss.
