@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -191,6 +192,19 @@ func (a App) quitCmd() tea.Cmd {
 // модель App не хранит ссылку на программу (Bubble Tea её и не передаёт), а
 // без пакетной переменной мосту неоткуда было бы взять функцию отправки.
 var programSend func(tea.Msg)
+
+// liveSession — сессия, живая ПРЯМО СЕЙЧАС (Фаза 17, чинит CR-02 обзора
+// v0.3.1): пакетная переменная тем же приёмом, что и programSend выше и
+// renderPanic (internal/ui/recover.go) — уборка в Run() обязана знать
+// актуальную сессию НЕЗАВИСИМО от того, что вернул p.Run(). Встроенный
+// перехват паники Bubble Tea (включён по умолчанию, опция его
+// выключения нигде не передаётся) возвращает (nil, err) при панике,
+// пойманной ИМ, а не тремя точками guard этого пакета (например, в
+// горутине долгой операции), — final.(App) тогда не срабатывает вовсе, и
+// контейнер с материализованными секретами остаётся жить. liveSession —
+// единственный источник истины про сессию в Run(), а final.(App) как
+// отдельный путь уборки этим планом убирается, а не дублируется.
+var liveSession atomic.Pointer[Session]
 
 // Init — тело инициализации обёрнуто единственным перехватом проекта
 // (guard, internal/ui/recover.go, Фаза 12, POL-04): паника здесь чаще всего
@@ -698,6 +712,7 @@ func (a App) dropped(ids []columnID) (App, tea.Cmd) {
 		if id == colSteps && a.job.session != nil {
 			sess := a.job.session
 			a.job.session = nil
+			liveSession.CompareAndSwap(sess, nil)
 			return a, func() tea.Msg { sess.Close(); return nil }
 		}
 	}
@@ -1254,6 +1269,7 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ссылки экрана списка джоб (Фаза 14, план 14-02) — состояние
 		// «текущий хост» корневой модели не существует.
 		sess := NewSession(a.jobs.ref, a.access[a.jobs.ref.Host].Provider, msg.job, event.Emitter{Sink: bridge})
+		liveSession.Store(sess)
 		a.job = newJobModel(sess, a.sessionGen, a.theme, a.keys)
 		a = a.focusColumn()
 		return a, tea.Batch(cleanup, a.job.init())
@@ -1636,8 +1652,7 @@ func Run(ctx context.Context) error {
 	programSend = p.Send
 
 	var runErr error
-	var final tea.Model
-	_ = guard(func() { final, runErr = p.Run() })
+	_ = guard(func() { _, runErr = p.Run() })
 
 	// Последняя уборка: сюда программа приходит и штатным выходом, и по
 	// отменённому контексту (сигнал, отмена снаружи), и после паники,
@@ -1645,8 +1660,17 @@ func Run(ctx context.Context) error {
 	// повторение уже сделанной уборки (quitCmd, dropped) ничего не
 	// стоит, а пропущенная — стоила бы живого контейнера и каталога с
 	// секретами на диске.
-	if last, ok := final.(App); ok && last.job.session != nil {
-		last.job.session.Close()
+	//
+	// Уборка держится на liveSession, а не на разборе типа возвращённой
+	// p.Run() модели (CR-02): та модель — nil, если паника поймана
+	// встроенным перехватом Bubble Tea вне трёх точек guard, и разбор её
+	// типа тогда не срабатывает вовсе, а liveSession
+	// обновляется независимо от того, что вернул p.Run(). Close идемпотентен
+	// (комментарий выше уже это утверждает), поэтому повторное закрытие уже
+	// убранной задачами quitCmd/dropped сессии (liveSession к этому моменту
+	// уже nil) ничего не стоит.
+	if sess := liveSession.Load(); sess != nil {
+		sess.Close()
 	}
 
 	if rec := renderPanic.Load(); rec != nil {
