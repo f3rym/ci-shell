@@ -24,7 +24,13 @@ type KeyMap struct {
 	// internal/ui/ribbon.go).
 	Right   key.Binding
 	Left    key.Binding
-	Open    key.Binding
+	Open key.Binding
+	// Edit — правка значения переменной под курсором (Фаза 20, VAR-01).
+	// Своя клавиша, а не перегруженный ⏎: правка — отдельное действие, а не
+	// движение по ленте, и пока она висела на ⏎, закон стрелок приходилось
+	// оговаривать исключением на каждом объяснении. Буква выбрана под уже
+	// вимовскую раскладку проекта (h j k l выше) — i как «вписать».
+	Edit    key.Binding
 	Back    key.Binding
 	Shell   key.Binding
 	Retry   key.Binding
@@ -91,6 +97,10 @@ func DefaultKeys() KeyMap {
 			// действие (idea-0.3.1 §3, строка таблицы про ⏎): подпись обязана
 			// называть его именно так, а не изображать второе действие.
 			key.WithHelp(GlyphEnter, "то же, что "+GlyphRight),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("i"),
+			key.WithHelp("i", "изменить значение"),
 		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
@@ -233,7 +243,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		// Quit стоит рядом с Open (Фаза 18, KEYS-02) — оба синонимы стрелок
 		// закона ленты (⏎ = →, q = ←), а не отдельные действия.
 		{k.Up, k.Down, k.Right, k.Left, k.Open, k.Quit, k.Back, k.Filter},
-		{k.Shell, k.Retry, k.Apply},
+		{k.Shell, k.Retry, k.Apply, k.Edit},
 		{k.Refresh, k.Command},
 		{k.Help, k.Cancel},
 		// Просмотрщик лога (Фаза 15, план 15-01): девятая группа, а не

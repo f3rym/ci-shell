@@ -1864,14 +1864,14 @@ func (m jobModel) keyBar() string {
 			// Клавиша подтверждения впишет значение переменной под курсором
 			// (Фаза 15, план 15-02) — читается из раскладки (Open), подпись
 			// живая.
-			extra = append(extra, HintAs(m.keys.Open, "вписать значение"))
+			extra = append(extra, HintAs(m.keys.Edit, "вписать значение"))
 		}
 		if m.detail == detailEnv {
 			// Клавиша подтверждения изменит значение ОБЫЧНОЙ переменной под
 			// курсором (Фаза 20, план 20-02, VAR-01) — только когда строка
 			// под курсором редактируема (env.Editable).
 			if row, ok := m.currentEnvRow(); ok && row.Editable {
-				extra = append(extra, HintAs(m.keys.Open, "изменить значение"))
+				extra = append(extra, HintAs(m.keys.Edit, "изменить значение"))
 			}
 		}
 	}
@@ -1968,9 +1968,9 @@ func (m jobModel) hintText() string {
 		if m.detail == detailSecrets {
 			if row, ok := m.currentSecretRow(); ok {
 				if row.Filled {
-					return HintSecretFilled(row.Key, m.keys.Open.Help().Key)
+					return HintSecretFilled(row.Key, m.keys.Edit.Help().Key)
 				}
-				return HintSecretMissing(row.Key, m.keys.Open.Help().Key)
+				return HintSecretMissing(row.Key, m.keys.Edit.Help().Key)
 			}
 		}
 		if m.detail == detailEnv {
@@ -1978,7 +1978,7 @@ func (m jobModel) hintText() string {
 			// подсказка называет только возможность правки, если строка под
 			// курсором редактируема (Фаза 20, план 20-02).
 			if row, ok := m.currentEnvRow(); ok && row.Editable {
-				return HintVarEditable(row.Key, m.keys.Open.Help().Key)
+				return HintVarEditable(row.Key, m.keys.Edit.Help().Key)
 			}
 		}
 		return HintDetailNext(m.keys.Right.Help().Key, detailName(nextDetail(m.detail)))
