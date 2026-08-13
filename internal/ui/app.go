@@ -1087,7 +1087,12 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// одном виде одной колонки и только когда под курсором есть строка
 		// (jobModel.fillsSecret); во всех остальных местах обе клавиши
 		// по-прежнему ведут в одну функцию углубления (navFor ниже).
-		if a.overlay == overlayNone && !a.inputActive() && key.Matches(msg, a.keys.Open) && a.job.fillsSecret(a.ribbon.focusedID()) {
+		// Фаза 20 (план 20-02, VAR-01) расширяет условие дизъюнкцией с
+		// jobModel.fillsOverride — та же ветка ЕДИНСТВЕННОГО отступления, а
+		// не второе: оба предиката сужены по своему виду одной и той же
+		// колонки (detailSecrets у fillsSecret, detailEnv у fillsOverride),
+		// startFill уже разбирает оба случая (задача 1).
+		if a.overlay == overlayNone && !a.inputActive() && key.Matches(msg, a.keys.Open) && (a.job.fillsSecret(a.ribbon.focusedID()) || a.job.fillsOverride(a.ribbon.focusedID())) {
 			var cmd tea.Cmd
 			a.job, cmd = a.job.startFill()
 			return a, cmd
