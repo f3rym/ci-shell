@@ -286,10 +286,15 @@ func overlayFor(w guideWhere) overlay {
 // собственный курсор модели-владельца (раскрытие узла дерева, выбор
 // пайплайна) — запиши позицию позже, и в ленте оказался бы уже сдвинутый
 // курсор, а не тот, с которого человек ушёл вглубь (Фаза 13, план 13-03).
-func (a App) openDeeper() (App, tea.Cmd) {
+// confirm различает «жму» (⏎, клик мышью) и «листаю» (→). Разница ровно
+// одна и только при уже открытой колонке справа: листающий переезжает в неё
+// как есть, жмущий пересобирает её из того, на чём стоит курсор. Пока
+// правее пусто, оба исхода совпадают — обещание «⏎ работает как →» для
+// идущего вглубь впервые остаётся верным.
+func (a App) openDeeper(confirm bool) (App, tea.Cmd) {
 	a = a.rememberCursor()
 
-	if a.ribbon.hasDeeper() {
+	if !confirm && a.ribbon.hasDeeper() {
 		a.ribbon = a.ribbon.deeper()
 		return a.focusColumn(), nil
 	}
@@ -745,7 +750,10 @@ func (a App) clickRow(id columnID, row int) (App, tea.Cmd) {
 	case colSteps, colDetail:
 		a.job = a.job.withCursor(id, row, "")
 	}
-	return a.openDeeper()
+	// Клик мышью — эквивалент ⏎ (LOOK-05), а не →: человек ткнул в строку,
+	// то есть выбрал именно её, и колонка справа обязана пересобраться под
+	// этот выбор, а не принять фокус от прошлого.
+	return a.openDeeper(true)
 }
 
 // dropped разбирает колонки, отброшенные лентой при открытии другого пути
@@ -1095,7 +1103,9 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.overlay == overlayNone && !a.inputActive() {
 			switch navFor(msg, a.keys) {
 			case navDeeper:
-				return a.openDeeper()
+				return a.openDeeper(false)
+			case navConfirm:
+				return a.openDeeper(true)
 			case navShallower:
 				a.ribbon = a.ribbon.shallower()
 				return a.focusColumn(), nil
