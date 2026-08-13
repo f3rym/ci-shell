@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -99,6 +100,20 @@ type Session struct {
 	patch      repo.Patch
 	patchStats []repo.FileStat
 	patchRoot  string
+
+	// overrides/editedVars — журнал правок сессии (Фаза 20, VAR-01/VAR-02).
+	// overrides — значения обычных (не секретных) переменных, подставляемые
+	// верхним слоем в КАЖДУЮ сборку окружения этой сессии (env.Assemble,
+	// Input.Overrides) — значит, они переживают и R (следующий прогон retry
+	// идёт уже в контейнере, поднятом ПОСЛЕ правки, потому что сама правка
+	// вызывает RestartCmd), и :clean (CleanRun использует s.spec, собранный
+	// той же PrepareCmd, что уже наложила override, — второй сборки
+	// спецификации для чистого прогона в проекте нет). editedVars — имена
+	// ВСЕХ переменных, правленных за сессию, и через overrides, и через файл
+	// секретов (Фаза 15) — общий список для .edit_vars (VAR-02), секретных и
+	// обычных имён вперемешку: файл называет, что менялось, а не как.
+	overrides  map[string]string
+	editedVars map[string]struct{}
 
 	// imageOverride — образ, заданный экраном проводника (действие
 	// actionSetImage, конфиг с extends, Фаза 11, GUIDE-05) до того, как
@@ -209,6 +224,19 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 			notices = append(notices, fmt.Sprintf("файл секретов не прочитан: %s", err.Error()))
 		}
 
+		// Снимок текущих override под s.mu, а не прямое чтение s.overrides под
+		// тем же вызовом: горутина команды не должна держать s.mu на всё время
+		// сборки (сеть, диск, Docker) — тот же приём, каким уже защищены
+		// остальные поля подготовки. Пустая карта (правок ещё не было) —
+		// env.Assemble работает с nil/пустой картой без изменений в поведении
+		// остальных слоёв.
+		s.mu.Lock()
+		overrides := make(map[string]string, len(s.overrides))
+		for k, v := range s.overrides {
+			overrides[k] = v
+		}
+		s.mu.Unlock()
+
 		e := env.Assemble(env.Input{
 			Job:         s.job,
 			Host:        s.ref.Host,
@@ -217,6 +245,7 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 			Notices:     append(append([]string{}, notices...), varSet.Notes...),
 			Secrets:     secrets.Values,
 			SecretsPath: secrets.Path,
+			Overrides:   overrides,
 		})
 
 		// Файл секретов интерфейс НЕ создаёт: заготовка файла, которую
@@ -654,6 +683,21 @@ func (s *Session) CaptureCmd(ctx context.Context) tea.Cmd {
 		// рабочей копии (ниже) обязан назвать пользователю путь патча,
 		// который уже лежит на диске и не потерян (Фаза 11).
 		s.patch = patch
+
+		// .edit_vars пишется сразу после патча, тем же вызовом (VAR-02): если
+		// за сессию были правки, список их имён едет рядом с патчем работы.
+		// Отказ этой второстепенной записи не должен выглядеть как отказ
+		// всего переноса правок — патч уже сохранён, поэтому ни при какой
+		// ошибке здесь CaptureCmd не возвращает captureFailedMsg (тот же
+		// принцип, что уже применён к notes.UntrackedErr выше).
+		if names := s.editedVarNames(); len(names) > 0 {
+			evPath, evErr := repo.WriteEditVars(s.ref.Host, s.ref.ProjectPath, names)
+			if evErr != nil {
+				s.note(fmt.Sprintf("предупреждение: список правленных переменных не сохранён: %s", evErr))
+			} else if evPath != "" {
+				s.note(fmt.Sprintf("список правленных переменных сохранён: %s", evPath))
+			}
+		}
 
 		root, err := repo.Root(context.Background())
 		if err != nil {
@@ -1139,6 +1183,57 @@ func (s *Session) clearCancel() {
 // CaptureCmd ещё не снял его ни разу.
 func (s *Session) patchPath() string {
 	return s.patch.Path
+}
+
+// recordOverride запоминает новое значение обычной (не секретной)
+// переменной key, подставляемое верхним слоем в каждую последующую сборку
+// окружения этой сессии (env.Assemble, Input.Overrides), и заносит имя
+// переменной в общий журнал правок (recordEdit) — тем же приёмом
+// синхронизации, что и остальное состояние подготовки.
+func (s *Session) recordOverride(key, value string) {
+	s.mu.Lock()
+	if s.overrides == nil {
+		s.overrides = make(map[string]string)
+	}
+	s.overrides[key] = value
+	s.mu.Unlock()
+	s.recordEdit(key)
+}
+
+// recordEdit заносит key в общий журнал имён переменных, правленных за
+// сессию (editedVars) — источник для будущего .edit_vars (VAR-02). Метод
+// отдельный, а не только внутренняя часть recordOverride: правка секрета
+// (env.SaveSecret, Фаза 15) ничего не знает о сессии и не может занести
+// себя в журнал сама — вызывающий (internal/ui/job.go, план 20-02) зовёт
+// recordEdit явно при успешной записи секрета, тем же способом, каким
+// recordOverride заносит имя при правке обычной переменной; второго
+// журнала для секретных имён не заводится.
+func (s *Session) recordEdit(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.editedVars == nil {
+		s.editedVars = make(map[string]struct{})
+	}
+	s.editedVars[key] = struct{}{}
+}
+
+// editedVarNames отдаёт имена всех переменных, правленных за сессию,
+// отсортированными — тот же порядок сортировки, что примет
+// repo.WriteEditVars. Сортировка здесь не обязательна для корректности
+// (функция сортирует сама), но избавляет от случайного порядка карты в
+// любом другом потребителе, который появится позже.
+func (s *Session) editedVarNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.editedVars) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(s.editedVars))
+	for k := range s.editedVars {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Log отдаёт содержимое ограниченного буфера лога целиком. Пусто, пока
