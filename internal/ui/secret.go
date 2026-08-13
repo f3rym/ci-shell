@@ -88,27 +88,40 @@ func (r secretRow) line(t Theme, width int, selected bool) string {
 }
 
 // secretPrompt — поле ввода значения переменной секрета (Фаза 15, план
-// 15-02, JOB-02): имя переменной, поле ввода, признак активности и текст
-// последней ошибки.
+// 15-02, JOB-02) И, с Фазы 20 (план 20-02, VAR-01), поле ввода значения
+// ЛЮБОЙ обычной переменной, которую домен признал правимой (env.Editable,
+// план 20-01): одно и то же поле обслуживает оба класса, различённых полем
+// persist — значение уходит на диск через env.SaveSecret (секретная
+// переменная), когда persist истинно; когда ложно — значение живёт только в
+// памяти сессии (Session.recordOverride) и на диск не попадает никогда.
+// Режим эха (скрытый/видимый) держится отдельным параметром конструктора, а
+// не выводится из persist: секрет и обычная переменная сегодня совпадают по
+// обоим признакам (секрет всегда скрыт и всегда сохраняется), но называть
+// одно через другое значило бы утверждать связь, которой в домене нет —
+// env.Editable ничего не знает про эхо, а видимость поля — забота экрана.
 type secretPrompt struct {
-	key    string
-	input  textinput.Model
-	active bool
-	err    string
+	key     string
+	input   textinput.Model
+	active  bool
+	err     string
+	persist bool
 }
 
-// newSecretPrompt собирает поле в режиме СКРЫТОГО эха (тот же режим, что у
-// поля токена проводника, internal/ui/guide.go) — обязательный, а не
-// желательный: значение вводится в терминале, за которым может кто-то
-// смотреть, и остаётся на экране до следующей перерисовки; для токена этот
-// вопрос уже решён ровно так же. Приглашением ставится имя переменной,
-// полю отдаётся фокус и возвращается команда мигания курсора.
-func newSecretPrompt(key string) (secretPrompt, tea.Cmd) {
+// newSecretPrompt собирает поле ввода: hidden решает режим эха (скрытый —
+// тот же режим, что у поля токена проводника, internal/ui/guide.go, — или
+// видимый, для обычной переменной, Фаза 20), persist решает, уйдёт ли
+// подтверждённое значение на диск (секрет) или останется только в памяти
+// сессии (обычная переменная) — см. комментарий над типом secretPrompt.
+// Приглашением ставится имя переменной, полю отдаётся фокус и возвращается
+// команда мигания курсора.
+func newSecretPrompt(key string, hidden, persist bool) (secretPrompt, tea.Cmd) {
 	ti := textinput.New()
 	ti.Prompt = key + ": "
-	ti.EchoMode = textinput.EchoPassword
+	if hidden {
+		ti.EchoMode = textinput.EchoPassword
+	}
 	ti.Focus()
-	return secretPrompt{key: key, input: ti, active: true}, textinput.Blink
+	return secretPrompt{key: key, input: ti, active: true, persist: persist}, textinput.Blink
 }
 
 // updateKey — подтверждение: набранное обрезается по краям, пустое не
@@ -127,9 +140,10 @@ func (p secretPrompt) updateKey(msg tea.KeyPressMsg, k KeyMap) (secretPrompt, te
 			return p, nil
 		}
 		varKey := p.key
+		persist := p.persist
 		p.input.SetValue("")
 		p.active = false
-		return p, func() tea.Msg { return secretEnteredMsg{Key: varKey, Value: value} }
+		return p, func() tea.Msg { return secretEnteredMsg{Key: varKey, Value: value, Persist: persist} }
 	case key.Matches(msg, k.Back):
 		p.input.SetValue("")
 		p.active = false
@@ -153,12 +167,17 @@ func (p secretPrompt) view(t Theme) string {
 }
 
 // secretEnteredMsg — человек подтвердил значение переменной Key. Значение
-// живёт ровно в этом сообщении и в замыкании команды записи (saveSecretCmd)
-// и нигде больше: в модель оно не кладётся, в баннер и подсказку не
-// попадает, в лог не пишется.
+// живёт ровно в этом сообщении и в замыкании команды записи (saveSecretCmd,
+// только когда Persist истинно) и нигде больше: в модель оно не кладётся, в
+// баннер и подсказку не попадает, в лог не пишется. Persist — тот же
+// признак, что был у secretPrompt в момент подтверждения (Фаза 20, план
+// 20-02): решает, уйдёт ли Value на диск (saveSecretCmd) или в память сессии
+// (Session.recordOverride) — обработчик в internal/ui/job.go ветвится по
+// нему.
 type secretEnteredMsg struct {
-	Key   string
-	Value string
+	Key     string
+	Value   string
+	Persist bool
 }
 
 // secretSavedMsg — итог записи секрета: имя переменной, путь файла и

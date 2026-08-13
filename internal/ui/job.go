@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 
+	"github.com/f3rym/ci-shell/internal/env"
 	"github.com/f3rym/ci-shell/internal/event"
 	"github.com/f3rym/ci-shell/internal/render"
 	"github.com/f3rym/ci-shell/internal/textwidth"
@@ -26,12 +27,16 @@ type stepRow struct {
 	Status  string
 }
 
-// envRow — одна строка панели окружения: ключ и уже принятое решение о
+// envRow — одна строка панели окружения: ключ, уже принятое решение о
 // показе значения (render.DisplayValue, посчитано ровно один раз при сборке
-// envRowsFromSession).
+// envRowsFromSession) и (Фаза 20, план 20-02, VAR-01) решение о правке —
+// Editable, единственная точка которого — env.Editable (план 20-01),
+// применённая здесь и защитно повторяемая внутри самого env.Assemble;
+// вторая, самостоятельная проверка класса на экране не заводится.
 type envRow struct {
-	Key     string
-	Display string
+	Key      string
+	Display  string
+	Editable bool
 }
 
 // loopPhase — состояние петли фикса, по таблице строки подсказки контракта
@@ -623,10 +628,24 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 
 	case secretEnteredMsg:
 		// Поле уже закрыто и вычищено секундой раньше (secretPrompt.updateKey)
-		// — здесь только запуск записи, единственное место вызова
-		// saveSecretCmd на экране джобы.
+		// — ветвление по msg.Persist (Фаза 20, план 20-02): истинно —
+		// секретная переменная, прежний путь на диск (saveSecretCmd,
+		// единственное место его вызова на экране джобы); ложно — обычная
+		// переменная, значение в память сессии (session.recordOverride) и
+		// повтор подготовки, та же причина, что у secretSavedMsg ниже —
+		// окружение собирается доменом заново, контейнер уже поднят со
+		// старым набором переменных, — только без промежуточного сообщения
+		// об итоге записи: записи на диск для этой ветви нет и отказать
+		// нечему, кроме пустого значения, уже отсеянного secretPrompt.updateKey.
 		m.secret = secretPrompt{}
-		return m, saveSecretCmd(m.session.ref.Host, m.session.ref.ProjectPath, msg.Key, msg.Value)
+		if msg.Persist {
+			return m, saveSecretCmd(m.session.ref.Host, m.session.ref.ProjectPath, msg.Key, msg.Value)
+		}
+		m.session.recordOverride(msg.Key, msg.Value)
+		m.banner = HintVarOverridden(msg.Key)
+		m.blockedCanceled = true
+		m.phase = phasePreparing
+		return m, m.session.RestartCmd(context.Background())
 
 	// secretSavedMsg: ошибка — однострочный баннер цветом отказа, состояние
 	// экрана не меняется, вписать можно снова; успех — баннер приглушённым
@@ -643,6 +662,12 @@ func (m jobModel) update(msg tea.Msg) (jobModel, tea.Cmd) {
 			m.blockedCanceled = false
 			return m, nil
 		}
+		// Успешная запись секрета теперь тоже заносит своё имя в общий
+		// журнал сессии (Фаза 20, план 20-02, VAR-02): до этого плана правка
+		// секрета никуда не журналировалась по имени — только флагом
+		// filledHere; env.SaveSecret ничего не знает о сессии и не может
+		// занести себя в журнал сама.
+		m.session.recordEdit(msg.Key)
 		m.banner = HintSecretSaved(msg.Key, msg.Path)
 		m.blockedCanceled = true
 		m.filledHere = true
@@ -1299,14 +1324,15 @@ func stepRowsFromSession(s *Session) []stepRow {
 	return rows
 }
 
-// envRowsFromSession строит срез строк окружения. render.DisplayValue —
-// единственная точка решения о показе значения, зовётся здесь ровно один
-// раз на переменную: собственной ветки «показывать или нет» в этом файле
-// нет ни одной.
+// envRowsFromSession строит срез строк окружения. Функция принимает два
+// решения на переменную — показ (render.DisplayValue) и правка
+// (env.Editable, Фаза 20, план 20-02) — и оба остаются единственными точками
+// своего вопроса: собственной ветки «показывать или нет» либо «можно ли
+// править» в этом файле нет ни одной.
 func envRowsFromSession(s *Session) []envRow {
 	rows := make([]envRow, 0, len(s.environment.Vars))
 	for _, v := range s.environment.Vars {
-		rows = append(rows, envRow{Key: v.Key, Display: render.DisplayValue(v)})
+		rows = append(rows, envRow{Key: v.Key, Display: render.DisplayValue(v), Editable: env.Editable(v)})
 	}
 	return rows
 }
@@ -1499,6 +1525,15 @@ func (m jobModel) currentSecretRow() (secretRow, bool) {
 	return m.secretRows[m.envCursor], true
 }
 
+// currentEnvRow — строка вида «окружение» под курсором, если она есть (Фаза
+// 20, план 20-02): та же форма, что и currentSecretRow рядом.
+func (m jobModel) currentEnvRow() (envRow, bool) {
+	if m.envCursor < 0 || m.envCursor >= len(m.envRows) {
+		return envRow{}, false
+	}
+	return m.envRows[m.envCursor], true
+}
+
 // fillsSecret — можно ли сейчас вписать значение переменной (Фаза 15, план
 // 15-02, JOB-02): фокус в правой колонке (focused), вид «секреты», под
 // курсором есть строка и экран не занят долгой операцией — та же проверка
@@ -1517,16 +1552,52 @@ func (m jobModel) fillsSecret(focused columnID) bool {
 	return m.idle()
 }
 
+// fillsOverride — можно ли сейчас изменить значение ОБЫЧНОЙ переменной под
+// курсором (Фаза 20, план 20-02, VAR-01): фокус в правой колонке, вид
+// «окружение», под курсором есть строка и её Editable истинно, экран не
+// занят долгой операцией. Секретные строки вида «окружение» (<скрыто>) сюда
+// не попадают вовсе — их Editable ложно (env.Editable исключает Secret), у
+// них свой путь правки в виде «секреты» (fillsSecret, не пересекается с
+// этим предикатом): держать оба класса на одном предикате значило бы решать
+// в одном месте два разных вопроса («что это за переменная» и «в каком виде
+// сейчас курсор») сразу.
+func (m jobModel) fillsOverride(focused columnID) bool {
+	if focused != colDetail || m.detail != detailEnv {
+		return false
+	}
+	row, ok := m.currentEnvRow()
+	if !ok || !row.Editable {
+		return false
+	}
+	return m.idle()
+}
+
 // startFill — открывает поле ввода для строки под курсором; единственное
-// место открытия поля.
+// место открытия поля для ОБОИХ классов (Фаза 20, план 20-02): разбор по
+// m.detail здесь — не вторая реализация, а то же самое место, отвечающее на
+// «для какой строки» после того, как app.go уже решило «можно ли вообще»
+// (fillsSecret/fillsOverride).
 func (m jobModel) startFill() (jobModel, tea.Cmd) {
-	row, ok := m.currentSecretRow()
-	if !ok {
+	switch m.detail {
+	case detailSecrets:
+		row, ok := m.currentSecretRow()
+		if !ok {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.secret, cmd = newSecretPrompt(row.Key, true, true)
+		return m, cmd
+	case detailEnv:
+		row, ok := m.currentEnvRow()
+		if !ok || !row.Editable {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.secret, cmd = newSecretPrompt(row.Key, false, false)
+		return m, cmd
+	default:
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.secret, cmd = newSecretPrompt(row.Key)
-	return m, cmd
 }
 
 // openLogCmd собирает команду открытия полноэкранного просмотрщика (план
@@ -1795,6 +1866,14 @@ func (m jobModel) keyBar() string {
 			// живая.
 			extra = append(extra, HintAs(m.keys.Open, "вписать значение"))
 		}
+		if m.detail == detailEnv {
+			// Клавиша подтверждения изменит значение ОБЫЧНОЙ переменной под
+			// курсором (Фаза 20, план 20-02, VAR-01) — только когда строка
+			// под курсором редактируема (env.Editable).
+			if row, ok := m.currentEnvRow(); ok && row.Editable {
+				extra = append(extra, HintAs(m.keys.Open, "изменить значение"))
+			}
+		}
 	}
 	return KeyBar(m.theme, m.keys, extra...)
 }
@@ -1807,8 +1886,14 @@ func (m jobModel) hintText() string {
 	case m.secret.active:
 		// Поле открыто — это про то, что происходит прямо сейчас, поэтому
 		// ветка стоит первой, впереди даже долгих операций и отказов (Фаза
-		// 15, план 15-02).
-		return HintSecretPrompt(m.secret.key)
+		// 15, план 15-02). Разбор по persist (Фаза 20, план 20-02): секрет
+		// (persist) не отображается при вводе и уйдёт на диск; обычная
+		// переменная (не persist) видна при вводе и живёт только в памяти
+		// сессии.
+		if m.secret.persist {
+			return HintSecretPrompt(m.secret.key)
+		}
+		return HintVarPrompt(m.secret.key)
 	case m.canceling:
 		return HintCanceling()
 	case m.pulling:
@@ -1886,6 +1971,14 @@ func (m jobModel) hintText() string {
 					return HintSecretFilled(row.Key, m.keys.Open.Help().Key)
 				}
 				return HintSecretMissing(row.Key, m.keys.Open.Help().Key)
+			}
+		}
+		if m.detail == detailEnv {
+			// Обычная переменная не бывает «недостающей» в смысле Фазы 15 —
+			// подсказка называет только возможность правки, если строка под
+			// курсором редактируема (Фаза 20, план 20-02).
+			if row, ok := m.currentEnvRow(); ok && row.Editable {
+				return HintVarEditable(row.Key, m.keys.Open.Help().Key)
 			}
 		}
 		return HintDetailNext(m.keys.Right.Help().Key, detailName(nextDetail(m.detail)))

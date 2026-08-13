@@ -729,3 +729,29 @@ func HintSecretSaved(name, path string) string {
 func HintSecretFailed(reason string) string {
 	return fmt.Sprintf("записать не вышло: %s", reason)
 }
+
+// Формулировки правки ОБЫЧНОЙ переменной (Фаза 20, план 20-02, VAR-01):
+// тем же приёмом, что и HintSecret* выше — параметрами только имя переменной,
+// путь и клавиша, никогда значение. Обычная переменная не бывает
+// «недостающей» в смысле Фазы 15 — она либо неправлена ещё в этой сессии,
+// либо уже переопределена, но всегда имеет исходное значение из окружения.
+
+// HintVarPrompt — поле ввода значения обычной переменной name открыто:
+// в отличие от HintSecretPrompt значение видно при вводе и не уходит на
+// диск, а меняется только для этой сессии.
+func HintVarPrompt(name string) string {
+	return fmt.Sprintf("значение %s видно при вводе и меняется только для этой сессии", name)
+}
+
+// HintVarOverridden — значение переменной name изменено для этой сессии,
+// подготовка повторяется. Без пути файла — в отличие от HintSecretSaved,
+// здесь диска нет.
+func HintVarOverridden(name string) string {
+	return fmt.Sprintf("значение %s изменено для этой сессии — повторяю подготовку", name)
+}
+
+// HintVarEditable — курсор на редактируемой обычной переменной name: key
+// изменит значение.
+func HintVarEditable(name, key string) string {
+	return fmt.Sprintf("%s — %s изменит значение", name, key)
+}
