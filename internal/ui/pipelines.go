@@ -130,18 +130,44 @@ func pipelineColumns(width int) []table.Column {
 		numberWidth = 8
 		whenWidth   = 12
 	)
-	rest := width - symbolWidth - numberWidth - whenWidth - tableColumnCount*tableCellPadding
+	// Доступная ширина за вычетом отступов, которые таблица Bubbles
+	// добавляет каждому столбцу сама.
+	avail := width - tableColumnCount*tableCellPadding
+	if avail < 0 {
+		avail = 0
+	}
+
+	// Обнуления одной лишь доли «ветка»/«коммит» мало: при колонке уже
+	// несжимаемой части (символ, номер и «когда» — 31 ячейка вместе с
+	// отступами) сумма фиксированных ширин всё равно превышала отведённое,
+	// и Lip Gloss переносил «когда» на вторую строку, разрывая шапку и ряды
+	// (обзор v1.0.0, CR-03). Поэтому ужимаются и фиксированные столбцы, в
+	// порядке убывания того, без чего строка ещё читается: сначала «когда»,
+	// затем номер; символ статуса не отдаётся до последнего — без него ряд
+	// перестаёт отвечать на главный вопрос «упало или прошло».
+	symbol, number, when := symbolWidth, numberWidth, whenWidth
+	if symbol+number+when > avail {
+		when = max(0, avail-symbol-number)
+		if when == 0 {
+			number = max(0, avail-symbol)
+			if number == 0 {
+				symbol = max(0, avail)
+			}
+		}
+	}
+
+	rest := avail - symbol - number - when
 	if rest < 0 {
 		rest = 0
 	}
 	branch := rest * 2 / 3
 	commit := rest - branch
 	return []table.Column{
-		{Title: "", Width: symbolWidth},
-		{Title: "#", Width: numberWidth},
+		{Title: "", Width: symbol},
+		{Title: "#", Width: number},
 		{Title: "ветка", Width: branch},
 		{Title: "коммит", Width: commit},
-		{Title: "когда", Width: whenWidth},
+		{Title: "когда", Width: when},
 	}
 }
 

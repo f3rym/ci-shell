@@ -1327,14 +1327,20 @@ func (l *logBuffer) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	s := l.mask.Replace(string(p))
-	l.partial += s
+	// Маска применяется к СОБРАННОЙ строке, а не к пришедшему куску
+	// (обзор v1.0.0, CR-01). Границы вызовов Write не совпадают с
+	// границами строк: тяга образа и `:!` пишут сюда напрямую, минуя
+	// построчный разбор, и значение секрета, разрезанное такой границей
+	// пополам, ни в одном из двух кусков не совпадало с искомым — обе
+	// половины уходили в буфер открытыми, а склеивались уже после
+	// маскировки.
+	l.partial += string(p)
 	for {
 		i := strings.IndexByte(l.partial, '\n')
 		if i < 0 {
 			break
 		}
-		l.appendLine(l.partial[:i])
+		l.appendLine(l.mask.Replace(l.partial[:i]))
 		l.partial = l.partial[i+1:]
 	}
 	return len(p), nil

@@ -540,7 +540,13 @@ func (m jobsModel) rowLine(j provider.Job, selected bool, width int) string {
 	agoText := Ago(j.FinishedAt)
 	ago := m.theme.Muted.Render(agoText)
 
-	reserved := 1 + RowIconGap + 2 + textwidth.Of(statusText) + noteWidth + 2 + textwidth.Of(agoText)
+	// CursorReserve вычитается ВСЕГДА, а не только у выбранной строки:
+	// Fit набивает имя ровно до отведённой ширины, поэтому у строки под
+	// курсором маркер оказывался за краем колонки и переносился на
+	// следующую — человек переставал видеть, на чём он стоит (обзор
+	// v1.0.0, CR-02). Вычитать только у выбранной значило бы дёргать
+	// ширину имени при каждом движении курсора.
+	reserved := 1 + RowIconGap + 2 + textwidth.Of(statusText) + noteWidth + 2 + textwidth.Of(agoText) + CursorReserve
 	nameWidth := width - reserved
 	if nameWidth < 1 {
 		nameWidth = 1
