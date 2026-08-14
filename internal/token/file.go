@@ -223,9 +223,15 @@ func Save(host, secret string) (string, error) {
 // приводить его обязана та же единственная формула, что и при чтении файла,
 // иначе ключ в файле и ключ в запросе разойдутся на первом же скопированном
 // адресе.
+// Регистр приводится здесь же (обзор v1.0.0, WR-3): имена в DNS
+// регистронезависимы, и адрес, скопированный из адресной строки как
+// GitLab.Example.Com, обязан дать тот же ключ файла токенов, что и ссылка на
+// джобу с gitlab.example.com. Оба остальных источника хоста в проекте —
+// joburl.Parse и repo.parseRemote — приводят регистр у себя; третьей формулы
+// не заводится, но и исключения из правила здесь быть не должно.
 func NormalizeHost(host string) string {
 	h := strings.TrimSuffix(host, "/")
 	h = strings.TrimPrefix(h, "https://")
 	h = strings.TrimPrefix(h, "http://")
-	return h
+	return strings.ToLower(h)
 }

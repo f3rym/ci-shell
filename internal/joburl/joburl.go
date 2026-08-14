@@ -117,6 +117,17 @@ func Parse(raw string) (Ref, error) {
 	if !ValidHost(u.Host) {
 		return Ref{}, ErrNotAJobURL
 	}
+	// Хост приводится к нижнему регистру ЗДЕСЬ, в точке, где он появляется
+	// из ссылки, а не у каждого потребителя (обзор v1.0.0, WR-3). Имена в
+	// DNS регистронезависимы, а net/url регистр не трогает — и хост из
+	// ссылки становится ключом сразу в трёх местах: файл токенов, файл
+	// секретов, путь кэша. Ссылка с GitLab.Example.Com и ссылка с
+	// gitlab.example.com указывают на один сервер, но давали разные ключи:
+	// сохранённый токен не находился, вписанные секреты проекта не
+	// находились, зеркало репозитория тянулось заново. Второй источник
+	// хоста в проекте — repo.parseRemote — регистр приводит уже давно;
+	// здесь снимается расхождение между двумя путями входа.
+	host := strings.ToLower(u.Host)
 
 	var left, right string
 	found := false
@@ -146,10 +157,10 @@ func Parse(raw string) (Ref, error) {
 	}
 
 	return Ref{
-		Host:        u.Host,
+		Host:        host,
 		ProjectPath: projectPath,
 		JobID:       jobID,
-		WebURL:      "https://" + u.Host + u.Path,
+		WebURL:      "https://" + host + u.Path,
 	}, nil
 }
 

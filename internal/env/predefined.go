@@ -3,6 +3,7 @@ package env
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/f3rym/ci-shell/internal/provider"
@@ -72,6 +73,47 @@ func Predefined(job provider.Job, host string) []Variable {
 	add("CI_RUNNER_DESCRIPTION", job.RunnerDesc)
 
 	return vars
+}
+
+// predefinedKeysOnce, predefinedKeysSet — множество имён, которые Predefined
+// вообще способна расставить. Нужно, чтобы «предопределённость» переменной
+// определялась ИМЕНЕМ, а не меткой Source: метка принадлежит слою, который
+// последним записал ключ, и переменная проекта, названная CI_COMMIT_SHA,
+// отбирает её у настоящей предопределённой записи вместе с запретом на
+// правку (обзор v1.0.0, WR-1).
+//
+// Множество ВЫВОДИТСЯ из самой Predefined, а не пишется списком рядом:
+// список руками разошёлся бы с ней на первой же добавленной переменной, и
+// разошёлся бы молча. Синтетическая джоба заполнена целиком, потому что add
+// пропускает пустые значения; два прогона — из-за единственной развилки
+// внутри (тег или ветка), обе ветви которой обязаны попасть в множество.
+var (
+	predefinedKeysOnce sync.Once
+	predefinedKeysSet  map[string]bool
+)
+
+// PredefinedKeys сообщает, расставляет ли Predefined переменную с таким
+// именем. Ответ не зависит от конкретной джобы: вопрос не «пришла ли эта
+// переменная предопределённой сейчас», а «принадлежит ли это имя перечню
+// предопределённых вообще».
+func PredefinedKeys(key string) bool {
+	predefinedKeysOnce.Do(func() {
+		sample := provider.Job{
+			ID: 1, Name: "j", Stage: "s", Status: "failed",
+			WebURL: "u", StartedAt: time.Unix(1, 0),
+			PipelineID: 1, PipelineIID: 1,
+			CommitSHA: "0123456789abcdef", Ref: "r", CommitTitle: "t",
+			ProjectID: 1, ProjectPath: "g/p", RunnerDesc: "d",
+		}
+		predefinedKeysSet = make(map[string]bool)
+		for _, tag := range []bool{false, true} {
+			sample.Tag = tag
+			for _, v := range Predefined(sample, "h") {
+				predefinedKeysSet[v.Key] = true
+			}
+		}
+	})
+	return predefinedKeysSet[key]
 }
 
 // formatIfPositive форматирует id-подобное поле, только если оно

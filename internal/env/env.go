@@ -209,8 +209,17 @@ func (e Environment) Map(filePaths map[string]string) map[string]string {
 //     с CI_COMMIT_SHA, расходящимся с тем, что реально смонтировано с
 //     хоста, — прямое нарушение обещания проекта «тот же коммит»
 //     (PROJECT.md, Core Value).
+//
+// Проверка идёт и по метке Source, и по ИМЕНИ (PredefinedKeys): метка
+// принадлежит слою, который последним записал ключ в карту, а слои конфига
+// пайплайна и переменных проекта пишут безусловно. Переменная проекта,
+// названная CI_COMMIT_SHA — а такую GitLab принимает и в `variables:`, и
+// через API, — отбирала бы у настоящей предопределённой записи не только
+// метку, но и запрет на правку, и обещание «личность прогона неприкосновенна»
+// держалось бы лишь до первого совпадения имён (обзор v1.0.0, WR-1).
 func Editable(v Variable) bool {
-	return !v.Secret && v.Kind != KindFile && v.Source != SourcePredefined
+	return !v.Secret && v.Kind != KindFile &&
+		v.Source != SourcePredefined && !PredefinedKeys(v.Key)
 }
 
 // Input — входные данные для сборки окружения.
