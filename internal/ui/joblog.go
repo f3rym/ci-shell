@@ -51,7 +51,17 @@ type logEntry struct {
 // счётчик поколения запроса, идентификатор джобы, для которой запрос сейчас
 // идёт, спиннер, текст ошибки, признак «показан полный лог» и размеры.
 type logPanel struct {
-	b           *browse.Client
+	b *browse.Client
+	// p и host — источники известных значений секретов для маскировки лога
+	// перед показом (buildBrowseMask, internal/ui/mask.go, CR-04 обзора
+	// v1.0.0): browse.Client.Log сам по себе секреты не маскирует (только
+	// снимает управляющие последовательности терминала), а лог настоящего
+	// прогона может нести немаскированное GitLab-ом значение (многострочные
+	// секреты runner не маскирует вовсе). p может быть nil (хост, для
+	// которого не удалось собрать клиента обхода, — loadErr уже объясняет
+	// причину экрану) — buildBrowseMask это учитывает.
+	p           provider.Provider
+	host        string
 	projectPath string
 
 	job    provider.Job
@@ -105,12 +115,14 @@ type logFailedMsg struct {
 // первый setSize (ниже) пересчитает его от высоты, оставшейся под списком
 // джоб (Фаза 13, план 13-02, jobsModel.setSize) — второго расчёта здесь не
 // заводится. Клиент обхода b — тот же, что у списка джоб: второго клиента
-// в интерфейсе не появляется.
-func newLogPanel(b *browse.Client, projectPath string) logPanel {
+// в интерфейсе не появляется. p и host идут отдельно от b (browse.Client их
+// не отдаёт наружу) — buildBrowseMask строит по ним маску известных секретов
+// для лога (CR-04 обзора v1.0.0).
+func newLogPanel(p provider.Provider, b *browse.Client, host, projectPath string) logPanel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return logPanel{
-		b: b, projectPath: projectPath,
+		b: b, p: p, host: host, projectPath: projectPath,
 		lv:   newLogView(),
 		spin: sp,
 		memo: map[int64]logEntry{},
@@ -210,28 +222,54 @@ func (p *logPanel) Open(job provider.Job) tea.Cmd {
 }
 
 // fetchTail запрашивает хвост лога размером provider.DefaultTailBytes —
-// умолчание доменных типов (D-02: не тянуть мегабайты без спроса).
+// умолчание доменных типов (D-02: не тянуть мегабайты без спроса). Строки
+// маскируются той же формулой, что и живой вывод сессии, до попадания в
+// сообщение (maskLog ниже, CR-04 обзора v1.0.0) — p.job на момент вызова
+// уже указывает на джобу jobID: generation-защита в update() отбрасывает
+// ответ раньше, чем курсор успевает уйти на другую джобу и переписать p.job.
 func (p *logPanel) fetchTail(jobID int64, gen int) tea.Cmd {
 	b, projectPath := p.b, p.projectPath
+	prov, host, job := p.p, p.host, p.job
 	return func() tea.Msg {
 		log, err := b.Log(context.Background(), projectPath, jobID, provider.LogOptions{TailBytes: provider.DefaultTailBytes})
 		if err != nil {
 			return logFailedMsg{jobID: jobID, generation: gen, reason: err.Error()}
 		}
+		log = maskLog(context.Background(), prov, host, job, log)
 		return logLoadedMsg{jobID: jobID, generation: gen, log: log, full: false}
 	}
 }
 
-// fetchFull запрашивает лог целиком — нулевой размер хвоста.
+// fetchFull запрашивает лог целиком — нулевой размер хвоста. Маскируется
+// той же формулой, что и fetchTail выше.
 func (p *logPanel) fetchFull(jobID int64, gen int) tea.Cmd {
 	b, projectPath := p.b, p.projectPath
+	prov, host, job := p.p, p.host, p.job
 	return func() tea.Msg {
 		log, err := b.Log(context.Background(), projectPath, jobID, provider.LogOptions{TailBytes: 0})
 		if err != nil {
 			return logFailedMsg{jobID: jobID, generation: gen, reason: err.Error()}
 		}
+		log = maskLog(context.Background(), prov, host, job, log)
 		return logLoadedMsg{jobID: jobID, generation: gen, log: log, full: true}
 	}
+}
+
+// maskLog заменяет в log.Lines известные значения секретов их отображением
+// (buildBrowseMask, internal/ui/mask.go) — browse.Client.Log сам по себе
+// маскирует только управляющие последовательности терминала (SafeText в
+// internal/provider/gitlab/log.go), не значения переменных: без этого шага
+// лог настоящего прогона показывал бы секрет открытым текстом там, где
+// GitLab-раннер сам его не замаскировал (многострочные значения он не
+// маскирует вовсе) — CR-04 обзора исполняющей части v1.0.0.
+func maskLog(ctx context.Context, p provider.Provider, host string, job provider.Job, log provider.Log) provider.Log {
+	mask := buildBrowseMask(ctx, p, host, job)
+	masked := make([]string, len(log.Lines))
+	for i, line := range log.Lines {
+		masked[i] = mask.Replace(line)
+	}
+	log.Lines = masked
+	return log
 }
 
 func (p *logPanel) update(msg tea.Msg) tea.Cmd {

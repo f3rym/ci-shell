@@ -82,31 +82,38 @@ type openJobMsg struct{ job provider.Job }
 
 // newJobsModelCommon собирает общую часть обоих конструкторов ниже —
 // спиннер и панель лога (newLogPanel вызывается ровно здесь, одним местом
-// на оба входа в экран).
-func newJobsModelCommon(ref joburl.Ref, job provider.Job, b *browse.Client, loadErr string, theme Theme, keys KeyMap) jobsModel {
+// на оба входа в экран). p передаётся в панель лога отдельно от клиента
+// обхода b (тот его наружу не отдаёт) — buildBrowseMask строит по нему
+// маску известных секретов для лога настоящего прогона (CR-04 обзора
+// v1.0.0); p == nil здесь означает то же самое, что означает пустой b:
+// клиента для хоста ссылки собрать не удалось, экран уже объясняет это
+// через loadErr.
+func newJobsModelCommon(ref joburl.Ref, job provider.Job, p provider.Provider, b *browse.Client, loadErr string, theme Theme, keys KeyMap) jobsModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	return jobsModel{
 		ref: ref, job: job, b: b, loadErr: loadErr, theme: theme, keys: keys, spin: sp,
-		log: newLogPanel(b, ref.ProjectPath),
+		log: newLogPanel(p, b, ref.Host, ref.ProjectPath),
 	}
 }
 
 // newJobsModel строит модель списка джоб для входа по ссылке с заставки.
-// Клиент обхода b собирается вызывающим (internal/ui/app.go) — единственное
-// место в пакете, конструирующее browse.Client (то же самое, что уже
-// собрало экран дерева); loadErr, если токен для хоста ссылки не резолвится,
-// приходит уже готовой строкой, потому что до этого места клиента обхода
-// собрать было не из чего.
-func newJobsModel(ref joburl.Ref, job provider.Job, b *browse.Client, loadErr string, theme Theme, keys KeyMap) jobsModel {
-	return newJobsModelCommon(ref, job, b, loadErr, theme, keys)
+// Клиент обхода b и значение интерфейса провайдера p собираются вызывающим
+// (internal/ui/app.go) — единственное место в пакете, конструирующее
+// browse.Client (то же самое, что уже собрало экран дерева); loadErr, если
+// токен для хоста ссылки не резолвится, приходит уже готовой строкой,
+// потому что до этого места ни клиента обхода, ни провайдера собрать было
+// не из чего.
+func newJobsModel(ref joburl.Ref, job provider.Job, p provider.Provider, b *browse.Client, loadErr string, theme Theme, keys KeyMap) jobsModel {
+	return newJobsModelCommon(ref, job, p, b, loadErr, theme, keys)
 }
 
 // newJobsModelFromPipeline строит модель списка джоб для входа из дерева
 // групп и проектов (Фаза 10, BROW-03): пайплайн уже известен, метаданных
-// открывающей джобы нет вовсе. Клиент обхода — тот же, что уже собрал
-// экран дерева; второго клиента в интерфейсе не появляется.
-func newJobsModelFromPipeline(b *browse.Client, host string, project provider.Project, pipeline provider.Pipeline, theme Theme, keys KeyMap) jobsModel {
+// открывающей джобы нет вовсе. Клиент обхода и провайдер — те же, что уже
+// собрали экран дерева; второго клиента и второго значения провайдера в
+// интерфейсе не появляется.
+func newJobsModelFromPipeline(p provider.Provider, b *browse.Client, host string, project provider.Project, pipeline provider.Pipeline, theme Theme, keys KeyMap) jobsModel {
 	ref := joburl.Ref{Host: host, ProjectPath: project.FullPath}
 	job := provider.Job{
 		PipelineID:  pipeline.ID,
@@ -115,7 +122,7 @@ func newJobsModelFromPipeline(b *browse.Client, host string, project provider.Pr
 		CommitSHA:   pipeline.SHA,
 		ProjectPath: project.FullPath,
 	}
-	return newJobsModelCommon(ref, job, b, "", theme, keys)
+	return newJobsModelCommon(ref, job, p, b, "", theme, keys)
 }
 
 // setSize передаёт колонке джоб ширину и высоту (Фаза 13, план 13-02):

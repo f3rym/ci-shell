@@ -1189,14 +1189,15 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// вместо прежних четырёх полей; поведение при отказе (строка ошибки
 		// на экране списка джоб) не меняется.
 		loadErr := ""
+		var prov provider.Provider
 		var b *browse.Client
 		if p, bc, err := resolveBrowse(msg.ref.Host); err != nil {
 			loadErr = err.Error()
 		} else {
 			a.access[msg.ref.Host] = hostAccess{Host: msg.ref.Host, Provider: p, Client: bc}
-			b = bc
+			prov, b = p, bc
 		}
-		a.jobs = newJobsModel(msg.ref, msg.job, b, loadErr, a.theme, a.keys)
+		a.jobs = newJobsModel(msg.ref, msg.job, prov, b, loadErr, a.theme, a.keys)
 		// По прямой ссылке репозиториев и пайплайнов слева нет — самая
 		// левая колонка ленты становится колонка джоб, и esc из неё выходит.
 		// Уточнение заголовка — идентификатор пайплайна, ветка и
@@ -1273,7 +1274,7 @@ func (a App) updateInnerScreens(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// СООБЩЕНИЯ, а не из состояния корневой модели — «текущего хоста»
 		// после этого плана не существует. Экрана джоб второго в проекте не
 		// появляется — тот же jobsModel, второй конструктор.
-		a.jobs = newJobsModelFromPipeline(a.access[msg.host].Client, msg.host, msg.project, msg.pipeline, a.theme, a.keys)
+		a.jobs = newJobsModelFromPipeline(a.access[msg.host].Provider, a.access[msg.host].Client, msg.host, msg.project, msg.pipeline, a.theme, a.keys)
 		var dropped []columnID
 		// Уточнение заголовка — тем же приёмом, что и у входа по прямой
 		// ссылке выше (jobRefMsg): идентификатор пайплайна, ветка и

@@ -1,17 +1,20 @@
 // mask.go — единственный маскировщик известных значений переменных в
 // проекте (Фаза 10, BROW-04): два потребителя — ограниченный буфер вывода
 // локального прогона (internal/ui/session.go) и панель лога настоящего
-// прогона (internal/ui/joblog.go). Второго правила замены нет: обе стороны
-// идут через buildSecretMask и secretMask.Replace, а замена берётся у той
-// же функции, что рисует панель окружения (render.DisplayValue) — второй
-// ветки «показывать или нет» в проекте не появляется.
+// прогона, полученного через обход (internal/ui/joblog.go, CR-04 обзора
+// v1.0.0). Второго правила замены нет: обе стороны идут через
+// buildSecretMask и secretMask.Replace, а замена берётся у той же функции,
+// что рисует панель окружения (render.DisplayValue) — второй ветки
+// «показывать или нет» в проекте не появляется.
 package ui
 
 import (
+	"context"
 	"sort"
 	"strings"
 
 	"github.com/f3rym/ci-shell/internal/env"
+	"github.com/f3rym/ci-shell/internal/provider"
 	"github.com/f3rym/ci-shell/internal/render"
 )
 
@@ -64,4 +67,41 @@ func (m secretMask) Replace(s string) string {
 		return s
 	}
 	return m.replacer.Replace(s)
+}
+
+// buildBrowseMask собирает маску для лога джобы, полученного через обход
+// (internal/browse.Client.Log, internal/ui/joblog.go) — до входа в сессию
+// воспроизведения, где для той же цели уже строится buildSecretMask(e) из
+// полностью собранного окружения (internal/ui/session.go). На этом этапе
+// полного окружения ещё нет (нет ни разобранного конфига пайплайна, ни
+// сессионных правок — сама сессия ещё не начата), поэтому маска строится из
+// тех же ДВУХ источников значений, что несут реальные секреты — переменных
+// API (Provider.Variables) и локального файла секретов (env.LoadSecrets) —
+// без слоёв, которых здесь нет и не может быть; их отсутствие не отнимает
+// ни одного уже известного значения, оно лишь не добавляет то, что взялось
+// бы из конфига пайплайна или правок текущей сессии.
+//
+// Ошибка получения переменных или файла секретов не отказывает показом
+// лога — она лишь сужает маску до того, что удалось узнать: то же
+// поведение деградации, каким Session.PrepareCmd относится к точно таким
+// же двум источникам (notices вместо отказа). Второй реализации
+// маскирования здесь не заводится — buildBrowseMask лишь собирает
+// env.Environment из другого набора слоёв и передаёт его в тот же
+// buildSecretMask/secretMask.Replace, что и сессия.
+func buildBrowseMask(ctx context.Context, p provider.Provider, host string, job provider.Job) secretMask {
+	var apiVars []provider.Variable
+	if p != nil {
+		if vs, err := p.Variables(ctx, job); err == nil {
+			apiVars = vs.Variables
+		}
+	}
+	secrets, _ := env.LoadSecrets(host, job.ProjectPath)
+	e := env.Assemble(env.Input{
+		Job:         job,
+		Host:        host,
+		APIVars:     apiVars,
+		Secrets:     secrets.Values,
+		SecretsPath: secrets.Path,
+	})
+	return buildSecretMask(e)
 }
