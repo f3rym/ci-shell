@@ -163,6 +163,16 @@ func buildJobConfig(name string, job, defaultBlock, root map[string]yaml.Node, r
 		return provider.JobConfig{}, fmt.Errorf("environment: %w", err)
 	}
 
+	dependencies, err := decodeDependencies(job["dependencies"])
+	if err != nil {
+		return provider.JobConfig{}, fmt.Errorf("dependencies: %w", err)
+	}
+
+	needs, err := decodeNeeds(job["needs"])
+	if err != nil {
+		return provider.JobConfig{}, fmt.Errorf("needs: %w", err)
+	}
+
 	return provider.JobConfig{
 		Name:         name,
 		Stage:        stage,
@@ -171,7 +181,79 @@ func buildJobConfig(name string, job, defaultBlock, root map[string]yaml.Node, r
 		Script:       script,
 		Variables:    mergeVariables(rootVariables, jobVariables),
 		Environment:  environment,
+		Dependencies: dependencies,
+		Needs:        needs,
 	}, nil
+}
+
+// decodeDependencies разбирает ключ dependencies: (ART-02).
+//
+// Возвращаемый nil и возвращаемый пустой непустой срез — РАЗНЫЕ ответы, и
+// сливать их нельзя: отсутствие ключа означает «артефакты всех джоб более
+// ранних стадий», а написанное человеком dependencies: [] означает «не
+// брать ничего». Именно поэтому здесь не используется обычный Decode в
+// []string, который обе формы отдал бы одинаково пустым срезом.
+func decodeDependencies(n yaml.Node) ([]string, error) {
+	if n.Kind == 0 {
+		return nil, nil
+	}
+	var names []string
+	if err := n.Decode(&names); err != nil {
+		return nil, err
+	}
+	if names == nil {
+		// dependencies: [] разобрался в nil — возвращается ПУСТОЙ, но не
+		// нулевой срез, чтобы вызывающий отличил его от отсутствия ключа.
+		names = []string{}
+	}
+	return names, nil
+}
+
+// decodeNeeds разбирает ключ needs: в обеих формах — короткой (needs: [job])
+// и длинной (needs: [{job: job, artifacts: false}]). Для короткой формы
+// GitLab считает artifacts истинным, и подставляется это здесь: оставить
+// нулевое значение поля значило бы молча выключить артефакты у всех, кто
+// написал needs коротко.
+func decodeNeeds(n yaml.Node) ([]provider.NeedRef, error) {
+	if n.Kind == 0 {
+		return nil, nil
+	}
+	if n.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("ожидался список, получено %v", n.Kind)
+	}
+	needs := make([]provider.NeedRef, 0, len(n.Content))
+	for _, item := range n.Content {
+		switch item.Kind {
+		case yaml.ScalarNode:
+			var name string
+			if err := item.Decode(&name); err != nil {
+				return nil, err
+			}
+			needs = append(needs, provider.NeedRef{Job: name, Artifacts: true})
+		case yaml.MappingNode:
+			var long struct {
+				Job       string `yaml:"job"`
+				Artifacts *bool  `yaml:"artifacts"`
+				// Project — межпроектная форма needs. Она вне охвата этой
+				// фазы (docs/artifacts-design.md §2), но разобрать её надо,
+				// чтобы отличить и честно пропустить, а не принять чужую
+				// джобу за свою по совпадению имени.
+				Project string `yaml:"project"`
+			}
+			if err := item.Decode(&long); err != nil {
+				return nil, err
+			}
+			if long.Project != "" {
+				continue
+			}
+			artifacts := true
+			if long.Artifacts != nil {
+				artifacts = *long.Artifacts
+			}
+			needs = append(needs, provider.NeedRef{Job: long.Job, Artifacts: artifacts})
+		}
+	}
+	return needs, nil
 }
 
 // decodeEnvironment принимает environment строкой (короткая форма
