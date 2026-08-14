@@ -652,13 +652,22 @@ func (a App) boxed(width, height int, focused bool, content string) string {
 	}
 
 	borderColor := a.theme.Border.GetForeground()
+	// Начертание рамки, а не только её цвет: в монохромном профиле
+	// (NO_COLOR, TERM=dumb, бедный терминал) Accent и Border дают один и тот
+	// же пустой стиль, и колонка в фокусе переставала отличаться от
+	// остальных вовсе — человек терял единственный признак того, где он
+	// находится (обзор v1.0.0 каркаса, WR-1). Толстая рамка у колонки в
+	// фокусе видна независимо от цвета, а там, где цвет есть, оба признака
+	// работают вместе.
+	border := lipgloss.RoundedBorder()
 	if focused {
 		borderColor = a.theme.Accent.GetForeground()
+		border = lipgloss.ThickBorder()
 	}
 	return lipgloss.NewStyle().
 		Width(boxWidth).
 		Height(height).
-		Border(lipgloss.RoundedBorder()).
+		Border(border).
 		BorderForeground(borderColor).
 		Render(content)
 }
