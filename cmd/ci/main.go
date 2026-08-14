@@ -547,6 +547,11 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 	}
 
 	em.Emit(event.ShellOpening{WorkDir: workDir})
+	// ctx здесь — уже отменяемый по Ctrl-C/SIGTERM контекст (signal.NotifyContext
+	// выше), но Container.Shell/ShellCommand намеренно не убивают docker exec
+	// его отменой (internal/runner/docker.go, CR-03 обзора v1.0.0): Ctrl-C,
+	// нажатый ВНУТРИ шелла ради прерывания одной команды, иначе рушил бы всю
+	// интерактивную сессию, а не только её.
 	if err := c.Shell(ctx); err != nil {
 		return err
 	}
