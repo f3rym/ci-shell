@@ -151,13 +151,31 @@ func partialTruncated(contentRange string) bool {
 	return start > 0
 }
 
-// cleanTrace разбирает кусок сырых байт лога raw на строки. Строка с
-// маркером начала секции (section_start) запоминает имя секции и номер
-// строки, с которой эта секция начинается (sectionLine — текущая длина уже
-// накопленного среза lines: строка маркера сама на экран не идёт, поэтому
-// именно эта длина и есть индекс первой строки секции), и на экран не идёт;
-// строка с маркером конца секции (section_end) просто отбрасывается; каждая
-// оставшаяся строка проходит через provider.SafeText — лог джобы это
+// cleanTrace разбирает кусок сырых байт лога raw на строки. Настоящий маркер
+// ранера не заканчивается переводом строки — он оформлен как
+// "\x1b[0Ksection_start:<ts>:<имя>\r\x1b[0K", то есть заканчивается \r, а
+// заканчивается перевод строки только у СЛЕДУЮЩЕГО за ним содержимого
+// (первая видимая строка секции, эхо команды и т.п.), которое strings.Split
+// по "\n" физически склеивает с маркером в одну "строку" — поэтому сама
+// граница \r внутри неё разбирается отдельно (splitMarker), а не
+// отбрасывается вместе с маркером: то, что идёт ПОСЛЕ \r — настоящий вывод
+// джобы, и его нельзя терять на каждой границе секции (CR-01 обзора
+// исполняющей части v1.0.0).
+//
+// Строка с маркером начала секции (section_start) запоминает имя секции и
+// номер строки, с которой эта секция начинается (sectionLine — текущая
+// длина уже накопленного среза lines: сам маркер на экран не идёт, поэтому
+// именно эта длина и есть индекс первой строки секции); строка с маркером
+// конца секции (section_end) саму себя не показывает, но её возможный
+// хвост после \r — тоже настоящий вывод и идёт в lines той же формулой.
+// Маркер распознаётся ЯКОРНО — HasPrefix после отбрасывания ведущего
+// "\x1b[0K", а не Contains где угодно в строке: иначе любая строка вывода
+// самой джобы, в которой подстрока "section_start:"/"section_end:" просто
+// ВСТРЕЧАЕТСЯ (например, джоба печатает пример строки трассы или тестовый
+// фикстур формата лога GitLab CI), подделывала бы Section/SectionLine —
+// то самое поле, которое интерфейс подсвечивает как «здесь упал шаг».
+//
+// Каждая оставшаяся строка проходит через provider.SafeText — лог джобы это
 // произвольный вывод чужих команд, и в нём могут быть последовательности,
 // перерисовывающие экран и подделывающие строку подсказки; ровно поэтому ни
 // одна строка лога не попадает наружу непрочищенной (T-10-03). Первая строка
@@ -179,16 +197,24 @@ func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string, int) {
 	section := ""
 	sectionLine := -1
 	for _, raw := range rawLines {
-		line := strings.TrimRight(raw, "\r")
+		body := stripEscClear(raw)
 		switch {
-		case strings.Contains(line, sectionStartMarker):
-			section = sectionName(line)
+		case strings.HasPrefix(body, sectionStartMarker):
+			marker, rest := splitMarker(body)
+			section = sectionName(marker)
 			sectionLine = len(lines)
+			if rest != "" {
+				lines = append(lines, provider.SafeText(rest))
+			}
 			continue
-		case strings.Contains(line, sectionEndMarker):
+		case strings.HasPrefix(body, sectionEndMarker):
+			_, rest := splitMarker(body)
+			if rest != "" {
+				lines = append(lines, provider.SafeText(rest))
+			}
 			continue
 		}
-		lines = append(lines, provider.SafeText(line))
+		lines = append(lines, provider.SafeText(strings.TrimRight(raw, "\r")))
 	}
 
 	if len(lines) > maxLines {
@@ -202,6 +228,33 @@ func cleanTrace(raw []byte, maxLines int, tailed bool) ([]string, string, int) {
 		}
 	}
 	return lines, section, sectionLine
+}
+
+// escClear — "стереть до конца строки терминала", которым gitlab-runner
+// оборачивает каждый маркер секции слева ("\x1b[0Ksection_start:..."). Не
+// часть самого маркера и не часть содержимого — только визуальное
+// оформление для терминалов, которые лог читают напрямую.
+const escClear = "\x1b[0K"
+
+// stripEscClear отбрасывает один ведущий escClear, если он есть.
+func stripEscClear(s string) string {
+	return strings.TrimPrefix(s, escClear)
+}
+
+// splitMarker делит body (уже без ведущего escClear) на сам маркер и
+// настоящее содержимое джобы, склеенное с ним через \r в одну физическую
+// "строку" strings.Split-ом по "\n" (см. cleanTrace выше). Если \r в body
+// нет — маркер занимает body целиком, хвоста нет. Если есть — то, что идёт
+// после \r, тоже может начинаться с собственного escClear ("\r\x1b[0K") —
+// он снимается тем же stripEscClear, чтобы в rest не осталось управляющих
+// байт, которые provider.SafeText потом всё равно бы вырезал, но раньше
+// времени и без всякой пользы здесь.
+func splitMarker(body string) (marker, rest string) {
+	idx := strings.IndexByte(body, '\r')
+	if idx < 0 {
+		return body, ""
+	}
+	return body[:idx], stripEscClear(body[idx+1:])
 }
 
 // sectionName вытаскивает имя секции из строки-маркера ранера вида
