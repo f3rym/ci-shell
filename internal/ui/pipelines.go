@@ -56,6 +56,13 @@ type pipelinePanel struct {
 	focused    bool
 	generation int
 
+	// width — ширина, отведённая колонке лентой. Панель обязана в неё
+	// уложиться сама: снаружи, из columnView, длины её строк уже не видно,
+	// а всё, что шире, Lip Gloss переносит на следующую строку — колонка
+	// раздувается по высоте, рамка рвётся, и кадр перестаёт сходиться
+	// (обзор v1.0.0, живой замер: тело 109 отдавало строку в 112).
+	width int
+
 	theme Theme
 }
 
@@ -359,6 +366,7 @@ func (p pipelinePanel) blur() pipelinePanel {
 // таблицы при большем окне живёт здесь, а не в отрисовке (idea-0.3.1 §3,
 // «панели становятся крупнее, а не оставляют пустоту справа»).
 func (p pipelinePanel) setSize(width, height int) pipelinePanel {
+	p.width = width
 	p.table.SetWidth(width)
 	p.table.SetHeight(height)
 	p.table.SetColumns(pipelineColumns(width))
@@ -391,7 +399,23 @@ func (p pipelinePanel) view() string {
 	if p.hasProject && p.cached {
 		parts = append(parts, p.theme.Muted.Render(fmt.Sprintf("из кэша, %s назад", Ago(p.fetched))))
 	}
-	return strings.Join(parts, "\n")
+
+	// Последний рубеж: каждая строка обрезается по ширине панели. Расчёт
+	// столбцов выше уже вычитает надбавку таблицы, но живой замер показал,
+	// что отрисованная шапка всё равно оказывается шире тела колонки, а
+	// строки-хвосты («показаны первые», «из кэша») ширины не знали вовсе.
+	// Источник лишних ячеек внутри таблицы Bubbles не установлен — поэтому
+	// здесь стоит не расчёт, а именно ограничение: панель не выпускает
+	// наружу ничего шире того, что ей отвели.
+	out := strings.Join(parts, "\n")
+	if p.width > 0 {
+		lines := strings.Split(out, "\n")
+		for i, ln := range lines {
+			lines[i] = Fit(ln, p.width)
+		}
+		out = strings.Join(lines, "\n")
+	}
+	return out
 }
 
 // hintText выбирает строку подсказки правой панели ровно по её пяти
