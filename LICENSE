@@ -1,0 +1,91 @@
+ЛИЦЕНЗИЯ ci-shell
+Copyright (c) 2026 f3rym. Все права защищены.
+
+Это НЕ лицензия открытого исходного кода. Исходный код открыт для чтения,
+но права на его распространение и переработку не передаются.
+
+РАЗРЕШЕНО
+
+1. Использовать программу — запускать её в любых целях, включая рабочие и
+   коммерческие, без ограничения числа машин и пользователей.
+2. Собирать программу из исходного кода для собственного использования.
+3. Читать исходный код и изучать его.
+4. Изменять исходный код для СОБСТВЕННОГО использования, не передавая
+   изменённую версию третьим лицам.
+
+ЗАПРЕЩЕНО без письменного разрешения правообладателя
+
+1. Распространять программу или её исходный код — целиком или частями,
+   в исходном виде или собранном, бесплатно или за плату.
+2. Создавать и распространять производные работы: форки, ответвления,
+   переименованные или переработанные версии.
+3. Публиковать копии исходного кода в других репозиториях, архивах,
+   пакетных менеджерах и на любых иных площадках.
+4. Включать этот код в состав других продуктов и библиотек.
+5. Передавать права по этой лицензии третьим лицам (сублицензирование).
+
+ВКЛАД В ПРОЕКТ
+
+Присылать изменения в этот репозиторий (issue, pull request) можно.
+Отправляя изменение, автор передаёт правообладателю право использовать его
+на условиях этой лицензии.
+
+ОТСУТСТВИЕ ГАРАНТИЙ
+
+ПРОГРАММА ПОСТАВЛЯЕТСЯ «КАК ЕСТЬ», БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ, ЯВНЫХ ИЛИ
+ПОДРАЗУМЕВАЕМЫХ, ВКЛЮЧАЯ ГАРАНТИИ ПРИГОДНОСТИ ДЛЯ КОНКРЕТНЫХ ЦЕЛЕЙ И
+ОТСУТСТВИЯ НАРУШЕНИЙ ПРАВ. ПРАВООБЛАДАТЕЛЬ НЕ НЕСЁТ ОТВЕТСТВЕННОСТИ ЗА
+ЛЮБОЙ УЩЕРБ, ВОЗНИКШИЙ ИЗ ИСПОЛЬЗОВАНИЯ ПРОГРАММЫ.
+
+Программа запускает контейнеры, обращается к внешним API и пишет файлы на
+диск. Ответственность за последствия её запуска несёт тот, кто её запускает.
+
+ЗАВИСИМОСТИ
+
+Сторонние библиотеки, используемые программой, распространяются по своим
+собственным лицензиям, и эта лицензия на них не распространяется.
+
+---
+
+ci-shell LICENSE (English translation; the Russian text above prevails)
+
+Copyright (c) 2026 f3rym. All rights reserved.
+
+This is NOT an open-source license. The source is available to read, but no
+rights to distribute or create derivative works are granted.
+
+PERMITTED
+
+1. Using the software — running it for any purpose, including commercial,
+   on any number of machines and by any number of users.
+2. Building the software from source for your own use.
+3. Reading and studying the source code.
+4. Modifying the source code for YOUR OWN use, without conveying the
+   modified version to third parties.
+
+PROHIBITED without written permission from the copyright holder
+
+1. Distributing the software or its source, in whole or in part, in source
+   or binary form, free of charge or for a fee.
+2. Creating and distributing derivative works: forks, renamed or reworked
+   versions.
+3. Publishing copies of the source in other repositories, archives, package
+   managers or any other venue.
+4. Incorporating this code into other products or libraries.
+5. Sublicensing.
+
+CONTRIBUTIONS
+
+You may submit changes to this repository. By submitting a change, you grant
+the copyright holder the right to use it under the terms of this license.
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY DAMAGES ARISING
+FROM THE USE OF THE SOFTWARE.
+
+THIRD-PARTY DEPENDENCIES
+
+Third-party libraries used by the software are distributed under their own
+licenses, which this license does not affect.
