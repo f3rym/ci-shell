@@ -182,3 +182,60 @@ func (ShellOpening) isEvent() {}
 type CleanupStarted struct{}
 
 func (CleanupStarted) isEvent() {}
+
+// Артефакты предыдущих стадий (Фаза 21, ART-02…ART-06). Вехи дискретные,
+// без побайтового прогресса: тем же приёмом, что ImagePulling/ImageLocal,
+// которые тоже не несут процента закачки, хотя образы обычно крупнее
+// артефактов.
+
+// ArtifactsFetching — начато восстановление артефактов, Total — сколько
+// джоб-источников резолвнуто по dependencies/needs упавшей джобы.
+type ArtifactsFetching struct {
+	Total int
+}
+
+func (ArtifactsFetching) isEvent() {}
+
+// ArtifactDownloading — тянется архив одной джобы-источника. Bytes —
+// объявленная длина или 0, если сервер её не прислал.
+type ArtifactDownloading struct {
+	Job   string
+	Bytes int64
+}
+
+func (ArtifactDownloading) isEvent() {}
+
+// ArtifactsExtracted — архив одной джобы распакован.
+type ArtifactsExtracted struct {
+	Job   string
+	Files int
+}
+
+func (ArtifactsExtracted) isEvent() {}
+
+// ArtifactsReady — итог по всем источникам.
+type ArtifactsReady struct {
+	Files int
+	Bytes int64
+}
+
+func (ArtifactsReady) isEvent() {}
+
+// ArtifactsSkipped — восстанавливать нечего: у джобы dependencies: [] либо
+// зависимостей нет вовсе. Не поломка, а честное «нечего делать».
+type ArtifactsSkipped struct {
+	Reason string
+}
+
+func (ArtifactsSkipped) isEvent() {}
+
+// ArtifactsUnavailable — один источник не дался (истёк срок, нет прав,
+// запись архива отвергнута защитой распаковки). Восстановление остальных
+// продолжается: отказ из-за архива недельной давности не должен лишать
+// человека шелла.
+type ArtifactsUnavailable struct {
+	Job    string
+	Reason string
+}
+
+func (ArtifactsUnavailable) isEvent() {}
