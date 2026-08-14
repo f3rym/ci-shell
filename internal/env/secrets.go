@@ -215,7 +215,11 @@ func EnsureSecretsFile(host, projectPath string, missing []Missing) (path string
 		b.WriteString("  # <хост>/<путь проекта>:\n")
 		b.WriteString("  #   ПЕРЕМЕННАЯ: \"<значение>\"\n")
 	} else {
-		fmt.Fprintf(&b, "  %s/%s:\n", host, projectPath)
+		projectKey, err := yamlScalarKey(host + "/" + projectPath)
+		if err != nil {
+			return "", false, err
+		}
+		fmt.Fprintf(&b, "  %s:\n", projectKey)
 		for _, m := range missing {
 			fmt.Fprintf(&b, "    %s: \"\"\n", m.Key)
 		}
@@ -253,6 +257,31 @@ func EnsureSecretsFile(host, projectPath string, missing []Missing) (path string
 // validSecretNameRe — форма имени переменной, которую допускает сам GitLab:
 // буква или подчёркивание в начале, буквы, цифры и подчёркивания дальше.
 var validSecretNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// yamlScalarKey сериализует s (ключ проекта host+"/"+projectPath) тем же
+// сериализатором, что и значение переменной (шаг 7 SaveSecret ниже), а не
+// голой конкатенацией строк в текст. Ключ строится из host — того же по
+// природе недоверенного источника, что и значение (ссылка на джобу от
+// пользователя), а host, в отличие от projectPath, не проходит проверку
+// набора символов нигде на пути до этой точки (joburl.Parse кладёт u.Host
+// в Ref.Host как есть). net/url.Parse пропускает в host сырыми символы
+// RFC 3986 sub-delims — '&', '!', '*', одинарную кавычку и другие — а это
+// значимые индикаторы начала YAML-скаляра (якорь, тег, ссылка, кавычка).
+// Без сериализатора такой host лёг бы в файл секретов буквальным текстом и
+// разобрался бы YAML-парсером как якорь/тег вместо обычного ключа карты —
+// весь файл секретов, включая уже сохранённые значения ДРУГИХ проектов,
+// перестал бы разбираться целиком (CR-1 обзора безопасности v1.0.0).
+func yamlScalarKey(s string) (string, error) {
+	b, err := yaml.Marshal(s)
+	if err != nil {
+		return "", fmt.Errorf("env: ключ %q не сериализован в скаляр YAML: %w", s, ErrInvalidSecretName)
+	}
+	scalar := strings.TrimSuffix(string(b), "\n")
+	if strings.Contains(scalar, "\n") {
+		return "", fmt.Errorf("env: ключ %q не уместился в однострочный скаляр YAML: %w", s, ErrInvalidSecretName)
+	}
+	return scalar, nil
+}
 
 // mapEntry ищет запись с ключом name в отображении m (узел yaml.MappingNode)
 // и возвращает узел ключа, узел значения и признак найденности. Единственный
@@ -435,8 +464,22 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 	}
 
 	// Шаг 6 и 8: место правки и сама правка исходного текста построчно.
+	//
+	// projectKey — ЛОГИЧЕСКИЙ ключ (host+"/"+projectPath), которым ищется
+	// существующая запись в уже разобранном дереве: mapEntry сравнивает с
+	// РАЗОБРАННЫМ значением узла (yaml.Node.Value), а оно одно и то же
+	// независимо от того, как ключ записан в тексте (в кавычках или без).
+	// projectKeyScalar — тот же ключ, сериализованный тем же способом, что и
+	// значение переменной (yamlScalarKey, определена выше) — используется
+	// ТОЛЬКО при вставке НОВОГО текста в файл; используй голый projectKey в
+	// новой вставке значило бы вернуть ровно ту дыру, которую чинит
+	// yamlScalarKey (CR-1 обзора безопасности v1.0.0).
 	lines := strings.Split(string(data), "\n")
 	projectKey := host + "/" + projectPath
+	projectKeyScalar, err := yamlScalarKey(projectKey)
+	if err != nil {
+		return path, err
+	}
 
 	projectsKeyNode, projectsVal, hasProjects := mapEntry(root, "projects")
 	switch {
@@ -449,7 +492,7 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 		}
 		lines = append(lines,
 			"projects:",
-			"  "+projectKey+":",
+			"  "+projectKeyScalar+":",
 			"    "+key+": "+scalar,
 			"",
 		)
@@ -470,7 +513,7 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 			}
 			indent := projectsKeyNode.Column - 1
 			lines = insertLines(lines, projectsKeyNode.Line,
-				strings.Repeat(" ", indent+2)+projectKey+":",
+				strings.Repeat(" ", indent+2)+projectKeyScalar+":",
 				strings.Repeat(" ", indent+4)+key+": "+scalar,
 			)
 

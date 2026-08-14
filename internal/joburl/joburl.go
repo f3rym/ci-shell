@@ -59,6 +59,42 @@ func ValidProjectPath(p string) bool {
 	return true
 }
 
+// ValidHost проверяет хост на пригодность к дальнейшему употреблению: тот же
+// принцип, что и у ValidProjectPath выше — только символы, которые GitLab
+// реально допускает в доменном имени CI-сервера (буквы, цифры, точка,
+// дефис, подчёркивание, необязательный ":порт" из цифр в конце). net/url.Parse
+// пропускает в host сырыми куда больше символов, чем это — включая RFC 3986
+// sub-delims ('&', '!', '*', одинарную кавычку и другие), значимые как
+// индикаторы начала YAML-скаляра (якорь, тег, ссылка, кавычка). Второй
+// рубеж защиты после сериализации ключа сериализатором в
+// internal/env/secrets.go (CR-1 обзора безопасности v1.0.0): ни один хост,
+// отклоняющийся от типичного DNS-имени, вообще не доходит до сборки Ref.
+func ValidHost(h string) bool {
+	host, port, hasPort := strings.Cut(h, ":")
+	if host == "" {
+		return false
+	}
+	if hasPort {
+		if port == "" {
+			return false
+		}
+		for _, r := range port {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Parse разбирает произвольную строку со ссылкой на джобу GitLab.
 func Parse(raw string) (Ref, error) {
 	u, err := url.Parse(raw)
@@ -76,6 +112,10 @@ func Parse(raw string) (Ref, error) {
 
 	if u.Scheme != "https" {
 		return Ref{}, ErrInsecureScheme
+	}
+
+	if !ValidHost(u.Host) {
+		return Ref{}, ErrNotAJobURL
 	}
 
 	var left, right string
