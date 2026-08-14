@@ -3,6 +3,8 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
@@ -78,8 +80,17 @@ func RunSteps(ctx context.Context, c *Container, steps []Step, out, errOut io.Wr
 		return o, nil
 	}
 
-	scan := &markerScanner{out: out, steps: steps, em: em}
-	code, err := c.Exec(ctx, buildScript(steps), scan, errOut)
+	// Нонс — часть защиты от коллизии с выводом самой джобы (CR-02 обзора
+	// v1.0.0, см. markerNonce ниже): без него текст echo-маркера — статичная,
+	// заранее известная строка, и джоба сама может её напечатать, случайно
+	// или подделывая номер упавшего шага.
+	nonce, err := markerNonce()
+	if err != nil {
+		return o, err
+	}
+
+	scan := &markerScanner{out: out, steps: steps, em: em, nonce: nonce}
+	code, err := c.Exec(ctx, buildScript(steps, nonce), scan, errOut)
 	scan.flush()
 	if err != nil {
 		return o, err
@@ -105,39 +116,69 @@ func RunSteps(ctx context.Context, c *Container, steps []Step, out, errOut io.Wr
 	return o, nil
 }
 
-// markerPrefix и markerSuffix обрамляют номер шага в echo-маркере,
-// печатаемом скриптом перед каждым шагом. Строка выбрана так, чтобы не
-// встретиться в реальном выводе джобы.
+// markerPrefix и markerSuffix обрамляют нонс и номер шага в echo-маркере,
+// печатаемом скриптом перед каждым шагом.
 const (
 	markerPrefix = "__CI_SHELL_STEP_"
 	markerSuffix = "__"
 )
 
+// markerNonceBytes — длина случайного нонса маркера в байтах (32
+// шестнадцатеричных символа на выходе) — достаточно, чтобы угадать или
+// подобрать значение перебором за время одного прогона джобы было
+// невозможно на практике.
+const markerNonceBytes = 16
+
+// markerNonce возвращает случайный шестнадцатеричный токен для ОДНОГО
+// вызова RunSteps. Раньше текст echo-маркера (__CI_SHELL_STEP_N__) был
+// статичной, заранее известной строкой — и джоба на любом шаге могла
+// напечатать точно такую же строку, случайно (эхо переменной окружения,
+// тестовые данные, вывод другого инструмента с похожим форматом маркеров
+// прогресса) или намеренно. markerScanner.line принял бы её за настоящий
+// маркер и сдвинул scan.last вперёд или назад — «упавшим» назвался бы не
+// тот шаг, который упал по-настоящему, а retry перезапускал бы не ту
+// команду (CR-02 обзора исполняющей части v1.0.0). Нонс печатается только
+// как часть маркера в СКРИПТЕ, который docker exec ещё не начал исполнять
+// в момент генерации — job не может напечатать его заранее, потому что не
+// видела текста собственного скрипта до его исполнения.
+func markerNonce() (string, error) {
+	b := make([]byte, markerNonceBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("runner: не удалось получить случайный нонс маркера шага: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // buildScript склеивает шаги в один скрипт единой shell-сессии: set -e
 // обрывает исполнение на первом ненулевом коде выхода — с кодом упавшей
 // команды, как у GitLab-ранера, — а echo-маркер перед каждым шагом отдаёт
-// прогресс наружу. Маркер печатается без кавычек: он состоит только из
-// букв, цифр и подчёркиваний, оболочке в нём раскрывать нечего.
-func buildScript(steps []Step) string {
+// прогресс наружу. nonce — тот же самый, каким затем читает маркеры
+// markerScanner (RunSteps генерирует его один раз на вызов и передаёт в
+// обе стороны) — без общего нонса читатель не узнал бы свой же маркер.
+// Маркер печатается без кавычек: он состоит только из букв, цифр и
+// подчёркиваний, оболочке в нём раскрывать нечего.
+func buildScript(steps []Step, nonce string) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	for i, s := range steps {
-		fmt.Fprintf(&b, "echo %s%d%s\n", markerPrefix, i+1, markerSuffix)
+		fmt.Fprintf(&b, "echo %s%s_%d%s\n", markerPrefix, nonce, i+1, markerSuffix)
 		b.WriteString(s.Command)
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-// parseMarker распознаёт строку-маркер и возвращает номер шага, считая от
-// единицы. Сравнение строгое — обрезаются только завершающие \r\n, чтобы
-// похожая строка из вывода джобы с отступом не была проглочена как маркер.
-func parseMarker(line string) (int, bool) {
+// parseMarker распознаёт строку-маркер с нонсом nonce (см. markerNonce) и
+// возвращает номер шага, считая от единицы. Сравнение строгое — обрезаются
+// только завершающие \r\n, чтобы похожая строка из вывода джобы с отступом
+// не была проглочена как маркер.
+func parseMarker(nonce, line string) (int, bool) {
+	prefix := markerPrefix + nonce + "_"
 	trimmed := strings.TrimRight(line, "\r\n")
-	if !strings.HasPrefix(trimmed, markerPrefix) || !strings.HasSuffix(trimmed, markerSuffix) {
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, markerSuffix) {
 		return 0, false
 	}
-	digits := strings.TrimSuffix(strings.TrimPrefix(trimmed, markerPrefix), markerSuffix)
+	digits := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), markerSuffix)
 	n, err := strconv.Atoi(digits)
 	if err != nil || n < 1 {
 		return 0, false
@@ -173,6 +214,11 @@ type markerScanner struct {
 	out   io.Writer
 	steps []Step
 	em    event.Emitter
+	// nonce — случайный токен ОДНОГО вызова RunSteps (markerNonce), с
+	// которым должен совпасть маркер в line ниже — без него любая строка
+	// вывода джобы, похожая на __CI_SHELL_STEP_N__, принималась бы за
+	// настоящий маркер (CR-02 обзора v1.0.0).
+	nonce string
 	last  int // номер последнего встреченного маркера, считая от единицы
 	buf   bytes.Buffer
 }
@@ -197,7 +243,7 @@ func (m *markerScanner) Write(b []byte) (int, error) {
 // сам docker exec копирует поток в scan из своей горутины io.Copy) — поэтому
 // подписчик обязан быть потокобезопасным (контракт event.Sink, план 08-01).
 func (m *markerScanner) line(line string) {
-	if n, ok := parseMarker(line); ok && n <= len(m.steps) {
+	if n, ok := parseMarker(m.nonce, line); ok && n <= len(m.steps) {
 		m.last = n
 		// Приёмник вывода МОЖЕТ уметь запоминать границы шагов (stepBoundary,
 		// Фаза 15, план 15-03) — проверка типа в Go с двумя возвращаемыми
