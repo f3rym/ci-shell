@@ -64,6 +64,22 @@ func (p *Printer) Emit(e event.Event) {
 		fmt.Fprintf(p.w, "  готовлю код на коммите %s…\n", shortSHA(e.SHA))
 	case event.CodeReady:
 		fmt.Fprintf(p.w, "  код на коммите %s: %s\n", shortSHA(e.SHA), e.Dir)
+	case event.ArtifactsFetching:
+		fmt.Fprintf(p.w, "  восстанавливаю артефакты предыдущих стадий: источников %d…\n", e.Total)
+	case event.ArtifactDownloading:
+		if e.Bytes > 0 {
+			fmt.Fprintf(p.w, "  тяну артефакты джобы %s (%d МиБ)…\n", e.Job, e.Bytes>>20)
+		} else {
+			fmt.Fprintf(p.w, "  тяну артефакты джобы %s…\n", e.Job)
+		}
+	case event.ArtifactsExtracted:
+		fmt.Fprintf(p.w, "  артефакты джобы %s распакованы: файлов %d\n", e.Job, e.Files)
+	case event.ArtifactsReady:
+		fmt.Fprintf(p.w, "  артефакты восстановлены: файлов %d, %d МиБ\n", e.Files, e.Bytes>>20)
+	case event.ArtifactsSkipped:
+		fmt.Fprintf(p.w, "  артефакты не восстанавливаются: %s\n", e.Reason)
+	case event.ArtifactsUnavailable:
+		fmt.Fprintf(p.w, "  артефакты джобы %s недоступны: %s\n", e.Job, e.Reason)
 	case event.CommitFetching:
 		fmt.Fprintf(p.w, "  тяну коммит %s с %s…\n", shortSHA(e.SHA), e.Host)
 	case event.CommitFetched:

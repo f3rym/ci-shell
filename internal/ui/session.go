@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/f3rym/ci-shell/internal/artifacts"
 	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/editor"
@@ -305,6 +306,23 @@ func (s *Session) PrepareCmd(ctx context.Context) tea.Cmd {
 		}, s.em)
 		if err != nil {
 			return fail(err)
+		}
+
+		// Артефакты предыдущих стадий — поверх готового кода, до файловых
+		// переменных и тяги образа (ART-02). Отказ не прерывает подготовку:
+		// оговорки уходят в тот же журнал сессии, что и прочие честные
+		// предупреждения, а человек всё равно доходит до шелла (ART-04).
+		if art, err := artifacts.Restore(cctx, artifacts.Request{
+			Job:      s.job,
+			Config:   jobCfg,
+			Provider: s.p,
+			DestDir:  code.Dir,
+		}, s.em); err != nil {
+			s.log.note(fmt.Sprintf("артефакты не восстановлены: %s", err))
+		} else {
+			for _, n := range art.Notes {
+				s.log.note(n)
+			}
 		}
 
 		workDir := e.WorkDir()

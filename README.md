@@ -182,9 +182,9 @@ restored. We do not pretend everything is perfect.
   says so rather than pretending.
 - **Runner cache** lives on the runner and is not available. Distributed cache in S3
   is planned.
-- **Artifacts from earlier stages** are not restored yet. The solution is designed and
-  written down — [docs/artifacts-design.md](docs/artifacts-design.md), in Russian — but
-  no code exists for it.
+- **Artifacts from earlier stages** are restored: the archives of the jobs the failed
+  one depends on (`dependencies`/`needs`) are downloaded and unpacked over the working
+  directory before the steps run. Not yet exercised against a real failed job.
 - **There are no tests in this project.** That is a deliberate decision by the author,
   not an oversight: verification happens by reading the code and by live runs. Know
   this before relying on the tool for anything important.

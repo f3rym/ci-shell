@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/f3rym/ci-shell/internal/artifacts"
 	"github.com/f3rym/ci-shell/internal/cache"
 	"github.com/f3rym/ci-shell/internal/config"
 	"github.com/f3rym/ci-shell/internal/editor"
@@ -302,7 +303,7 @@ func checkoutBase(here bool) (base string, persist bool, err error) {
 // выполнится, и на машине останутся чекаут и контейнер. Любая поломка
 // возвращается наружу как ошибка; печать и завершение делает runShell уже
 // после возврата из reproduce.
-func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, base string, persist bool, em event.Emitter) error {
+func reproduce(ctx context.Context, ref joburl.Ref, p provider.Provider, job provider.Job, jobCfg provider.JobConfig, img runner.ImageChoice, e env.Environment, tok token.Token, base string, persist bool, em event.Emitter) error {
 	// Ctrl-C и SIGTERM во время загрузки образа или прогона шагов отменяют
 	// контекст: дочерний процесс docker получает сигнал, вызов возвращает
 	// ошибку, reproduce возвращается наружу — и отложенная очистка ниже
@@ -342,6 +343,25 @@ func reproduce(ctx context.Context, ref joburl.Ref, job provider.Job, jobCfg pro
 			msg += fmt.Sprintf("на локальной ветке остаётся зарегистрированный worktree — снять: git worktree remove --force %s\n", code.Dir)
 		}
 		fmt.Fprint(os.Stderr, msg)
+	}
+
+	// Артефакты предыдущих стадий кладутся ПОВЕРХ уже готового кода — до
+	// материализации файловых переменных и до тяги образа: джоба стартует с
+	// тем же входным состоянием, что было у неё в CI. Отказ не прерывает
+	// воспроизведение: остаться без шелла из-за истёкшего архива недельной
+	// давности хуже, чем войти в контейнер без него, — шелл и есть
+	// инструмент проверки (ART-04).
+	if art, err := artifacts.Restore(ctx, artifacts.Request{
+		Job:      job,
+		Config:   jobCfg,
+		Provider: p,
+		DestDir:  code.Dir,
+	}, em); err != nil {
+		fmt.Fprintf(os.Stderr, "предупреждение: артефакты не восстановлены: %s\n", err)
+	} else {
+		for _, n := range art.Notes {
+			fmt.Fprintf(os.Stderr, "предупреждение: %s\n", n)
+		}
 	}
 	// Фоновый контекст: отмена основного контекста не должна помешать
 	// уборке временного чекаута. Неудача снятия печатается предупреждением
@@ -865,7 +885,7 @@ func runShell(args []string) {
 	// подменяет здесь render.NewPrinter на реализацию интерфейса Bubble Tea,
 	// не трогая ни одного доменного пакета.
 	em := event.Emitter{Sink: render.NewPrinter(os.Stderr)}
-	if err := reproduce(ctx, ref, job, jobCfg, img, e, tok, base, persist, em); err != nil {
+	if err := reproduce(ctx, ref, p, job, jobCfg, img, e, tok, base, persist, em); err != nil {
 		fail(err)
 	}
 }
