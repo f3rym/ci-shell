@@ -420,18 +420,25 @@ func openLogCmd(job provider.Job, e logEntry) tea.Cmd {
 // просмотрщика — она же и печатает то же самое, отдельной приглушённой
 // строки под телом больше нет, LOG-04).
 func (p logPanel) view(theme Theme) string {
-	title := theme.PanelTitle.Render(p.title())
+	// И заголовок, и все четыре состояния тела обрезаются по ширине панели
+	// (обзор v1.0.0, живой прогон): строка, длиннее отведённого, не
+	// «немного вылезала» — Lip Gloss переносил её хвост на следующую
+	// строку, кадр раздувался по высоте, а в узкой колонке заголовок
+	// разрывался посередине слова. Ширина известна панели (setSize), и
+	// обрезать обязана она сама: снаружи, из columnView, длина этих строк
+	// уже не видна.
+	title := theme.PanelTitle.Render(Fit(p.title(), p.width))
 
 	var body string
 	switch {
 	case !p.hasJob:
-		body = "лог появится, когда вы выберете упавшую джобу"
+		body = Fit("лог появится, когда вы выберете упавшую джобу", p.width)
 	case p.job.Status != StatusFailed:
-		body = "эта джоба не падала — :log покажет её лог целиком"
+		body = Fit("эта джоба не падала — :log покажет её лог целиком", p.width)
 	case p.loadErr != "":
-		body = fmt.Sprintf("не удалось получить лог: %s", p.loadErr)
+		body = Fit(fmt.Sprintf("не удалось получить лог: %s", p.loadErr), p.width)
 	case p.loading:
-		body = p.spin.View() + " " + "тяну лог…"
+		body = Fit(p.spin.View()+" "+"тяну лог…", p.width)
 	default:
 		body = p.lv.view(theme) + "\n" + p.lv.statusLine(theme)
 	}
