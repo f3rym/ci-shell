@@ -1,13 +1,15 @@
 # ci-shell
 
-**Не «запусти CI локально». А «верни меня в упавший прогон».**
+*[Русская версия](README.ru.md)*
 
-Пайплайн упал. Контейнер, где это случилось, уже удалён — у тебя остался только лог.
-Одна команда, и ты внутри того самого прогона: тот же образ, те же переменные,
-тот же коммит, курсор на упавшем шаге.
+**Not "run CI locally". Rather "take me back into the run that failed".**
 
-Интерфейс — лента колонок: что глубже, то правее. `→` уводит вправо, `←` возвращает,
-и это единственное правило навигации на всех экранах.
+The pipeline failed. The container where it happened is long gone — all you have left
+is a log. One command, and you are inside that very run: same image, same variables,
+same commit, cursor on the step that broke.
+
+The interface is a ribbon of columns: deeper means further right. `→` moves right,
+`←` moves back, and that is the only navigation rule on every screen.
 
 ```
  ci-shell
@@ -28,171 +30,178 @@
  ▸ выберите проект слева, чтобы увидеть его пайплайны
 ```
 
-Цепочка идёт слева направо до самого низа: репозитории → пайплайны → джобы → шаги →
-окружение, секреты и лог шага. Колонки делят кадр по содержимому, отработавшие
-сворачиваются в узкую полосу, а `←` разворачивает их обратно на том же элементе.
-Внизу всегда написано, какие клавиши доступны прямо сейчас.
+> The interface speaks Russian. Localisation is not implemented yet.
 
-<!-- TODO: гифка — слева история коммитов `fix ci`, `fix ci 2`, `please work`; справа одна команда и шелл -->
+The chain runs left to right all the way down: repositories → pipelines → jobs → steps
+→ environment, secrets and step log. Columns split the frame by content, columns you
+are done with collapse into a narrow strip, and `←` expands them back on the same item.
+The bottom line always says which keys are available right now.
 
-## Зачем
+<!-- TODO: gif — commit history `fix ci`, `fix ci 2`, `please work` on the left; one command and a shell on the right -->
 
-Знакомый цикл: правишь строчку → `git commit -m "fix ci"` → пуш → ждёшь десять минут →
-читаешь лог → гадаешь снова. Пять итераций — час жизни и гирлянда мусорных коммитов.
+## Why
 
-Внутри контейнера тот же вопрос решается за секунды:
+The familiar loop: edit a line → `git commit -m "fix ci"` → push → wait ten minutes →
+read the log → guess again. Five iterations is an hour of your life and a garland of
+junk commits.
+
+Inside the container the same question takes seconds:
 
 ```
-root@job:/builds/acme/app$ echo $DATABASE_URL      # ага, пустая
-root@job:/builds/acme/app$ python --version        # 3.9, а локально 3.12
-root@job:/builds/acme/app$ pytest tests/test_x.py  # повторил падение за две секунды
+root@job:/builds/acme/app$ echo $DATABASE_URL      # right, it is empty
+root@job:/builds/acme/app$ python --version        # 3.9, but 3.12 locally
+root@job:/builds/acme/app$ pytest tests/test_x.py  # reproduced the failure in two seconds
 ```
 
-А главное — фикс проверяется здесь же, до пуша: починил, нажал `R`, шаг позеленел,
-прогнал начисто в свежем контейнере, забрал патч в свой репозиторий. Один чистый
-коммит вместо пяти.
+And the point is that the fix gets verified right here, before the push: fix it, press
+`R`, watch the step turn green, run it clean in a fresh container, take the patch back
+into your repository. One clean commit instead of five.
 
-## Чем отличается от act / gitlab-ci-local
+## How it differs from act / gitlab-ci-local
 
-|                          | act, gitlab-ci-local | ci-shell |
-|--------------------------|----------------------|----------|
-| Отправная точка          | yml-конфиг           | конкретный упавший прогон |
-| Переменные               | из конфига           | того самого запуска |
-| Поведение                | прогнать всё с нуля  | остановиться на упавшем шаге |
-| Проверка фикса           | новый прогон с нуля  | перезапуск шага и чистый прогон на месте |
-| Эмулирует движок CI      | да                   | нет — восстанавливает состояние |
+|                        | act, gitlab-ci-local | ci-shell |
+|------------------------|----------------------|----------|
+| Starting point         | a yml config         | one specific failed run |
+| Variables              | from the config      | from that exact run |
+| Behaviour              | run everything from scratch | stop at the step that failed |
+| Verifying a fix        | a new run from scratch | restart the step, then a clean run in place |
+| Emulates the CI engine | yes                  | no — it restores state |
 
-Последняя строка главная: мы не эмулируем семантику CI, мы восстанавливаем состояние
-одного конкретного прогона. Поэтому «тот же контейнер» — буквально.
+The last row is the important one: we do not emulate CI semantics, we restore the state
+of one specific run. That is why "the same container" is meant literally.
 
-## Установка
+## Install
 
-Нужны Go 1.25+ и Docker (или Apple `container` на macOS).
+Requires Go 1.25+ and Docker (or Apple `container` on macOS).
 
 ```bash
 git clone https://github.com/f3rym/ci-shell && cd ci-shell
-make build          # бинарь ./ci под твою систему
+make build          # ./ci binary for your system
 ```
 
-Кросс-сборки: `make macos`, `make linux`, `make windows`,
-`make macos-container` — вариант для macOS, который зовёт Apple `container` вместо Docker.
+Cross builds: `make macos`, `make linux`, `make windows`, and `make macos-container` —
+a macOS variant that calls Apple `container` instead of Docker.
 
-## Использование
+## Usage
 
 ```bash
-ci                          # интерфейс: меню, а дальше всё стрелками
-ci shell <ссылка на джобу>  # сразу в конкретную джобу, без интерфейса
-ci shell 15789929204        # из каталога репозитория хватит номера
-ci apply                    # перенести правки в свой репозиторий
-ci secrets                  # заполнить недостающие секреты
+ci                          # the interface: a menu, and arrows from there on
+ci shell <job url>          # straight into a specific job, no interface
+ci shell 15789929204        # a number is enough from inside the repository
+ci apply                    # carry the fixes into your repository
+ci secrets                  # fill in the missing secrets
 ```
 
-Первый экран — меню: свои репозитории, открытие джобы по ссылке, добавление ключа.
-Ключей может быть несколько — GitLab и свои инстансы становятся отдельными корнями
-дерева репозиториев, и джоба одного инстанса открывается рядом с проектом другого.
+The first screen is a menu: your repositories, open a job by URL, add a key. You can
+have several keys — GitLab and your own instances become separate roots of the
+repository tree, and a job from one instance opens next to a project from another.
 
-Токен спрашивается при первом запуске и сохраняется в `~/.config/ci-shell/config.yml`
-с правами 0600. Нужны области `read_api` и `read_repository`.
+The token is asked for on first run and stored in `~/.config/ci-shell/config.yml` with
+mode 0600. Scopes `read_api` and `read_repository` are required.
 
-Без терминала (пайп, `ssh` без `-t`, запуск из CI) интерфейс не поднимается — работает
-обычный построчный режим.
+With no terminal (a pipe, `ssh` without `-t`, a run from CI) the interface does not
+come up — the plain line-by-line mode works instead.
 
-### Клавиши и команды
+### Keys and commands
 
-Движение по ленте — четыре клавиши, и они значат одно и то же везде.
+Moving around the ribbon is four keys, and they mean the same thing everywhere.
 
-| Клавиша | Движение | | Клавиша | Действие |
+| Key | Movement | | Key | Action |
 |---|---|---|---|---|
-| `↑↓` / `kj` | по текущей колонке | | `s` | шелл в контейнере |
-| `→` / `l` | в колонку справа, глубже | | `R` | повторить шаг |
-| `←` / `h` / `q` | в колонку слева, назад | | `A` | перенести правки |
-| `⏎` | открыть то, на чём стоишь | | `i` | изменить значение переменной |
-| `esc` | в самую левую колонку | | `g` | обновить |
-| клик мышью | то же, что `⏎` на строке | | `/` | фильтр, а в логе — поиск |
-| `?` | помощь со всей раскладкой | | `ctrl+c` | выход |
+| `↑↓` / `kj` | within the current column | | `s` | shell in the container |
+| `→` / `l` | to the column on the right, deeper | | `R` | restart the step |
+| `←` / `h` / `q` | to the column on the left, back | | `A` | carry the fixes over |
+| `⏎` | open whatever you are standing on | | `i` | change a variable's value |
+| `esc` | to the leftmost column | | `g` | refresh |
+| mouse click | same as `⏎` on that row | | `/` | filter, or search inside a log |
+| `?` | help with the full key map | | `ctrl+c` | quit |
 
-`⏎` и `→` расходятся ровно в одном случае: если колонка справа уже открыта, `→`
-переезжает в неё как есть, а `⏎` пересобирает её из того, на чём стоит курсор, —
-поэтому выбрать другую джобу и нажать `⏎` значит открыть шаги именно её.
+`⏎` and `→` differ in exactly one case: when the column on the right is already open,
+`→` moves into it as it is, while `⏎` rebuilds it from whatever the cursor is on — so
+picking a different job and pressing `⏎` opens the steps of that job.
 
-| Команда | Действие | | Команда | Действие |
+| Command | Action | | Command | Action |
 |---|---|---|---|---|
-| `:R` | повторить упавший шаг | | `:image <образ>` | подменить образ |
-| `:rest` | прогнать оставшиеся шаги | | `:log` | полный лог джобы |
-| `:clean` | чистый прогон в свежем контейнере | | `:env` | окружение на весь экран |
-| `:A` | перенести правки | | `:secrets` | файл секретов в редакторе |
-| `:commit` | закоммитить перенесённое | | `:pull` | `git pull --ff-only` |
-| `:!<команда>` | выполнить в контейнере | | `:q` | выход |
+| `:R` | restart the failed step | | `:image <image>` | swap the image |
+| `:rest` | run the remaining steps | | `:log` | the job's full log |
+| `:clean` | clean run in a fresh container | | `:env` | environment full screen |
+| `:A` | carry the fixes over | | `:secrets` | secrets file in your editor |
+| `:commit` | commit what was carried over | | `:pull` | `git pull --ff-only` |
+| `:!<command>` | run inside the container | | `:q` | quit |
 
-### Переменные и лог
+### Variables and the log
 
-Правая колонка экрана джобы переключается между окружением, секретами и логом шага.
-Курсор на переменной и `i` — открывается поле ввода:
+The right column of the job screen switches between environment, secrets and step log.
+Put the cursor on a variable and press `i` — an input field opens:
 
-- **окружение** — значение видно при вводе и живёт только эту сессию;
-- **секреты** — значение скрыто и уходит в файл секретов, чтобы помниться дальше.
+- **environment** — the value is visible while typing and lives for this session only;
+- **secrets** — the value is hidden and goes into the secrets file, to be remembered.
 
-Предопределённые `CI_*` не правятся: это личность самого прогона, и разойтись с ней
-значило бы соврать про «тот же коммит». Файловые переменные тоже — там значение это
-содержимое файла, а не строка.
+Predefined `CI_*` variables are not editable: they are the identity of the run itself,
+and drifting from them would make "the same commit" a lie. Neither are file variables —
+there the value is the contents of a file, not a string.
 
-Всё, что менял за сессию, останется рядом с патчем работы в файле `.edit_vars` —
-списком имён. Значений там нет намеренно: файл можно положить куда угодно.
+Everything you changed during the session is left next to the work patch in an
+`.edit_vars` file, as a list of names. There are deliberately no values in it, so the
+file is safe to put anywhere.
 
-Лог принадлежит шагу, а не джобе: курсор на шаге показывает лог именно этого шага.
-`R` перезапускает шаг и заменяет его лог свежим, а не дописывает снизу. Полноэкранный
-просмотрщик открывается отдельной клавишей — там прокрутка, `/` поиск с подсветкой и
-клавиша, уводящая прямо к месту падения.
+The log belongs to a step, not to the job: the cursor on a step shows that step's log.
+`R` restarts the step and replaces its log with a fresh one instead of appending. The
+full-screen viewer opens with its own key — scrolling, `/` search with highlighting,
+and a key that jumps straight to the point of failure.
 
-## Как это работает
+## How it works
 
-1. **Находим джобу** — по ссылке, по номеру или через браузер групп и проектов.
-2. **Тянем метаданные** через GitLab API: статус, коммит, образ, шаги.
-3. **Собираем окружение**: предопределённые `CI_*`, переменные проекта, группы и
-   пайплайна, файловые переменные материализуются файлами. Маскированные значения
-   API отдаёт — их берём; `masked_and_hidden` не отдаёт никому, для них есть
-   локальный файл секретов.
-4. **Готовим код**: `git worktree` на коммите джобы, если репозиторий рядом; иначе
-   мелкий fetch в зеркало кэша. Токен передаётся git-у через окружение и не попадает
-   ни в `.git/config`, ни в `ps`.
-5. **Воспроизводим**: `docker run` того же образа с примонтированным кодом и
-   собранным окружением, шаги идут по порядку до упавшего, дальше — шелл.
+1. **Find the job** — by URL, by number, or through the browser of groups and projects.
+2. **Pull the metadata** through the GitLab API: status, commit, image, steps.
+3. **Assemble the environment**: predefined `CI_*`, project, group and pipeline
+   variables; file variables are materialised as files. Masked values are handed over
+   by the API, so we take them; `masked_and_hidden` ones are given to nobody, and for
+   those there is a local secrets file.
+4. **Prepare the code**: a `git worktree` at the job's commit if a repository is at
+   hand; otherwise a shallow fetch into a cache mirror. The token reaches git through
+   the environment and lands neither in `.git/config` nor in `ps`.
+5. **Reproduce**: `docker run` of the same image with the code mounted and the
+   environment assembled; steps run in order up to the one that failed, then a shell.
 
-## Когда что-то не так
+## When something is off
 
-Утилита не выходит с ошибкой — она показывает экран с полем ввода или готовой
-командой: нет токена, не хватает области доступа, не запущен Docker, snap-версия
-Docker не видит каталог кэша, не заполнены секреты, нужен SSH-ключ, конфиг
-использует `extends`. В каждом случае названо, что именно сделать, и действие можно
-повторить не выходя.
+The tool does not exit with an error — it shows a screen with an input field or a ready
+command: no token, missing scope, Docker not running, the snap build of Docker unable to
+see the cache directory, secrets not filled in, an SSH key needed, a config using
+`extends`. In every case it names what exactly to do, and the action can be retried
+without leaving.
 
-Если воспроизведение неточное, перед шеллом печатается баннер с перечнем допущений —
-подобранный образ, неподтянутые submodules, невосстановленные артефакты. Мы не
-делаем вид, что всё идеально.
+When reproduction is not exact, a banner is printed before the shell listing the
+assumptions made — the image that was picked, submodules not fetched, artifacts not
+restored. We do not pretend everything is perfect.
 
-## Ограничения, о которых честно
+## Limits, stated honestly
 
-- **shell-executor и самописные ранеры** не воспроизводятся в принципе — утилита так
-  и скажет, а не будет притворяться.
-- **Кэш ранера** живёт на ранере, его нет. Distributed cache в S3 — в планах.
-- **Артефакты предыдущих стадий** пока не восстанавливаются. Решение спроектировано
-  и записано — [docs/artifacts-design.md](docs/artifacts-design.md), — но кода ещё нет.
-- **Тестов в проекте нет.** Это осознанное решение автора, а не забывчивость:
-  проверка идёт чтением кода и живыми прогонами. Знай об этом, если собираешься
-  полагаться на утилиту в чём-то важном.
-- **`include`/`extends`** разворачиваются не полностью — утилита скажет об этом явно
-  и предложит задать образ вручную, а не подсунет неверный конфиг.
-- **Тяжёлый образ** тянется долго при первом запуске, дальше берётся из локального кэша.
-- **GitHub Actions** пока нет. Будет — но только для джоб с `container:`: обычный
-  `runs-on: ubuntu-latest` это виртуалка, а не контейнер, и честно повторить её
-  локально нельзя.
+- **shell-executor and hand-rolled runners** cannot be reproduced at all — the tool
+  says so rather than pretending.
+- **Runner cache** lives on the runner and is not available. Distributed cache in S3
+  is planned.
+- **Artifacts from earlier stages** are not restored yet. The solution is designed and
+  written down — [docs/artifacts-design.md](docs/artifacts-design.md), in Russian — but
+  no code exists for it.
+- **There are no tests in this project.** That is a deliberate decision by the author,
+  not an oversight: verification happens by reading the code and by live runs. Know
+  this before relying on the tool for anything important.
+- **`include`/`extends`** are not fully expanded — the tool says so explicitly and
+  offers to set the image by hand rather than feeding you a wrong config.
+- **A heavy image** takes a while on the first pull, and comes from the local cache
+  afterwards.
+- **GitHub Actions** are not supported yet. They will be — but only for jobs with
+  `container:`: a plain `runs-on: ubuntu-latest` is a virtual machine, not a container,
+  and cannot be honestly reproduced locally.
 
-## Лицензия
+## License
 
-Исходный код открыт для чтения, но это **не** открытая лицензия.
+The source is available to read, but this is **not** an open-source license.
 
-Пользоваться можно свободно — запускать в любых целях, включая рабочие, собирать из
-исходников, читать код и править его под себя. Нельзя распространять: выкладывать
-копии, публиковать форки и производные версии, включать код в другие продукты.
+Using it is free — run it for any purpose including work, build it from source, read
+the code and modify it for yourself. Distribution is not allowed: no publishing copies,
+no forks or derivative versions, no bundling the code into other products.
 
-Полный текст — [LICENSE](LICENSE).
+Full text — [LICENSE](LICENSE).
