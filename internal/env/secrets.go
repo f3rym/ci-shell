@@ -330,6 +330,25 @@ func editableScalar(val, keyNode, parent *yaml.Node) bool {
 	return true
 }
 
+// childIndent — отступ, с которым новая запись встаёт внутрь карты val,
+// принадлежащей ключу keyNode. Если в карте уже есть записи, отступ берётся
+// у ПЕРВОЙ из них — по факту, а не по предположению; и только для пустой
+// карты берётся отступ ключа плюс два.
+//
+// Прибавлять два всегда было бы верно ровно до тех пор, пока файл целиком
+// пишет сама утилита. Человек, переформатировавший свой файл секретов на
+// отступ в четыре пробела (обычная настройка YAML-редакторов), получал
+// новую запись на своём уровне вложенности: при следующем разборе сосед,
+// вложенный глубже, становился ДОЧЕРНИМ узлом только что вставленной
+// записи, и чужой проект молча переезжал внутрь нового, переставая
+// находиться по своему ключу (обзор v1.0.0, WR-2).
+func childIndent(keyNode, val *yaml.Node) int {
+	if val != nil && len(val.Content) > 0 {
+		return val.Content[0].Column - 1
+	}
+	return keyNode.Column - 1 + 2
+}
+
 // insertLines вставляет newLines в срез lines перед позицией idx (0-индекс).
 // Позиция idx = yaml.Node.Line совпадает с «сразу после строки с этим
 // номером» без дополнительного сдвига, потому что Line 1-индексная, а срез
@@ -511,10 +530,20 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 					path, projectsKeyNode.Line, ErrSecretNotEditable,
 				)
 			}
-			indent := projectsKeyNode.Column - 1
+			keyIndent := childIndent(projectsKeyNode, projectsVal)
+			// Отступ переменной берётся у переменных СОСЕДНЕГО проекта, а
+			// не прибавлением ещё двух: шаг вложенности в файле человека
+			// может быть свой, и он обязан быть одинаковым на обоих
+			// уровнях сразу.
+			varIndent := keyIndent + 2
+			if len(projectsVal.Content) > 1 {
+				if sib := projectsVal.Content[1]; sib.Kind == yaml.MappingNode && len(sib.Content) > 0 {
+					varIndent = sib.Content[0].Column - 1
+				}
+			}
 			lines = insertLines(lines, projectsKeyNode.Line,
-				strings.Repeat(" ", indent+2)+projectKeyScalar+":",
-				strings.Repeat(" ", indent+4)+key+": "+scalar,
+				strings.Repeat(" ", keyIndent)+projectKeyScalar+":",
+				strings.Repeat(" ", varIndent)+key+": "+scalar,
 			)
 
 		default:
@@ -533,9 +562,8 @@ func SaveSecret(host, projectPath, key, value string) (path string, err error) {
 						projectKey, path, projKeyNode.Line, ErrSecretNotEditable,
 					)
 				}
-				indent := projKeyNode.Column - 1
 				lines = insertLines(lines, projKeyNode.Line,
-					strings.Repeat(" ", indent+2)+key+": "+scalar,
+					strings.Repeat(" ", childIndent(projKeyNode, projVal))+key+": "+scalar,
 				)
 
 			default:
